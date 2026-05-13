@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# aidock - wrapper for the Claude Code Docker sandbox.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." &>/dev/null && pwd)"
+
+export HOST_UID="$(id -u)"
+export HOST_GID="$(id -g)"
+
+compose() {
+    docker compose -f "${REPO_ROOT}/compose.yaml" "$@"
+}
+
+guard_workspace() {
+    local pwd_abs home_abs
+    pwd_abs="$(realpath "$PWD")"
+    home_abs="$(realpath "${HOME:-/nonexistent}" 2>/dev/null || echo "")"
+
+    if [[ "$pwd_abs" == "/" ]]; then
+        echo "aidock: refusing to mount / as /workspace" >&2
+        exit 2
+    fi
+    if [[ -n "$home_abs" && "$pwd_abs" == "$home_abs" ]]; then
+        echo "aidock: refusing to mount \$HOME as /workspace. cd into a project subdirectory first." >&2
+        exit 2
+    fi
+}
+
+cmd_build() {
+    compose build "$@"
+}
+
+cmd_login() {
+    guard_workspace
+    export HOST_WORKSPACE="$PWD"
+    export AIDOCK_PROFILE="login"
+    compose run --rm claude claude /login
+}
+
+cmd_logout() {
+    compose down -v --remove-orphans || true
+    docker volume rm aidock_claude-home 2>/dev/null || true
+    echo "aidock: credential volume removed"
+}
+
+cmd_run() {
+    guard_workspace
+    export HOST_WORKSPACE="$PWD"
+    if [[ $# -gt 0 ]]; then
+        compose run --rm claude "$@"
+    else
+        compose run --rm claude
+    fi
+}
+
+cmd_shell() {
+    guard_workspace
+    export HOST_WORKSPACE="$PWD"
+    compose run --rm claude bash
+}
+
+cmd_firewall_refresh() {
+    local cid
+    cid="$(compose ps -q claude || true)"
+    if [[ -z "$cid" ]]; then
+        echo "aidock: no running claude container" >&2
+        exit 1
+    fi
+    docker exec -u root "$cid" /usr/local/bin/init-firewall.sh
+}
+
+usage() {
+    cat <<'USAGE'
+Usage: aidock <command> [args...]
+
+Commands:
+  build              Build the sandbox image with the current host UID/GID.
+  login              Run `claude /login` once to seed OAuth credentials.
+  run [args...]      Start Claude Code (default). Mounts $PWD as /workspace.
+  shell              Open a bash shell inside the sandbox (debugging).
+  firewall-refresh   Re-run the firewall init in the running container
+                     (use after DNS-based IPs rotate).
+  logout             Remove the persisted credential volume.
+  help               Show this message.
+USAGE
+}
+
+main() {
+    local cmd="${1:-run}"
+    [[ $# -gt 0 ]] && shift || true
+
+    case "$cmd" in
+        build)             cmd_build "$@";;
+        login)             cmd_login "$@";;
+        logout)            cmd_logout "$@";;
+        run)               cmd_run "$@";;
+        shell|bash)        cmd_shell "$@";;
+        firewall-refresh)  cmd_firewall_refresh "$@";;
+        help|-h|--help)    usage;;
+        *)                 echo "aidock: unknown command '$cmd'" >&2; usage; exit 1;;
+    esac
+}
+
+main "$@"

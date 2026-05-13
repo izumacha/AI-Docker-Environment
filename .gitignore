@@ -1,0 +1,7 @@
+.env
+.env.*
+*.local
+compose.override.yaml
+compose.override.yml
+*.log
+.DS_Store

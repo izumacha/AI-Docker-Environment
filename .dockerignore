@@ -1,0 +1,14 @@
+.git
+.gitignore
+.dockerignore
+README.md
+compose.yaml
+bin/
+node_modules/
+**/node_modules
+.env
+.env.*
+*.log
+dist/
+build/
+.DS_Store
