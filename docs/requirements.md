@@ -118,7 +118,7 @@
 | --- | --- | --- |
 | SEC-1 | `cap_drop: ALL` を維持。追加 cap は `NET_ADMIN`/`NET_RAW` のみ（ファイアウォール用）。 | `compose.yaml` |
 | SEC-2 | `security_opt: no-new-privileges:true` を維持。 | `compose.yaml` |
-| SEC-3 | `read_only: true` を維持。書き込み領域は明示的な `tmpfs` と `claude-home` ボリュームのみ。 | `compose.yaml` |
+| SEC-3 | `read_only: true` を維持し、書き込み可能領域は `/workspace:rw` の明示 bind mount、必要最小限の `tmpfs`、および `claude-home` ボリュームに限定する。 | `compose.yaml` |
 | SEC-4 | `mem_limit`・`pids_limit`・`cpus` の上限を撤廃しない（既定: 4G / 1024 / 2.0）。 | `compose.yaml` |
 | SEC-5 | `iptables -P OUTPUT DROP`（既定拒否）と終端の検証プローブを維持。 | `init-firewall.sh` |
 | SEC-6 | sudo の許可対象は `/usr/local/bin/init-firewall.sh` のみ NOPASSWD。他に NOPASSWD を追加しない。 | `Dockerfile` |
@@ -141,7 +141,7 @@
 ### NFR-4: 監査性
 - すべての shell スクリプトは Bash で書き、先頭に `set -euo pipefail` を付ける。
 - インデントは 4 スペース、タブ禁止。
-- 重要な分岐・例外には日本語コメントで意図を残す。
+- 重要な分岐・例外には意図が分かるコメントを残す（言語は問わない。既存実装は英語コメント中心）。
 
 ### NFR-5: 再現性
 - `Dockerfile` の `ARG CLAUDE_CODE_VERSION` でバージョンを固定する。
@@ -176,9 +176,9 @@
 - `cap_add` に列挙されていない capability を要求する操作（例: マウント追加）は失敗する。
 
 ### AC-4: ネットワーク
-- `curl -fsS https://example.com` が失敗する。
-- `curl -fsS https://api.anthropic.com` で TCP/TLS が成立する。
-- `AIDOCK_PROFILE=login` のときに限り `curl -fsS https://claude.ai` の TCP/TLS が成立する。
+- `curl -fsS --max-time 3 https://example.com` が失敗する（接続できない、または timeout）。
+- `curl -sS --max-time 8 -o /dev/null -w '%{http_code}\n' https://api.anthropic.com | grep -qE '^[0-9]{3}$'` が成功する（TCP/TLS が成立し HTTP status が返る。4xx も成功扱い）。
+- `AIDOCK_PROFILE=login` のときに限り、同様の手順で `https://claude.ai` から HTTP status が返ること。
 
 ### AC-5: 永続化
 - `aidock login` 実行後、コンテナを再作成しても OAuth セッションが保持される。
@@ -207,3 +207,4 @@
 | 日付 | 改訂内容 | 担当 |
 | --- | --- | --- |
 | 2026-05-19 | 初版作成。既存実装をベースに要件を抽出。 | Claude Code |
+| 2026-05-19 | レビュー指摘反映: AC-4 の curl から `-f` を除去し status code 検査に統一 / SEC-3 に `/workspace:rw` を明示 / NFR-4 のコメント言語要件を緩和。 | Claude Code |

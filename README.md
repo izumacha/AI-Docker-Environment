@@ -74,6 +74,8 @@ cd ~/some-project
 │   └── entrypoint.sh       # firewall init -> exec
 ├── compose.yaml            # cap_drop / read_only / tmpfs / 制限
 ├── bin/aidock              # ラッパー CLI
+├── docs/
+│   └── requirements.md     # 要件定義書（正本 / Source of Truth）
 ├── .dockerignore
 └── .gitignore
 ```

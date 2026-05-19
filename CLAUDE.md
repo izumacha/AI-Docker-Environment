@@ -29,6 +29,8 @@
 │   ├── init-firewall.sh    # iptables + ipset の許可リスト構築
 │   └── entrypoint.sh       # firewall 初期化 → exec
 ├── compose.yaml            # サービス定義 + セキュリティオプション
+├── docs/
+│   └── requirements.md     # 要件定義書（正本 / Source of Truth）
 ├── README.md               # 日本語の詳細ドキュメント
 ├── .dockerignore / .gitignore
 └── CLAUDE.md               # このファイル
