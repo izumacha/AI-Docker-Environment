@@ -68,9 +68,6 @@ cd ~/some-project
 
 ```
 .
-├── .github/
-│   └── workflows/
-│       └── codex-review.yml  # codex 自動レビュー依頼（@codex review コメント投稿）
 ├── docker/
 │   ├── Dockerfile          # node:22-slim ベース、agent ユーザー
 │   ├── init-firewall.sh    # default-deny + ipset allowlist
