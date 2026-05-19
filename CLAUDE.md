@@ -2,6 +2,11 @@
 
 このファイルは、本リポジトリで作業する AI アシスタント（Claude Code など）向けのガイドです。詳細なユーザー向け説明は `README.md` を参照してください。
 
+> **正本（Source of Truth）は `docs/requirements.md`**。
+> 実装・ドキュメント・新機能の提案はすべて要件定義書に従うこと。
+> 要件と実装が衝突したら、**先に要件定義書を改訂してから実装を変更する**。
+> 変更時は同 PR 内で `docs/requirements.md` の §3 / §4 / §6 を更新する。
+
 ## プロジェクト概要
 
 `AI-Docker-Environment` は Linux ホスト上で **Claude Code (`@anthropic-ai/claude-code`)** を安全に実行するための Docker サンドボックスです。Anthropic 公式 devcontainer のセキュリティモデルを踏襲し、次の防御層を組み合わせています。

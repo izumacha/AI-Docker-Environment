@@ -1,5 +1,8 @@
 # AI-Docker-Environment
 
+> 本リポジトリの **要件定義書（正本）** は [`docs/requirements.md`](docs/requirements.md)。
+> 実装・ドキュメントは必ず要件定義に従うこと。要件を変える際は先に同書を改訂する。
+
 Linux 上で **Claude Code (`@anthropic-ai/claude-code`)** をサンドボックス化した
 Docker コンテナで動かすための一式。MulmoClaude のワークスペース分離と、
 Anthropic 公式 devcontainer の `iptables`+`ipset` ベースの default-deny
