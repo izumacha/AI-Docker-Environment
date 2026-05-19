@@ -41,7 +41,7 @@
 - カスタム seccomp / AppArmor プロファイル、user namespace remap。
 - マルチユーザー / マルチプロジェクト同時実行のためのオーケストレーション。
 - Claude Code 以外の AI CLI（Gemini CLI 等）のサポート。
-- CI/CD パイプライン、pre-commit フック、テストランナー。
+- **codex 自動レビュー以外の** CI/CD パイプライン、pre-commit フック、テストランナー（FR-7 参照）。
 
 ---
 
@@ -95,14 +95,10 @@
 - FR-4.2: loopback、`ESTABLISHED,RELATED`、DNS(53/udp,tcp) のみ恒久許可。
 - FR-4.3: `CORE_HOSTS` 全件を DNS 解決し ipset `allowed-hosts` に投入。DNS 解決に失敗したホストは **warn ログを残してスキップ**し、初期化は継続する。
 - FR-4.4: `AIDOCK_PROFILE=login` の場合のみ `LOGIN_EXTRA_HOSTS` も投入。
-- FR-4.5: GitHub `https://api.github.com/meta` から CIDR を取得し ipset へ追加。取得した CIDR は次の **3 条件すべて** を満たす場合にのみ追加する（実装上の検証は SEC-12 参照）。
-  - (a) 正規表現 `^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$` に一致。
-  - (b) 各 octet が `0`–`255` の範囲。
-  - (c) prefix が `0`–`32` の範囲。
-  - meta 取得自体が失敗した場合は **warn ログのみで継続**し、ホスト名解決で得た IP の範囲に縮退する。
+- FR-4.5: GitHub `https://api.github.com/meta` から CIDR を取得し ipset へ追加。取得した CIDR は SEC-12.1 / SEC-12.2 の検証を通過した場合にのみ追加する。**現状実装は SEC-12.1（正規表現）のみ通過確認しており、SEC-12.2（octet/prefix 範囲）は要件先行で未実装** — follow-up PR で実装する。meta 取得自体が失敗した場合は **warn ログのみで継続**し、ホスト名解決で得た IP の範囲に縮退する。
 - FR-4.6: 最後に検証プローブを実行する（AC-4 と同表現で揃える）。
   - `curl -fsS --max-time 3 https://example.com` が **non-zero exit** であること（接続拒否・タイムアウト・名前解決失敗のいずれも成功扱い）。到達した場合は exit 1。
-  - `curl -sS --max-time 8 -o /dev/null -w '%{http_code}\n' https://api.anthropic.com` の出力が **3 桁数値**（`^[0-9]{3}$`）であること。4xx/5xx も成功扱い。
+  - `curl -sS --max-time 8 -o /dev/null -w '%{http_code}\n' https://api.anthropic.com` の出力が `^[1-9][0-9]{2}$` に一致すること。`000`（curl の transport failure 印）は不合格扱い、4xx/5xx は合格。
 - FR-4.7: FR-4.3 / FR-4.5 のホスト解決と CIDR 取得は **best-effort**。個別ホストの失敗で初期化を中止しない。**終端プローブ（FR-4.6）が失敗した場合のみ `exit 1`** とする。
 
 ### FR-5: ログ出力
@@ -112,6 +108,11 @@
 ### FR-6: ドキュメント整合
 - `README.md` は利用者向け、`CLAUDE.md` は AI 向け、本書は要件の正本。
 - 機能を追加・削除・変更したら、**同じ PR 内で関連 doc を更新**する。
+
+### FR-7: codex 自動レビュー
+- PR の `opened` / `reopened` / `synchronize` / `ready_for_review` イベント時に、`.github/workflows/codex-review.yml` が **`@codex review` コメントを自動投稿** する。draft PR でも発火させ、`chatgpt-codex-connector[bot]` のレビューを開始する。
+- Claude による PR 作成時は `CLAUDE.md` のルールに従い、ワークフローと併走して同コメントを投稿する。二重起動は codex 側 dedup を前提とする。
+- ワークフローの権限は `pull-requests: write` のみ。追加 secret は不要。
 
 ---
 
@@ -130,11 +131,12 @@
 | SEC-5 | `iptables -P OUTPUT DROP`（既定拒否）と終端の検証プローブを維持。 | `init-firewall.sh` |
 | SEC-6 | sudo の許可対象は `/usr/local/bin/init-firewall.sh` のみ NOPASSWD。他に NOPASSWD を追加しない。 | `Dockerfile` |
 | SEC-7 | コンテナの最終 `USER` は `agent`。root で実行しない。 | `Dockerfile` |
-| SEC-8 | ホストの資格情報・設定ファイルを bind mount しない。最低限、以下を **個別に列挙して拒否**する: `~/.ssh`、`~/.aws`、`~/.gcloud`、`~/.azure`、`~/.gitconfig`、`~/.config/git`、`~/.config/gh`、`~/.netrc`、`~/.kube`（kubeconfig）、`~/.docker`、`/var/run/docker.sock`、`~/.npmrc`、`~/.pypirc`。これら以外の資格情報パスも追加禁止（「等」で包含する）。 | `compose.yaml` |
+| SEC-8 | ホストの資格情報・設定ファイルがコンテナへ流出することを防ぐ。**一次防御**は (a) `compose.yaml` が `$PWD` と `claude-home` 以外を bind mount しないこと、(b) `bin/aidock` の `guard_workspace()` が `$HOME` と `/` を起動カレントとして拒否すること。**運用上の禁止事項**として、次のパス配下を `aidock` の起動カレントディレクトリに設定しない: `~/.ssh`、`~/.aws`、`~/.gcloud`、`~/.azure`、`~/.gitconfig`、`~/.config/git`、`~/.config/gh`、`~/.netrc`、`~/.kube`（kubeconfig）、`~/.docker`、`/var/run/docker.sock`、`~/.npmrc`、`~/.pypirc`。これら各パスの **機械的な拒否（`guard_workspace()` 拡張）は要件先行・follow-up PR で実装**する。現状ではユーザー側オペレーションで保証する。 | `compose.yaml` / `bin/aidock` |
 | SEC-9 | `guard_workspace()` の `/` および `$HOME` 拒否を撤去・回避しない。 | `bin/aidock` |
 | SEC-10 | OAuth 資格情報はイメージ層・ホスト FS に書き出さない（名前付きボリュームのみ）。 | `compose.yaml` |
 | SEC-11 | allowlist に新規ホストを足すときは PR で必要性を述べる。テレメトリ系（statsig / sentry）は **削除可** だが追加は最小限に。 | `init-firewall.sh` |
-| SEC-12 | CIDR を ipset に追加する前に **3 条件すべて** で検証する: (a) 正規表現 `^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$` 一致、(b) 各 octet が `0`–`255`、(c) prefix が `0`–`32`。形式的に正規表現を通っても範囲外の値は除外する。任意文字列を ipset に流さない。 | `init-firewall.sh` |
+| SEC-12.1 | CIDR を ipset に追加する前に正規表現 `^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$` の一致を検証する。**実装済み**（`init-firewall.sh:83`）。 | `init-firewall.sh` |
+| SEC-12.2 | 各 octet が `0`–`255`、prefix が `0`–`32` の範囲であることを併せて検証する。**要件先行・未実装**。実装は follow-up PR で対応。SEC-12.2 が未実装である間、形式的に正規表現を通る `999.999.999.999/33` 等が ipset に追加されうる **残存リスク** が存在する。 | `init-firewall.sh` |
 | SEC-13 | `AIDOCK_SKIP_FIREWALL=1` の常用を禁止する。**デバッグ用バックドア**であり、CI および共有ホストでは設定しない。一時的に使用した場合はその都度 `unset` する。 | `entrypoint.sh` |
 | SEC-14 | `bin/aidock run [args...]` の追加引数は `compose run --rm claude` に **位置引数として無変換で渡される**。コマンド置換（`$()`・バッククォート）等を含めない責任は呼び出し側が負う。ラッパー側で eval/sh -c 等の二次評価を導入してはならない。 | `bin/aidock` |
 
@@ -164,6 +166,7 @@
 - ホストの UID/GID と `agent` ユーザの UID/GID が一致する（`bin/aidock` が自動注入）。
 - Docker デーモンに対して `cap_add: NET_ADMIN, NET_RAW` を許可している。
 - OAuth ログインに使うブラウザはホスト側で開く（コンテナ内にブラウザは無い）。
+- リポジトリ単位で `chatgpt-codex-connector[bot]`（codex 自動レビュー）が OpenAI 側で有効化済み。トリガは `.github/workflows/codex-review.yml` と Claude からの手動コメント。
 
 ---
 
@@ -186,8 +189,8 @@
 
 ### AC-4: ネットワーク
 - `curl -fsS --max-time 3 https://example.com` が **non-zero exit** であること（接続拒否・タイムアウト・名前解決失敗のいずれも成功扱い）。
-- `curl -sS --max-time 8 -o /dev/null -w '%{http_code}\n' https://api.anthropic.com | grep -qE '^[0-9]{3}$'` が **exit 0** であること（4xx/5xx 含めて HTTP status が返れば合格）。
-- `AIDOCK_PROFILE=login` のときに限り、同様の手順で `https://claude.ai` からも HTTP status が返ること。
+- `curl -sS --max-time 8 -o /dev/null -w '%{http_code}\n' https://api.anthropic.com | grep -qE '^[1-9][0-9]{2}$'` が **exit 0** であること。`000` は curl の transport failure 印（DNS / 接続 / TLS 失敗時の sentinel）であり **不合格扱い**。4xx/5xx は合格。
+- `AIDOCK_PROFILE=login` のときに限り、同様の手順で `https://claude.ai` からも 100–599 のステータスが返ること。
 
 ### AC-5: 永続化
 - `aidock login` 実行後、コンテナを再作成しても OAuth セッションが保持される。
@@ -197,7 +200,7 @@
 - 機能変更時、本書 §3 / §4 と `README.md` の表 / `CLAUDE.md` のコマンド表が一致している。
 
 ### AC-7: 資格情報ボリューム所有権
-- `docker run --rm -v aidock_claude-home:/v alpine stat -c '%u:%g' /v` の出力が **`HOST_UID:HOST_GID`** と一致する（FR-3.3）。一致しない場合は `aidock logout` → `aidock login` で再構築する。
+- `docker compose -f compose.yaml run --rm --no-deps --entrypoint sh claude -c 'stat -c "%u:%g" /home/agent/.claude'` の出力が **`$(id -u):$(id -g)`** と一致する（FR-3.3）。compose 経由で実行するため、Compose プロジェクト名（ボリューム名の prefix）に依存せず判定できる。一致しない場合は `aidock logout` → `aidock login` で再構築する。
 
 ---
 
@@ -223,3 +226,4 @@
 | 2026-05-19 | 初版作成。既存実装をベースに要件を抽出。 | Claude Code |
 | 2026-05-19 | レビュー指摘反映: AC-4 の curl から `-f` を除去し status code 検査に統一 / SEC-3 に `/workspace:rw` を明示 / NFR-4 のコメント言語要件を緩和。 | Claude Code |
 | 2026-05-19 | skill 観点（review / security-review / simplify）の再監査を反映: SEC-13/14、FR-3.3、FR-4.0/4.7、NFR-5.1/5.2、AC-7 を追加。SEC-3/8/12、FR-1.3/4.3/4.5/4.6、AC-4 を改訂。CIDR 検証強化は要件先行（実装は後続 PR）。 | Claude Code |
+| 2026-05-19 | codex 自動レビュー設定 + codex P1×3 / P2×1 反映: FR-7 と §5 制約追記、§1.3 スコープ修正、`.github/workflows/codex-review.yml` 新設、`CLAUDE.md` Git ワークフロー節更新、`README.md` ファイル構成更新。AC-4 / FR-4.6 で `^[1-9][0-9]{2}$` により curl `000` を拒否、SEC-8 を運用ハイジーンに降格、SEC-12 を 12.1（実装済み）/ 12.2（要件先行）に分割、AC-7 を compose 経由に変更。SEC-8 機械化と SEC-12.2 実装は follow-up PR。 | Claude Code |
