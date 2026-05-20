@@ -72,7 +72,7 @@
 | FR-1.3 | `run [args...]` / 引数なし | `$PWD` を `/workspace` に bind mount して Claude Code を起動。`run` は既定サブコマンド。追加 `args` は `compose run --rm claude` に **位置引数として無変換で渡される**（SEC-14 参照）。 |
 | FR-1.4 | `shell` / `bash` | 同マウントで bash を起動。 |
 | FR-1.5 | `firewall-refresh` | 稼働中コンテナ内で `init-firewall.sh` を再実行（DNS 再解決）。 |
-| FR-1.6 | `logout` | `compose down -v` でサービスと匿名/名前付きボリューム（`claude-home`）を破棄し、OAuth 資格情報を失わせる。**現状実装は補強として `docker volume rm aidock_claude-home` も実行する**（Compose プロジェクト名が `aidock` 以外では no-op になる既知の制約。follow-up PR で `compose down -v` のみに集約予定）。 |
+| FR-1.6 | `logout` | `compose down -v` でサービスと名前付きボリューム（`claude-home`）を破棄し、OAuth 資格情報を失わせる。**現状実装は補強として `docker volume rm aidock_claude-home` も実行する**。Compose プロジェクト名が `aidock` 以外では当該名のボリュームは別文脈（他チェックアウト・別プロジェクト等で作られた **同名グローバルボリューム**）を指しうるため、**意図せず他プロジェクトの資格情報を削除する破壊的副作用**がある（既知の defect。follow-up PR で `compose down -v` のみに集約予定）。 |
 | FR-1.7 | `help` / `-h` / `--help` | `usage` を表示。 |
 | FR-1.8 | 未知のサブコマンド | エラーメッセージを stderr に出力し exit code 1。 |
 
@@ -86,7 +86,7 @@
 - `claude-home` という名前付きボリュームを `/home/agent/.claude` にマウントする。
 - FR-3.1: 資格情報はホスト FS にも Docker イメージ層にも書き出さない。
 - FR-3.2: `logout` で同ボリュームを破棄できる。
-- FR-3.3: ボリューム配下のファイルは `build` 時の `HOST_UID:HOST_GID` で所有される。ホストの UID/GID が変わった場合は `aidock logout` で破棄し再 `login` する。**マルチユーザー共用ホストでは利用終了時に必ず `aidock logout` を実行する**（資格情報がボリュームに残るため）。
+- FR-3.3: ボリューム配下のファイルは `build` 時の `HOST_UID:HOST_GID` で所有される。`agent` ユーザ自体も `Dockerfile` で同 UID/GID を持って生成されるため、ホストの UID/GID が変わった場合は **`aidock build` でイメージを再構築 → `aidock logout` でボリュームを破棄 → `aidock login`** の順で実施する（イメージを再ビルドせずにボリュームのみ作り直しても、`HOME=/home/agent` の所有者は古い UID/GID のままで AC-7 が失敗し続ける）。**マルチユーザー共用ホストでは利用終了時に必ず `aidock logout` を実行する**（資格情報がボリュームに残るため）。
 
 ### FR-4: ファイアウォール初期化
 - コンテナ起動時、`AIDOCK_SKIP_FIREWALL=1` でない限り `init-firewall.sh` を実行する。
@@ -197,7 +197,7 @@
 
 ### AC-5: 永続化
 - `aidock login` 実行後、コンテナを再作成しても OAuth セッションが保持される。
-- `aidock logout` 実行後、再度 `aidock` 起動時に未ログイン状態になる。
+- `aidock logout` が **正常に完了した場合**（`compose down -v` および `docker volume rm` の少なくとも一方が実際にボリュームを破棄した場合）、再度 `aidock` 起動時に未ログイン状態になる。**現状実装は両コマンドに `|| true` が付いており Docker 不在時にも success メッセージを出すため、終了コードや出力で破棄成功を保証できない**（follow-up PR で `bin/aidock logout` の失敗を非ゼロ exit で伝播するよう修正予定）。検証は `docker volume ls` で当該ボリュームが消えていることで補強する。
 
 ### AC-6: ドキュメント
 - 機能変更時、本書 §3 / §4 と `README.md` の表 / `CLAUDE.md` のコマンド表が一致している。
@@ -231,4 +231,5 @@
 | 2026-05-19 | skill 観点（review / security-review / simplify）の再監査を反映: SEC-13/14、FR-3.3、FR-4.0/4.7、NFR-5.1/5.2、AC-7 を追加。SEC-3/8/12、FR-1.3/4.3/4.5/4.6、AC-4 を改訂。CIDR 検証強化は要件先行（実装は後続 PR）。 | Claude Code |
 | 2026-05-19 | codex 自動レビュー設定 + codex P1×3 / P2×1 反映: FR-7 と §5 制約追記、§1.3 スコープ修正、`.github/workflows/codex-review.yml` 新設、`CLAUDE.md` Git ワークフロー節更新、`README.md` ファイル構成更新。AC-4 / FR-4.6 で `^[1-9][0-9]{2}$` により curl `000` を拒否、SEC-8 を運用ハイジーンに降格、SEC-12 を 12.1（実装済み）/ 12.2（要件先行）に分割、AC-7 を compose 経由に変更。SEC-8 機械化と SEC-12.2 実装は follow-up PR。 | Claude Code |
 | 2026-05-19 | izumacha レビュー反映: `README.md` と `CLAUDE.md` の「一切マウントしない」表現を SEC-8 と整合させ「追加 bind mount しない / 機密ディレクトリ配下では起動しない」に修正。脅威モデル表も同様に更新。 | Claude Code |
+| 2026-05-20 | codex P2×3 反映: FR-1.6 に同名グローバルボリューム削除の破壊的副作用を明記、FR-3.3 の復旧手順に `aidock build` 再ビルドを追加、AC-5 を best-effort に緩和（`bin/aidock logout` の `\|\| true` による失敗隠蔽を明示）。実装側強化（`bin/aidock` の終了コード伝播・`docker volume rm` 撤去）は follow-up PR。 | Claude Code |
 | 2026-05-19 | `.github/workflows/codex-review.yml` 撤去（`github-actions[bot]` 名義の `@codex review` は codex に拒否されるため）。FR-7 を実態に合わせ、ready 化または Codex 接続済みアカウントからの手動コメントが必要であることを明記。codex の追加指摘を反映: FR-4.6/AC-4 に `init-firewall.sh:105` が未対応であることを注記、FR-1.6 を Compose プロジェクト名非依存の表現に書き換え。CLAUDE.md / README.md も同期。 | Claude Code |
