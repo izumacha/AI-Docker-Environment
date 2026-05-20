@@ -5,7 +5,7 @@
 変更が必要な場合は **先に本書を改訂し、PR 内で根拠を述べた上で実装に着手する**。
 
 - **対象バージョン**: v1 系（Linux 専用、Claude Code 公式 CLI を Docker でサンドボックス化）
-- **最終更新**: 2026-05-19
+- **最終更新**: 2026-05-20
 - **位置づけ**: 要件 ＞ 設計 ＞ 実装。本書未記載の事項は CLAUDE.md / README.md の記述に従う。
 
 ---
@@ -230,7 +230,8 @@
 | 2026-05-19 | レビュー指摘反映: AC-4 の curl から `-f` を除去し status code 検査に統一 / SEC-3 に `/workspace:rw` を明示 / NFR-4 のコメント言語要件を緩和。 | Claude Code |
 | 2026-05-19 | skill 観点（review / security-review / simplify）の再監査を反映: SEC-13/14、FR-3.3、FR-4.0/4.7、NFR-5.1/5.2、AC-7 を追加。SEC-3/8/12、FR-1.3/4.3/4.5/4.6、AC-4 を改訂。CIDR 検証強化は要件先行（実装は後続 PR）。 | Claude Code |
 | 2026-05-19 | codex 自動レビュー設定 + codex P1×3 / P2×1 反映: FR-7 と §5 制約追記、§1.3 スコープ修正、`.github/workflows/codex-review.yml` 新設、`CLAUDE.md` Git ワークフロー節更新、`README.md` ファイル構成更新。AC-4 / FR-4.6 で `^[1-9][0-9]{2}$` により curl `000` を拒否、SEC-8 を運用ハイジーンに降格、SEC-12 を 12.1（実装済み）/ 12.2（要件先行）に分割、AC-7 を compose 経由に変更。SEC-8 機械化と SEC-12.2 実装は follow-up PR。 | Claude Code |
+| 2026-05-19 | `.github/workflows/codex-review.yml` 撤去（`github-actions[bot]` 名義の `@codex review` は codex に拒否されるため）。FR-7 を実態に合わせ、ready 化または Codex 接続済みアカウントからの手動コメントが必要であることを明記。codex の追加指摘を反映: FR-4.6/AC-4 に `init-firewall.sh:105` が未対応であることを注記、FR-1.6 を Compose プロジェクト名非依存の表現に書き換え。CLAUDE.md / README.md も同期。 | Claude Code |
 | 2026-05-19 | izumacha レビュー反映: `README.md` と `CLAUDE.md` の「一切マウントしない」表現を SEC-8 と整合させ「追加 bind mount しない / 機密ディレクトリ配下では起動しない」に修正。脅威モデル表も同様に更新。 | Claude Code |
 | 2026-05-20 | codex P2×3 反映: FR-1.6 に同名グローバルボリューム削除の破壊的副作用を明記、FR-3.3 の復旧手順に `aidock build` 再ビルドを追加、AC-5 を best-effort に緩和（`bin/aidock logout` の `\|\| true` による失敗隠蔽を明示）。実装側強化（`bin/aidock` の終了コード伝播・`docker volume rm` 撤去）は follow-up PR。 | Claude Code |
 | 2026-05-20 | codex 追加 P2×2 反映: §1.1 目的の「一切コンテナへ渡さない」を SEC-8 と整合する文言に緩和、AC-7 の復旧手順に `aidock build` を追加し FR-3.3 と整合。 | Claude Code |
-| 2026-05-19 | `.github/workflows/codex-review.yml` 撤去（`github-actions[bot]` 名義の `@codex review` は codex に拒否されるため）。FR-7 を実態に合わせ、ready 化または Codex 接続済みアカウントからの手動コメントが必要であることを明記。codex の追加指摘を反映: FR-4.6/AC-4 に `init-firewall.sh:105` が未対応であることを注記、FR-1.6 を Compose プロジェクト名非依存の表現に書き換え。CLAUDE.md / README.md も同期。 | Claude Code |
+| 2026-05-20 | セルフレビュー反映: §8 改訂履歴の凡例違反を修正（workflow 撤去エントリを正しい時系列位置へ移動）、`最終更新` ヘッダを 2026-05-20 に同期。 | Claude Code |
