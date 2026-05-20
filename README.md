@@ -10,7 +10,9 @@ allowlist を組み合わせている。
 
 ユーザー自身の Claude アカウントで OAuth ログインし、その認証情報は
 コンテナ内の名前付きボリュームに閉じる。ホストの `~/.ssh` や クラウド SDK の
-資格情報は一切マウントしない。
+資格情報は明示的に追加 bind mount しない。ただし `$PWD` は `/workspace:rw` として
+渡されるため、`~/.ssh`、`~/.aws`、`~/.config/gh`、`~/.kube` 等の機密ディレクトリ
+配下では `aidock` を起動しないこと（機械的拒否は follow-up PR で対応予定）。
 
 ## クイックスタート
 
@@ -42,7 +44,7 @@ cd ~/some-project
 | リスク | 対策 |
 | --- | --- |
 | ホスト FS の破壊 | bind mount は `$PWD` のみ。`read_only` rootfs + `tmpfs` |
-| ホスト資格情報の流出 | `~/.ssh` / `~/.aws` / `gcloud` / `~/.gitconfig` を一切マウントしない |
+| ホスト資格情報の流出 | `~/.ssh` / `~/.aws` / `gcloud` / `~/.gitconfig` 等を追加 bind mount しない。`$HOME` と `/` は起動拒否。ただし機密ディレクトリ配下からの起動は禁止（機械的拒否は follow-up） |
 | 任意外部送信 | iptables 既定 DROP + ipset allowlist (api.anthropic.com, npm, GitHub等のみ) |
 | 暴走プロセス | `mem_limit=4g`, `pids_limit=1024`, `cpus=2.0`, `tini` で reap |
 | 権限昇格 | `cap_drop: ALL` → `NET_ADMIN`/`NET_RAW` のみ復帰、`no-new-privileges`、scoped sudo (firewall script 1本のみ) |
