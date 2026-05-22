@@ -40,8 +40,7 @@ cmd_login() {
 }
 
 cmd_logout() {
-    compose down -v --remove-orphans || true
-    docker volume rm aidock_claude-home 2>/dev/null || true
+    compose down -v --remove-orphans
     echo "aidock: credential volume removed"
 }
 
