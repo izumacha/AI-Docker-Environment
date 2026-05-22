@@ -5,7 +5,7 @@
 変更が必要な場合は **先に本書を改訂し、PR 内で根拠を述べた上で実装に着手する**。
 
 - **対象バージョン**: v1 系（Linux 専用、Claude Code 公式 CLI を Docker でサンドボックス化）
-- **最終更新**: 2026-05-20
+- **最終更新**: 2026-05-23
 - **位置づけ**: 要件 ＞ 設計 ＞ 実装。本書未記載の事項は CLAUDE.md / README.md の記述に従う。
 
 ---
@@ -72,7 +72,7 @@
 | FR-1.3 | `run [args...]` / 引数なし | `$PWD` を `/workspace` に bind mount して Claude Code を起動。`run` は既定サブコマンド。追加 `args` は `compose run --rm claude` に **位置引数として無変換で渡される**（SEC-14 参照）。 |
 | FR-1.4 | `shell` / `bash` | 同マウントで bash を起動。 |
 | FR-1.5 | `firewall-refresh` | 稼働中コンテナ内で `init-firewall.sh` を再実行（DNS 再解決）。 |
-| FR-1.6 | `logout` | `compose down -v` でサービスと名前付きボリューム（`claude-home`）を破棄し、OAuth 資格情報を失わせる。**現状実装は補強として `docker volume rm aidock_claude-home` も実行する**。Compose プロジェクト名が `aidock` 以外では当該名のボリュームは別文脈（他チェックアウト・別プロジェクト等で作られた **同名グローバルボリューム**）を指しうるため、**意図せず他プロジェクトの資格情報を削除する破壊的副作用**がある（既知の defect。follow-up PR で `compose down -v` のみに集約予定）。 |
+| FR-1.6 | `logout` | `compose down -v --remove-orphans` でサービスと compose 管理下の名前付きボリューム（`claude-home`）を破棄し、OAuth 資格情報を失わせる。Compose 管理外の固定名ボリュームを `docker volume rm` で直接削除してはならない。 |
 | FR-1.7 | `help` / `-h` / `--help` | `usage` を表示。 |
 | FR-1.8 | 未知のサブコマンド | エラーメッセージを stderr に出力し exit code 1。 |
 
@@ -197,7 +197,7 @@
 
 ### AC-5: 永続化
 - `aidock login` 実行後、コンテナを再作成しても OAuth セッションが保持される。
-- `aidock logout` が **正常に完了した場合**（`compose down -v` および `docker volume rm` の少なくとも一方が実際にボリュームを破棄した場合）、再度 `aidock` 起動時に未ログイン状態になる。**現状実装は両コマンドに `|| true` が付いており Docker 不在時にも success メッセージを出すため、終了コードや出力で破棄成功を保証できない**（follow-up PR で `bin/aidock logout` の失敗を非ゼロ exit で伝播するよう修正予定）。検証は `docker volume ls` で当該ボリュームが消えていることで補強する。
+- `aidock logout` が exit 0 で完了した場合、compose 管理下の `claude-home` ボリュームが削除され、再度 `aidock` 起動時に未ログイン状態になる。`compose down -v --remove-orphans` が失敗した場合は、`set -euo pipefail` により非ゼロ exit を呼び出し側へ伝播する。検証は `docker volume ls` で当該ボリュームが消えていることで補強する。
 
 ### AC-6: ドキュメント
 - 機能変更時、本書 §3 / §4 と `README.md` の表 / `CLAUDE.md` のコマンド表が一致している。
@@ -235,3 +235,4 @@
 | 2026-05-20 | codex P2×3 反映: FR-1.6 に同名グローバルボリューム削除の破壊的副作用を明記、FR-3.3 の復旧手順に `aidock build` 再ビルドを追加、AC-5 を best-effort に緩和（`bin/aidock logout` の `\|\| true` による失敗隠蔽を明示）。実装側強化（`bin/aidock` の終了コード伝播・`docker volume rm` 撤去）は follow-up PR。 | Claude Code |
 | 2026-05-20 | codex 追加 P2×2 反映: §1.1 目的の「一切コンテナへ渡さない」を SEC-8 と整合する文言に緩和、AC-7 の復旧手順に `aidock build` を追加し FR-3.3 と整合。 | Claude Code |
 | 2026-05-20 | セルフレビュー反映: §8 改訂履歴の凡例違反を修正（workflow 撤去エントリを正しい時系列位置へ移動）、`最終更新` ヘッダを 2026-05-20 に同期。 | Claude Code |
+| 2026-05-23 | `aidock logout` の要件を実装済みに更新: 固定名 `docker volume rm aidock_claude-home` を禁止し、`compose down -v --remove-orphans` の失敗を非ゼロ exit として伝播する前提に整理。 | ChatGPT |
