@@ -14,25 +14,24 @@ compose() {
 }
 
 guard_workspace() {
-    local pwd_abs home_abs
+    local pwd_abs home_abs passwd_home
     pwd_abs="$(realpath "$PWD")"
 
-    # Resolve $HOME independently of the caller-provided value so a cleared,
-    # missing, or bogus HOME (CI, sudo -E, systemd units) cannot bypass the
-    # sensitive-path guard by skipping the comparison base.
+    # Derive the guard base from the passwd entry, never from the caller's
+    # $HOME: a forged HOME pointing at another existing directory (e.g.
+    # HOME=/tmp) would otherwise relocate the comparison base and skip the
+    # SEC-8 sensitive-path checks for the user's real home. Fall back to
+    # $HOME only when the passwd lookup yields nothing.
     home_abs=""
-    if [[ -n "${HOME:-}" && -d "${HOME}" ]]; then
+    passwd_home="$(getent passwd "$(id -un)" 2>/dev/null | cut -d: -f6 || true)"
+    if [[ -n "$passwd_home" && -d "$passwd_home" ]]; then
+        home_abs="$(realpath "$passwd_home" 2>/dev/null || true)"
+    fi
+    if [[ -z "$home_abs" && -n "${HOME:-}" && -d "${HOME}" ]]; then
         home_abs="$(realpath "$HOME" 2>/dev/null || true)"
     fi
     if [[ -z "$home_abs" ]]; then
-        local passwd_home
-        passwd_home="$(getent passwd "$(id -un)" 2>/dev/null | cut -d: -f6 || true)"
-        if [[ -n "$passwd_home" && -d "$passwd_home" ]]; then
-            home_abs="$(realpath "$passwd_home" 2>/dev/null || true)"
-        fi
-    fi
-    if [[ -z "$home_abs" ]]; then
-        echo "aidock: cannot resolve \$HOME; refusing to proceed" >&2
+        echo "aidock: cannot resolve home directory; refusing to proceed" >&2
         exit 2
     fi
 
