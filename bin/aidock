@@ -32,11 +32,11 @@ guard_workspace() {
         local rel
         rel="${pwd_abs#"$home_abs"/}"
         case "$rel" in
-            .ssh|.ssh/*|.aws|.aws/*|.gcloud|.gcloud/*|.azure|.azure/*|.config/git|.config/git/*|.config/gh|.config/gh/*|.kube|.kube/*|.docker|.docker/*)
+            .ssh|.ssh/*|.aws|.aws/*|.gcloud|.gcloud/*|.config/gcloud|.config/gcloud/*|.azure|.azure/*|.config/git|.config/git/*|.config/gh|.config/gh/*|.kube|.kube/*|.docker|.docker/*)
                 echo "aidock: refusing to mount sensitive directory under \$HOME: $pwd_abs" >&2
                 exit 2
                 ;;
-            .gitconfig|.netrc|.npmrc|.pypirc)
+            .gitconfig|.git-credentials|.netrc|.npmrc|.pypirc)
                 echo "aidock: refusing to mount sensitive file under \$HOME: $pwd_abs" >&2
                 exit 2
                 ;;

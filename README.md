@@ -11,7 +11,7 @@ allowlist を組み合わせている。
 ユーザー自身の Claude アカウントで OAuth ログインし、その認証情報は
 コンテナ内の名前付きボリュームに閉じる。ホストの `~/.ssh` や クラウド SDK の
 資格情報は明示的に追加 bind mount しない。ただし `$PWD` は `/workspace:rw` として
-渡されるため、`~/.ssh`、`~/.aws`、`~/.config/gh`、`~/.kube` 等の機密ディレクトリ
+渡されるため、`~/.ssh`、`~/.aws`、`~/.config/gcloud`、`~/.config/gh`、`~/.kube` 等の機密ディレクトリ
 配下では `aidock` の起動を機械的に拒否する。
 
 ## クイックスタート
