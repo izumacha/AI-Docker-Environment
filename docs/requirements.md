@@ -134,7 +134,7 @@
 | SEC-5 | `iptables -P OUTPUT DROP`（既定拒否）と終端の検証プローブを維持。 | `init-firewall.sh` |
 | SEC-6 | sudo の許可対象は `/usr/local/bin/init-firewall.sh` のみ NOPASSWD。他に NOPASSWD を追加しない。 | `Dockerfile` |
 | SEC-7 | コンテナの最終 `USER` は `agent`。root で実行しない。 | `Dockerfile` |
-| SEC-8 | ホストの資格情報・設定ファイルがコンテナへ流出することを防ぐ。**一次防御**は (a) `compose.yaml` が `$PWD` と `claude-home` 以外を bind mount しないこと、(b) `bin/aidock` の `guard_workspace()` が `$HOME` と `/` を起動カレントとして拒否すること。**運用上の禁止事項**として、次のパス配下を `aidock` の起動カレントディレクトリに設定しない: `~/.ssh`、`~/.aws`、`~/.config/aws`、`~/.gcloud`、`~/.config/gcloud`、`~/.azure`、`~/.config/azure`、`~/.gitconfig`、`~/.git-credentials`、`~/.config/git`、`~/.config/gh`、`~/.netrc`、`~/.kube`（kubeconfig）、`~/.docker`、`/var/run/docker.sock`、`~/.npmrc`、`~/.pypirc`。これら各パスは `guard_workspace()` で機械的に拒否する。 | `compose.yaml` / `bin/aidock` |
+| SEC-8 | ホストの資格情報・設定ファイルがコンテナへ流出することを防ぐ。**一次防御**は (a) `compose.yaml` が `$PWD` と `claude-home` 以外を bind mount しないこと、(b) `bin/aidock` の `guard_workspace()` が `$HOME` と `/` を起動カレントとして拒否すること。**機械的拒否対象**: 次のパス配下から `aidock` を起動すると `guard_workspace()` が exit 2 で拒否する: `~/.ssh`、`~/.aws`、`~/.config/aws`、`~/.gcloud`、`~/.config/gcloud`、`~/.azure`、`~/.config/azure`、`~/.gitconfig`、`~/.git-credentials`、`~/.config/git`、`~/.config/gh`、`~/.netrc`、`~/.kube`（kubeconfig）、`~/.docker`、`/var/run/docker.sock`、`~/.npmrc`、`~/.pypirc`。`guard_workspace()` は `$HOME` 未設定・空文字・存在しない値の場合も `/etc/passwd` から実 home を解決して比較するため、`HOME=` クリアや `unset HOME` でバイパスできない。運用上もこれらの配下から `aidock` を起動しないことを推奨する。 | `compose.yaml` / `bin/aidock` |
 | SEC-9 | `guard_workspace()` の `/` および `$HOME` 拒否を撤去・回避しない。 | `bin/aidock` |
 | SEC-10 | OAuth 資格情報はイメージ層・ホスト FS に書き出さない（名前付きボリュームのみ）。 | `compose.yaml` |
 | SEC-11 | allowlist に新規ホストを足すときは PR で必要性を述べる。テレメトリ系（statsig / sentry）は **削除可** だが追加は最小限に。 | `init-firewall.sh` |
@@ -184,6 +184,12 @@
 ### AC-2: ガード
 - `$HOME` で `./bin/aidock` を実行すると exit code 2 で拒否される。
 - `/` で実行しても拒否される。
+- SEC-8 列挙パス配下（`~/.ssh`、`~/.aws`、`~/.config/gcloud` 等）で `./bin/aidock` を実行すると exit code 2 で拒否される。
+- 上記 SEC-8 パス配下から `HOME=` クリア、`unset HOME`、または存在しないパスを指す `HOME` で実行しても、`/etc/passwd` から実 home を解決して同様に exit code 2 で拒否される（バイパスできない）。
+- 検証手順（任意の SEC-8 列挙パスを使用、例: `~/.aws/test`）:
+    - `mkdir -p ~/.aws/test && cd ~/.aws/test`
+    - `for h in "/root" "" "/nonexistent"; do HOME="$h" ./bin/aidock run >/dev/null 2>&1; echo "HOME=$h exit=$?"; done`
+    - すべて `exit=2` であること。
 
 ### AC-3: 権限
 - コンテナ内 `whoami` が `agent`。
@@ -229,6 +235,7 @@
 | 2026-05-23 | SEC-8 の follow-up を実装: `bin/aidock` の `guard_workspace()` を拡張し、機密ディレクトリ/ファイル配下（`~/.ssh`、`~/.aws`、`~/.config/gh` など）および `/var/run/docker.sock` 配下からの起動を機械的に拒否。README/CLAUDE の説明も運用依存から実装済み表現へ同期。 | Codex |
 | 2026-05-23 | 追加レビュー反映: `guard_workspace()` の拒否対象に `~/.config/gcloud` と `~/.git-credentials` を追加し、関連ドキュメントの機密パス一覧を同期。 | Codex |
 | 2026-05-23 | 追加レビュー反映: クラウド資格情報配置の揺れを考慮し、`guard_workspace()` の拒否対象に `~/.config/aws` と `~/.config/azure` を追加。README/CLAUDE/要件の機密パス一覧を同期。 | Codex |
+| 2026-05-23 | 追加レビュー反映 (HOME バイパス対策): `guard_workspace()` の `$HOME` 解決を堅牢化。`HOME=` クリア、`unset HOME`、存在しない `HOME` 値で起動した際にも `/etc/passwd` から実 home を解決して SEC-8 拒否を発動するよう修正。AC-2 にテストレシピを追記。SEC-8 表現を「運用上の禁止事項」並列から「機械的拒否対象 + 運用推奨」階層構造に整理。 | Claude Code |
 | 2026-05-19 | 初版作成。既存実装をベースに要件を抽出。 | Claude Code |
 | 2026-05-19 | レビュー指摘反映: AC-4 の curl から `-f` を除去し status code 検査に統一 / SEC-3 に `/workspace:rw` を明示 / NFR-4 のコメント言語要件を緩和。 | Claude Code |
 | 2026-05-19 | skill 観点（review / security-review / simplify）の再監査を反映: SEC-13/14、FR-3.3、FR-4.0/4.7、NFR-5.1/5.2、AC-7 を追加。SEC-3/8/12、FR-1.3/4.3/4.5/4.6、AC-4 を改訂。CIDR 検証強化は要件先行（実装は後続 PR）。 | Claude Code |
