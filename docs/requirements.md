@@ -115,7 +115,10 @@
   - PR を **draft → ready** に変える（誰の操作でも発火）。
   - **Codex 接続済み GitHub アカウント** から `@codex review` コメントを投稿。
 - **`github-actions[bot]` 等の bot 名義の `@codex review` は拒否される**ため、ワークフローによる自動投稿は **採用しない**（過去に `.github/workflows/codex-review.yml` で試みたが codex 側が「create a Codex account」と返却するため撤去済み）。
-- Claude は draft で PR を作るため、**初回レビューと差分 push 後の再レビューは izumacha が手動で ready 化または `@codex review` を投稿する** 必要がある。本書 §7 変更管理プロセスにおいて、レビュー再依頼は izumacha のアクションを前提とする。
+- Claude は draft で PR を作る。**Claude Code の GitHub 操作（MCP）が izumacha 名義（OWNER）で記録される実行環境では、Claude が投稿する `@codex review` コメントも Codex に受理される**（実証済み）ため、Claude 自身が再レビューを発火できる。
+  - **運用ルール**: Claude は **差分 push を伴う報告コメントの末尾に `@codex review` を追記**して再レビューを発火させる。質問への返信や再レビューを要しない状況報告コメントには付けない。
+  - 初回レビューは draft → ready 化（izumacha でも Claude でも可）で発火する。
+  - Claude の操作が `github-actions[bot]` 等の bot 名義になる実行環境では従来どおり受理されないため、izumacha の手動 ready 化または `@codex review` 投稿が必要。
 
 ---
 
@@ -238,6 +241,7 @@
 | 2026-05-23 | 追加レビュー反映: クラウド資格情報配置の揺れを考慮し、`guard_workspace()` の拒否対象に `~/.config/aws` と `~/.config/azure` を追加。README/CLAUDE/要件の機密パス一覧を同期。 | Codex |
 | 2026-05-23 | 追加レビュー反映 (HOME バイパス対策): `guard_workspace()` の `$HOME` 解決を堅牢化。`HOME=` クリア、`unset HOME`、存在しない `HOME` 値で起動した際にも `/etc/passwd` から実 home を解決して SEC-8 拒否を発動するよう修正。AC-2 にテストレシピを追記。SEC-8 表現を「運用上の禁止事項」並列から「機械的拒否対象 + 運用推奨」階層構造に整理。 | Claude Code |
 | 2026-05-23 | Codex 追加レビュー (P1) 反映: `guard_workspace()` の判定基準を user-supplied `$HOME` 優先から `/etc/passwd` 実 home 優先に変更（passwd 失敗時のみ `$HOME` フォールバック）。`HOME=/tmp` 等の実在ディレクトリへの偽装による SEC-8 バイパスを封鎖。AC-2 テストレシピに偽装 HOME ケースを追加。 | Claude Code |
+| 2026-05-23 | FR-7 更新: Claude の GitHub 操作が OWNER 名義で記録される実行環境では Claude 投稿の `@codex review` も受理されることを反映。運用として差分 push を伴う報告コメント末尾に `@codex review` を追記し再レビューを発火させる旨を明記。CLAUDE.md も同期。 | Claude Code |
 | 2026-05-19 | 初版作成。既存実装をベースに要件を抽出。 | Claude Code |
 | 2026-05-19 | レビュー指摘反映: AC-4 の curl から `-f` を除去し status code 検査に統一 / SEC-3 に `/workspace:rw` を明示 / NFR-4 のコメント言語要件を緩和。 | Claude Code |
 | 2026-05-19 | skill 観点（review / security-review / simplify）の再監査を反映: SEC-13/14、FR-3.3、FR-4.0/4.7、NFR-5.1/5.2、AC-7 を追加。SEC-3/8/12、FR-1.3/4.3/4.5/4.6、AC-4 を改訂。CIDR 検証強化は要件先行（実装は後続 PR）。 | Claude Code |
