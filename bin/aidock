@@ -26,6 +26,27 @@ guard_workspace() {
         echo "aidock: refusing to mount \$HOME as /workspace. cd into a project subdirectory first." >&2
         exit 2
     fi
+
+    # Block known sensitive locations from being mounted into /workspace.
+    if [[ -n "$home_abs" ]]; then
+        local rel
+        rel="${pwd_abs#"$home_abs"/}"
+        case "$rel" in
+            .ssh|.ssh/*|.aws|.aws/*|.gcloud|.gcloud/*|.azure|.azure/*|.config/git|.config/git/*|.config/gh|.config/gh/*|.kube|.kube/*|.docker|.docker/*)
+                echo "aidock: refusing to mount sensitive directory under \$HOME: $pwd_abs" >&2
+                exit 2
+                ;;
+            .gitconfig|.netrc|.npmrc|.pypirc)
+                echo "aidock: refusing to mount sensitive file under \$HOME: $pwd_abs" >&2
+                exit 2
+                ;;
+        esac
+    fi
+
+    if [[ "$pwd_abs" == "/var/run/docker.sock" || "$pwd_abs" == "/var/run/docker.sock/"* ]]; then
+        echo "aidock: refusing to mount docker socket path: $pwd_abs" >&2
+        exit 2
+    fi
 }
 
 cmd_build() {
