@@ -17,7 +17,7 @@
 - **リソース上限**（メモリ 4G、CPU 2 コア、PID 1024）
 - **OAuth 資格情報の隔離**（名前付きボリューム `claude-home` に保存）
 
-ホストの `~/.ssh` や `~/.aws`、`~/.config/gcloud` 等を **追加 bind mount しません**。ただし `$PWD` は `/workspace:rw` として渡されるため、機密ディレクトリ配下では `aidock` は起動を機械的に拒否する（詳細は `docs/requirements.md` SEC-8）。Linux 専用（macOS/Windows 非対応）。
+ホストの `~/.ssh` や `~/.aws`、`~/.config/aws`、`~/.config/gcloud` 等を **追加 bind mount しません**。ただし `$PWD` は `/workspace:rw` として渡されるため、機密ディレクトリ配下では `aidock` は起動を機械的に拒否する（詳細は `docs/requirements.md` SEC-8）。Linux 専用（macOS/Windows 非対応）。
 
 ## リポジトリ構成
 
