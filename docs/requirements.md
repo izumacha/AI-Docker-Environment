@@ -186,10 +186,11 @@
 - `/` で実行しても拒否される。
 - SEC-8 列挙パス配下（`~/.ssh`、`~/.aws`、`~/.config/gcloud` 等）で `./bin/aidock` を実行すると exit code 2 で拒否される。
 - 上記 SEC-8 パス配下から `HOME=` クリア、`unset HOME`、または存在しないパスを指す `HOME` で実行しても、`/etc/passwd` から実 home を解決して同様に exit code 2 で拒否される（バイパスできない）。
-- 検証手順（任意の SEC-8 列挙パスを使用、例: `~/.aws/test`）:
-    - `mkdir -p ~/.aws/test && cd ~/.aws/test`
-    - `for h in "/root" "" "/nonexistent"; do HOME="$h" ./bin/aidock run >/dev/null 2>&1; echo "HOME=$h exit=$?"; done`
-    - すべて `exit=2` であること。
+- 検証手順（リポジトリルートで実行。任意の SEC-8 列挙パスを使用、例: `~/.aws/test`）:
+    - `repo="$PWD"`
+    - `mkdir -p "$HOME/.aws/test"`
+    - `( cd "$HOME/.aws/test"; for h in "$HOME" "" "/nonexistent"; do HOME="$h" "$repo/bin/aidock" run >/dev/null 2>&1; echo "HOME=$h exit=$?"; done )`
+    - すべて `exit=2` であること（`HOME` を空・不在値にしても `/etc/passwd` 経由で実 home に解決されて拒否される）。
 
 ### AC-3: 権限
 - コンテナ内 `whoami` が `agent`。
