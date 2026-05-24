@@ -121,7 +121,7 @@
 `.github/workflows/ci.yml`（GitHub Actions）で**型チェック**と **e2e** を実行する。push（全ブランチ）および `main` への pull_request で発火し、`permissions: contents: read` のみを付与する（FR-7 に従い codex へのコメント投稿は行わない）。
 
 - FR-8.1: **type-check ジョブ**は次の静的解析を実行し、いずれか失敗で CI を不合格とする。
-  - `shellcheck` を全シェルスクリプト（`bin/aidock`・`docker/init-firewall.sh`・`docker/entrypoint.sh`）に適用。
+  - `shellcheck`（`koalaman/shellcheck:v0.11.0` イメージ）を全シェルスクリプト（`bin/aidock`・`docker/init-firewall.sh`・`docker/entrypoint.sh`）に適用。
   - `bash -n` による構文チェック。
   - `hadolint`（`docker/Dockerfile`）を `hadolint/hadolint:latest-debian` イメージで実行。
   - `docker compose -f compose.yaml config -q` による compose 定義の妥当性検証。
