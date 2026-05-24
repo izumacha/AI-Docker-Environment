@@ -58,7 +58,7 @@
 以下は脆弱化につながるため **変更禁止**、または変更する場合は必ず影響を検討してください。
 
 - `compose.yaml`:
-  - `cap_drop: ALL` / `cap_add: [NET_ADMIN, NET_RAW]` のみ
+  - `cap_drop: ALL` / `cap_add: [NET_ADMIN, NET_RAW, SETUID, SETGID]` のみ（`SETUID`/`SETGID` は entrypoint の `gosu` による root→agent 降格用）
   - `security_opt: no-new-privileges:true`
   - `read_only: true` + 必要最小限の `tmpfs`
   - `mem_limit`, `pids_limit`, `cpus` の上限
