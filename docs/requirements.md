@@ -115,7 +115,7 @@
   - PR を **draft → ready** に変える（誰の操作でも発火）。
   - **Codex 接続済み GitHub アカウント** から `@codex review` コメントを投稿。
 - **`github-actions[bot]` 等の bot 名義の `@codex review` は拒否される**ため、ワークフローによる自動投稿は **採用しない**（過去に `.github/workflows/codex-review.yml` で試みたが codex 側が「create a Codex account」と返却するため撤去済み）。
-- Claude は draft で PR を作るため、**初回レビューと差分 push 後の再レビューは izumacha が手動で ready 化または `@codex review` を投稿する** 必要がある。本書 §7 変更管理プロセスにおいて、レビュー再依頼は izumacha のアクションを前提とする。
+- Claude は draft で PR を作る。**Claude は PR への実装変更を push した後、GitHub MCP（izumacha 認証＝Codex 接続済みアカウント名義）で `@codex review` を自動投稿してレビューを起動する**（workflow からの bot 名義投稿は上記のとおり拒否されるため、Claude セッション内での投稿で代替する）。izumacha が手動で ready 化または `@codex review` を投稿する運用も引き続き可能。
 
 ### FR-8: CI ワークフロー
 `.github/workflows/ci.yml`（GitHub Actions）で**型チェック**と **e2e** を実行する。push（全ブランチ）および `main` への pull_request で発火し、`permissions: contents: read` のみを付与する（FR-7 に従い codex へのコメント投稿は行わない）。
@@ -259,6 +259,7 @@
 
 | 日付 | 改訂内容 | 担当 |
 | --- | --- | --- |
+| 2026-05-24 | 運用ルール追加: Claude は PR への実装変更を push した後、GitHub MCP（izumacha 認証＝Codex 接続済みアカウント名義）で `@codex review` を自動投稿する（workflow の bot 名義投稿は FR-7 のとおり拒否されるため代替）。FR-7 と CLAUDE.md「Git ワークフロー」を更新。 | Claude Code |
 | 2026-05-24 | codex レビュー（2巡目）反映: (1) CI の AC-3 capability 検証を `mount` プローブから `/proc/self/status` の `CapBnd` 直接検査へ変更（`mount` はデフォルト seccomp で常に失敗し cap 回帰を検出できないため）。(2) `post-ci-verify.yml` を堅牢化: PR head の checkout を撤去、`claude-code-action` を commit SHA でピン、Claude のツールを `gh run view` / `gh pr comment` に限定（FR-9.6）。`init-firewall.sh:105` の `000` 是正と run-profile プローブは既に対応済み。 | Claude Code |
 | 2026-05-24 | CI 後の Claude 検証エージェントを追加: `.github/workflows/post-ci-verify.yml` を新設し、`workflow_run`（CI 成功・PR）で `anthropics/claude-code-action@v1` を起動、type-check / e2e 結果を検証・要約して PR にコメント1件を投稿（コミットしない）。認証は Claude GitHub App + `CLAUDE_CODE_OAUTH_TOKEN`。FR-9 / AC-9 を新設、FR-7 を改訂（codex とは別の検証コメントである旨）。`workflow_run` は `main` 上のワークフローのみ発火するため `main` マージ後に有効。CLAUDE.md / README.md も同期。既存コードは未変更。 | Claude Code |
 | 2026-05-24 | e2e で判明した gosu 降格失敗を修正: `cap_drop: ALL` が `CAP_SETUID`/`CAP_SETGID` を剥奪するため root→agent 降格が `operation not permitted` で失敗していた。`cap_add` に `SETUID`/`SETGID` を追加し SEC-1 を改訂（降格後の `agent` は capability ゼロ）。これで firewall は通過済み（`[firewall] ok`）の状態で起動経路が完結する。 | Claude Code |
