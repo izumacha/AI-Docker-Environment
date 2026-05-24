@@ -132,11 +132,11 @@
 `.github/workflows/post-ci-verify.yml`（GitHub Actions）で、CI 成功後に Claude Code Action（`anthropics/claude-code-action@v1`）を起動し、結果を検証・要約して PR にコメントする。
 
 - FR-9.1: トリガは `workflow_run`（`workflows: ["CI"]`, `types: [completed]`）。`github.event.workflow_run.conclusion == 'success'` かつ `event == 'pull_request'` のときのみ実行する。
-- FR-9.2: PR 番号は `workflow_run.pull_requests[0].number` で解決し、空の場合は `head_branch` から open PR を引く。fork PR は `pull_requests[]` が空のため実質スキップ（セキュリティ上も望ましい）。
+- FR-9.2: PR 番号は `workflow_run.pull_requests[0].number` で解決する。空の場合のフォールバックは **同一リポジトリ実行（`head_repository.full_name == owner/repo`）に限定**し、`head_branch` の open PR のうち **`head.sha == workflow_run.head_sha` に一致する PR** を選ぶ（同名 head ブランチの複数 PR で誤った相手にコメントしないため）。fork PR は `pull_requests[]` が空かつ同一リポジトリ判定で弾かれ実質スキップ（セキュリティ上も望ましい）。
 - FR-9.3: 認証は **Claude GitHub App + OAuth**。リポジトリ secret `CLAUDE_CODE_OAUTH_TOKEN` を `claude_code_oauth_token` 入力で渡す（代替として `ANTHROPIC_API_KEY` + `anthropic_api_key` も可）。当該 secret は **GitHub Actions secret** でありイメージ層・コンテナには持ち込まない（SEC-10 と整合）。`permissions` は `contents: read` / `pull-requests: write` / `actions: read`。
 - FR-9.4: エージェントは type-check / e2e（AC-1〜AC-4 / AC-7）の結果を検証・要約し、PR に**コメント1件**を投稿する。**コミット・ファイル変更・push は行わない**（CI は push/PR でのみ発火し、コメントでは再発火しないため無限ループしない）。
 - FR-9.5: `workflow_run` は**デフォルトブランチ（`main`）上のワークフローのみ発火**する。本ワークフローは `main` マージ後の PR から有効になる。
-- FR-9.6: 特権ワークフロー（`pull-requests: write` ＋ secret）の堅牢化として、(a) PR head を **checkout しない**（非信頼コードをワークスペースに展開しない）、(b) `claude-code-action` は **有効化前に監査済み v1 commit の SHA へピン**する（可変タグの供給網リスク回避。フル SHA の確認は #17）、(c) Claude のツールを **`gh run view` / `gh pr comment` に限定**する（`--allowedTools`）。
+- FR-9.6: 特権ワークフロー（`pull-requests: write` ＋ secret）の堅牢化として、(a) PR head を **checkout しない**（非信頼コードをワークスペースに展開しない）、(b) `claude-code-action` は **有効化前に監査済み v1 commit の SHA へピン**する（可変タグの供給網リスク回避。フル SHA の確認は #17）、(c) Claude のツールを **`gh run view` / `gh pr comment` に限定**する（`--allowedTools`）、(d) `github_token` 入力を省略し **Claude GitHub App 認証**を用いるため、有効化時に **`permissions: id-token: write`** を付与する（OIDC トークン交換に必須。未付与だと検証 step が認証失敗。SHA ピンと併せて #17 で対応）。
 
 ---
 
@@ -259,6 +259,7 @@
 
 | 日付 | 改訂内容 | 担当 |
 | --- | --- | --- |
+| 2026-05-24 | codex レビュー（5巡目）反映: (1) `post-ci-verify.yml` の PR fallback を **`head.sha == workflow_run.head_sha` 一致**で厳密化し、同名 head ブランチの複数 PR で誤った PR にコメントする経路を排除（P2、FR-9.2 更新）。(2) Claude GitHub App 認証パスが要求する **`id-token: write`** の付与を有効化前タスクとして #17 に集約（codex P1。公式 setup docs で要否を確認済み。SHA ピンと同じ扱い、FR-9.6 に (d) を追記）。 | Claude Code |
 | 2026-05-24 | codex レビュー（4巡目）反映: `post-ci-verify.yml` の PR 番号 fallback に **同一リポジトリ判定**（`head_repository.full_name == owner/repo`）を追加し、fork のブランチ名衝突で無関係 PR にコメントする経路を遮断（P3）。action の SHA ピン（claude-code-action / github-script、P1/P2）はフル SHA をこの環境で確認できないため有効化前タスクとして #17 に集約。 | Claude Code |
 | 2026-05-24 | codex レビュー（3巡目）反映: (1) e2e の run-profile（AC-1/AC-4）を `claude true` から `api.anthropic.com` の **明示 egress アサーション**（`^[1-9][0-9]{2}$`）に変更。(2) `post-ci-verify.yml` のピン SHA が誤り（`787c5a0` は v1≠、codex によれば現 v1=`20c8abf`）だったため `@v1` に戻し、監査済み SHA へのピンを有効化前タスクとして #17 に集約（FR-9.6 更新）。 | Claude Code |
 | 2026-05-24 | 運用ルール追加: Claude は PR への実装変更を push した後、GitHub MCP（izumacha 認証＝Codex 接続済みアカウント名義）で `@codex review` を自動投稿する（workflow の bot 名義投稿は FR-7 のとおり拒否されるため代替）。FR-7 と CLAUDE.md「Git ワークフロー」を更新。 | Claude Code |
