@@ -110,7 +110,7 @@
 - 機能を追加・削除・変更したら、**同じ PR 内で関連 doc を更新**する。
 
 ### FR-7: codex 自動レビュー
-- `chatgpt-codex-connector[bot]`（codex 自動レビュー）がリポジトリレベルで有効化されている（OpenAI 側設定）。本リポジトリの CI ワークフロー（FR-8）は型チェックと e2e のみを実行し、codex へのコメント投稿は行わない。
+- `chatgpt-codex-connector[bot]`（codex 自動レビュー）がリポジトリレベルで有効化されている（OpenAI 側設定）。codex はコードレビュー担当であり、CI（`ci.yml`）から codex へコメント投稿（`@codex review`）は行わない。なお CI 成功後の**検証サマリ**は別途 Claude Code Action（FR-9）が PR にコメントする（codex とは別物）。
 - レビューが発火する条件は次のいずれか:
   - PR を **draft → ready** に変える（誰の操作でも発火）。
   - **Codex 接続済み GitHub アカウント** から `@codex review` コメントを投稿。
@@ -127,6 +127,15 @@
   - `docker compose -f compose.yaml config -q` による compose 定義の妥当性検証。
 - FR-8.2: **e2e ジョブ**（type-check 成功後に実行）は GitHub-hosted runner 上で受け入れ基準を実機検証する。検証項目と AC の対応は AC-8 を参照。SEC-13 に従い `AIDOCK_SKIP_FIREWALL` は設定せず、**実ファイアウォールを起動した状態で検証する**。
 - FR-8.3: e2e は外部 egress（`api.anthropic.com` / `claude.ai` / `api.github.com`）に依存する。各プローブは `--max-time` を持つが、ネットワーク要因による一時失敗の可能性がある（残存リスク）。
+
+### FR-9: CI 後の Claude 検証エージェント
+`.github/workflows/post-ci-verify.yml`（GitHub Actions）で、CI 成功後に Claude Code Action（`anthropics/claude-code-action@v1`）を起動し、結果を検証・要約して PR にコメントする。
+
+- FR-9.1: トリガは `workflow_run`（`workflows: ["CI"]`, `types: [completed]`）。`github.event.workflow_run.conclusion == 'success'` かつ `event == 'pull_request'` のときのみ実行する。
+- FR-9.2: PR 番号は `workflow_run.pull_requests[0].number` で解決し、空の場合は `head_branch` から open PR を引く。fork PR は `pull_requests[]` が空のため実質スキップ（セキュリティ上も望ましい）。
+- FR-9.3: 認証は **Claude GitHub App + OAuth**。リポジトリ secret `CLAUDE_CODE_OAUTH_TOKEN` を `claude_code_oauth_token` 入力で渡す（代替として `ANTHROPIC_API_KEY` + `anthropic_api_key` も可）。当該 secret は **GitHub Actions secret** でありイメージ層・コンテナには持ち込まない（SEC-10 と整合）。`permissions` は `contents: read` / `pull-requests: write` / `actions: read`。
+- FR-9.4: エージェントは type-check / e2e（AC-1〜AC-4 / AC-7）の結果を検証・要約し、PR に**コメント1件**を投稿する。**コミット・ファイル変更・push は行わない**（CI は push/PR でのみ発火し、コメントでは再発火しないため無限ループしない）。
+- FR-9.5: `workflow_run` は**デフォルトブランチ（`main`）上のワークフローのみ発火**する。本ワークフローは `main` マージ後の PR から有効になる。
 
 ---
 
@@ -220,8 +229,13 @@
 ### AC-8: CI
 - `.github/workflows/ci.yml` の **type-check** と **e2e** の両ジョブがグリーンであること（PR マージの必須条件、FR-8）。
 - type-check は FR-8.1 の静的解析（`shellcheck` / `bash -n` / `hadolint` / `docker compose config`）をすべて通過する。
-- e2e は次を GitHub-hosted runner 上で実機検証する: AC-1（ビルド + 起動プローブ）、AC-2（`$HOME` / `/` 起動を exit 2 で拒否）、AC-3（`whoami=agent` / scoped sudo / capability 制限）、AC-4（run プロファイルの example.com 遮断・api.anthropic.com 到達、login プロファイルの claude.ai 到達）、AC-7（資格情報ボリューム所有権）。
+- e2e は次を GitHub-hosted runner 上で実機検証する: AC-1（ビルド + 起動プローブ）、AC-2（`$HOME` / `/` 起動を exit 2 で拒否）、AC-3（`whoami=agent` / `sudo` 不在 / capability 制限）、AC-4（run プロファイルの example.com 遮断・api.anthropic.com 到達、login プロファイルの claude.ai 到達）、AC-7（資格情報ボリューム所有権）。
 - **AC-5（永続化）は対話 OAuth ログインを要するため CI 対象外**とし、ローカル手動検証に委ねる。
+
+### AC-9: CI 後検証エージェント
+- `main` 上で `CI` が PR に対して成功すると、`.github/workflows/post-ci-verify.yml`（FR-9）が起動し、Claude が type-check / e2e の結果を検証・要約して PR に**コメント1件**を投稿する。
+- 当該ワークフローはコメントのみで、コミット・push は行わない。`CLAUDE_CODE_OAUTH_TOKEN` secret が前提。
+- `workflow_run` の仕様上、`main` にマージされるまでは発火しない（PR ブランチ単独では検証不可）。
 
 ---
 
@@ -244,6 +258,7 @@
 
 | 日付 | 改訂内容 | 担当 |
 | --- | --- | --- |
+| 2026-05-24 | CI 後の Claude 検証エージェントを追加: `.github/workflows/post-ci-verify.yml` を新設し、`workflow_run`（CI 成功・PR）で `anthropics/claude-code-action@v1` を起動、type-check / e2e 結果を検証・要約して PR にコメント1件を投稿（コミットしない）。認証は Claude GitHub App + `CLAUDE_CODE_OAUTH_TOKEN`。FR-9 / AC-9 を新設、FR-7 を改訂（codex とは別の検証コメントである旨）。`workflow_run` は `main` 上のワークフローのみ発火するため `main` マージ後に有効。CLAUDE.md / README.md も同期。既存コードは未変更。 | Claude Code |
 | 2026-05-24 | e2e で判明した gosu 降格失敗を修正: `cap_drop: ALL` が `CAP_SETUID`/`CAP_SETGID` を剥奪するため root→agent 降格が `operation not permitted` で失敗していた。`cap_add` に `SETUID`/`SETGID` を追加し SEC-1 を改訂（降格後の `agent` は capability ゼロ）。これで firewall は通過済み（`[firewall] ok`）の状態で起動経路が完結する。 | Claude Code |
 | 2026-05-24 | codex レビュー反映: `init-firewall.sh` の api.anthropic.com プローブ正規表現を `^[0-9]+$` → `^[1-9][0-9]{2}$` に修正し curl の `000`（transport failure）を不合格化（FR-4.6 / AC-4 の follow-up を実装）。CI の AC-3 capability チェックを **root 経由**（`--entrypoint sh`）の `mount` 失敗確認に変更し、CAP_SYS_ADMIN の回帰を検出可能にした。 | Claude Code |
 | 2026-05-24 | e2e で判明した DNS 解決不能を修正: `init-firewall.sh` の `iptables -t nat -F`（および mangle flush）が Docker 組込み DNS（`127.0.0.11:53`）の DNAT を消去し、コンテナ内の全ホスト名解決が失敗していた（allowlist が空になり AC-4 プローブが失敗）。nat/mangle のフラッシュを撤去（filter テーブルのリセットは維持）。egress 拒否方針（SEC-5）は不変。 | Claude Code |
