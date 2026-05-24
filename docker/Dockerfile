@@ -25,8 +25,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
 
-RUN if getent group node >/dev/null; then groupdel node; fi \
- && if id -u node >/dev/null 2>&1; then userdel -r node 2>/dev/null || true; fi \
+RUN if id -u node >/dev/null 2>&1; then userdel -r node 2>/dev/null || true; fi \
+ && if getent group node >/dev/null; then groupdel node 2>/dev/null || true; fi \
  && groupadd -g "${HOST_GID}" agent \
  && useradd -l -m -u "${HOST_UID}" -g "${HOST_GID}" -s /bin/bash agent \
  && mkdir -p /home/agent/.claude /workspace \

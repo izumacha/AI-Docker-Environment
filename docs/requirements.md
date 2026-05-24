@@ -244,7 +244,7 @@
 
 | 日付 | 改訂内容 | 担当 |
 | --- | --- | --- |
-| 2026-05-24 | CI ワークフロー（型チェック + e2e）を新設: `.github/workflows/ci.yml` と `.hadolint.yaml`（DL3008 除外）を追加。type-check は GitHub Releases から取得した固定版 shellcheck 0.11.0 / hadolint 2.14.0 と `bash -n` / `docker compose config`、e2e は AC-1〜AC-4 / AC-7 を GitHub-hosted runner で実機検証（AC-5 は対話ログイン要のため対象外）。§1.3 を CI スコープ内へ改訂、FR-8 / AC-8 を追加、FR-7 / NFR-4 を更新。`bin/aidock` の SC2155（declare-and-assign 分離）と `docker/Dockerfile` の `useradd` の `-l` 欠落（hadolint DL3046）を修正。CLAUDE.md / README.md も同期。 | Claude Code |
+| 2026-05-24 | CI ワークフロー（型チェック + e2e）を新設: `.github/workflows/ci.yml` と `.hadolint.yaml`（DL3008 除外）を追加。type-check は GitHub Releases から取得した固定版 shellcheck 0.11.0 / hadolint 2.14.0 と `bash -n` / `docker compose config`、e2e は AC-1〜AC-4 / AC-7 を GitHub-hosted runner で実機検証（AC-5 は対話ログイン要のため対象外）。§1.3 を CI スコープ内へ改訂、FR-8 / AC-8 を追加、FR-7 / NFR-4 を更新。`bin/aidock` の SC2155（declare-and-assign 分離）、`docker/Dockerfile` の `useradd` の `-l` 欠落（hadolint DL3046）、および node ユーザ削除順序（`groupdel` を `userdel` より先に実行していたためクリーンビルドが exit 8 で失敗）を修正。CLAUDE.md / README.md も同期。 | Claude Code |
 | 2026-05-23 | SEC-8 の follow-up を実装: `bin/aidock` の `guard_workspace()` を拡張し、機密ディレクトリ/ファイル配下（`~/.ssh`、`~/.aws`、`~/.config/gh` など）および `/var/run/docker.sock` 配下からの起動を機械的に拒否。README/CLAUDE の説明も運用依存から実装済み表現へ同期。 | Codex |
 | 2026-05-23 | 追加レビュー反映: `guard_workspace()` の拒否対象に `~/.config/gcloud` と `~/.git-credentials` を追加し、関連ドキュメントの機密パス一覧を同期。 | Codex |
 | 2026-05-23 | 追加レビュー反映: クラウド資格情報配置の揺れを考慮し、`guard_workspace()` の拒否対象に `~/.config/aws` と `~/.config/azure` を追加。README/CLAUDE/要件の機密パス一覧を同期。 | Codex |
