@@ -1,0 +1,7 @@
+# hadolint configuration
+# DL3008 (pin apt package versions) is intentionally ignored: pinning every
+# Debian slim OS library version is impractical and brittle. Reproducibility is
+# instead handled per NFR-5.1 by pinning ARG CLAUDE_CODE_VERSION and using
+# --no-install-recommends in docker/Dockerfile.
+ignored:
+  - DL3008

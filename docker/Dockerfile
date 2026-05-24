@@ -7,7 +7,7 @@ ARG CLAUDE_CODE_VERSION=1.0.40
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        sudo \
+        gosu \
         iptables \
         ipset \
         ca-certificates \
@@ -25,10 +25,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
 
-RUN if getent group node >/dev/null; then groupdel node; fi \
- && if id -u node >/dev/null 2>&1; then userdel -r node 2>/dev/null || true; fi \
+RUN if id -u node >/dev/null 2>&1; then userdel -r node 2>/dev/null || true; fi \
+ && if getent group node >/dev/null; then groupdel node 2>/dev/null || true; fi \
  && groupadd -g "${HOST_GID}" agent \
- && useradd -m -u "${HOST_UID}" -g "${HOST_GID}" -s /bin/bash agent \
+ && useradd -l -m -u "${HOST_UID}" -g "${HOST_GID}" -s /bin/bash agent \
  && mkdir -p /home/agent/.claude /workspace \
  && chown -R agent:agent /home/agent /workspace
 
@@ -36,13 +36,12 @@ COPY init-firewall.sh /usr/local/bin/init-firewall.sh
 COPY entrypoint.sh   /usr/local/bin/entrypoint.sh
 RUN chmod 0755 /usr/local/bin/init-firewall.sh /usr/local/bin/entrypoint.sh
 
-RUN echo 'agent ALL=(root) NOPASSWD: /usr/local/bin/init-firewall.sh' > /etc/sudoers.d/agent \
- && chmod 0440 /etc/sudoers.d/agent \
- && visudo -cf /etc/sudoers.d/agent
-
 ENV HOME=/home/agent
 WORKDIR /workspace
-USER agent
 
+# The container starts as root so the entrypoint can initialize the egress
+# firewall (iptables/ipset require root, and no-new-privileges forbids sudo's
+# setuid escalation). entrypoint.sh drops to the unprivileged agent user via
+# gosu before exec'ing the workload, so claude-code never runs as root.
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
 CMD ["claude"]

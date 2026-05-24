@@ -16,8 +16,9 @@ fi
 
 iptables -F
 iptables -X
-iptables -t nat -F 2>/dev/null || true
-iptables -t mangle -F 2>/dev/null || true
+# Intentionally do NOT flush the nat/mangle tables: flushing nat removes
+# Docker's embedded-DNS DNAT (127.0.0.11:53) and breaks all name resolution
+# for the allowlist built below. The egress policy lives in the filter table.
 ipset destroy allowed-hosts 2>/dev/null || true
 
 iptables -P INPUT   DROP
@@ -102,7 +103,7 @@ fi
 if ! curl -fsS --max-time 8 -o /dev/null https://api.anthropic.com 2>/dev/null; then
     # api.anthropic.com returns 404 on /; -fsS makes 4xx a failure, that's fine.
     # We only care that the TCP/TLS handshake completed.
-    if ! curl -sS --max-time 8 -o /dev/null -w '%{http_code}\n' https://api.anthropic.com 2>/dev/null | grep -qE '^[0-9]+$'; then
+    if ! curl -sS --max-time 8 -o /dev/null -w '%{http_code}\n' https://api.anthropic.com 2>/dev/null | grep -qE '^[1-9][0-9]{2}$'; then
         log "FAIL: api.anthropic.com unreachable"
         exit 1
     fi

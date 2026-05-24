@@ -47,7 +47,7 @@ cd ~/some-project
 | ホスト資格情報の流出 | `~/.ssh` / `~/.aws` / `gcloud` / `~/.gitconfig` 等を追加 bind mount しない。`$HOME` と `/` は起動拒否。ただし機密ディレクトリ配下からの起動は禁止（機械的拒否は follow-up） |
 | 任意外部送信 | iptables 既定 DROP + ipset allowlist (api.anthropic.com, npm, GitHub等のみ) |
 | 暴走プロセス | `mem_limit=4g`, `pids_limit=1024`, `cpus=2.0`, `tini` で reap |
-| 権限昇格 | `cap_drop: ALL` → `NET_ADMIN`/`NET_RAW` のみ復帰、`no-new-privileges`、scoped sudo (firewall script 1本のみ) |
+| 権限昇格 | `cap_drop: ALL` → `NET_ADMIN`/`NET_RAW`（+ 降格用 `SETUID`/`SETGID`）のみ復帰、`no-new-privileges`、entrypoint は root 起動 → `gosu` で agent 降格 (sudo 不使用) |
 
 ### Allowlist 構成
 
@@ -66,10 +66,25 @@ cd ~/some-project
 - **OAuth トークン**は `claude-home` 名前付きボリュームに保持。共有マシンでは
   使い終わったら `aidock logout` で破棄。
 
+## CI
+
+GitHub Actions で次を実行する。
+
+- **`ci.yml`**
+  - **type-check**: `shellcheck`（全シェルスクリプト）/ `hadolint`（`docker/Dockerfile`）/ `docker compose config`（`compose.yaml` 妥当性検証）。
+  - **e2e**: イメージをビルドし、GitHub-hosted runner 上で受け入れ基準を実機検証する（`$HOME` / `/` 起動拒否、firewall プローブ、`agent` 権限・`sudo` 不在・capability 制限、資格情報ボリューム所有権）。
+- **`post-ci-verify.yml`**: CI 成功後に Claude Code Action（`anthropics/claude-code-action@v1`）が起動し、結果を検証・要約して PR にコメントする。認証は Claude GitHub App + `CLAUDE_CODE_OAUTH_TOKEN` secret。`workflow_run` の仕様上 `main` マージ後に有効。
+
+詳細・受け入れ基準は `docs/requirements.md` の FR-8 / FR-9 / AC-8 / AC-9 を参照。
+
 ## ファイル構成
 
 ```
 .
+├── .github/
+│   └── workflows/
+│       ├── ci.yml              # 型チェック + e2e
+│       └── post-ci-verify.yml  # CI 後に Claude が結果を検証・要約して PR コメント
 ├── docker/
 │   ├── Dockerfile          # node:22-slim ベース、agent ユーザー
 │   ├── init-firewall.sh    # default-deny + ipset allowlist
@@ -78,6 +93,7 @@ cd ~/some-project
 ├── bin/aidock              # ラッパー CLI
 ├── docs/
 │   └── requirements.md     # 要件定義書（正本 / Source of Truth）
+├── .hadolint.yaml          # hadolint 設定（DL3008 除外）
 ├── .dockerignore
 └── .gitignore
 ```

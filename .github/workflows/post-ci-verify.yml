@@ -1,0 +1,81 @@
+name: Post-CI Verification
+
+# Runs after the "CI" workflow finishes. When CI succeeded on a pull request,
+# a Claude Code agent verifies/summarizes the type-check + e2e results and posts
+# a concise summary comment on the PR. workflow_run only fires for this file once
+# it lives on the default branch (main).
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions:
+  contents: read
+  pull-requests: write
+  actions: read
+  # The Claude GitHub App auth path (no github_token input passed below) also
+  # needs `id-token: write` for its OIDC token exchange; without it the verify
+  # step fails to authenticate. Added at activation time alongside the action
+  # SHA pins — tracked in #17. Inert until the job is enabled there.
+
+jobs:
+  verify:
+    name: Claude verifies CI results
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'pull_request'
+    steps:
+      - name: Resolve PR number
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const run = context.payload.workflow_run;
+            let number = run.pull_requests?.[0]?.number;
+            // Fallback only for same-repo runs: a fork could pick a branch name
+            // matching an open same-repo branch and hijack the comment target.
+            const sameRepo = run.head_repository?.full_name === `${context.repo.owner}/${context.repo.repo}`;
+            if (!number && sameRepo) {
+              const prs = await github.rest.pulls.list({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                state: 'open',
+                head: `${context.repo.owner}:${run.head_branch}`,
+              });
+              // Multiple open PRs can share a head branch (e.g. the same branch
+              // opened against different bases), so match the exact commit CI
+              // ran on rather than blindly taking the first result.
+              const match = prs.data.find((pr) => pr.head.sha === run.head_sha);
+              number = match ? match.number : '';
+            }
+            core.setOutput('number', number || '');
+
+      # Intentionally do NOT check out the PR head: this is a privileged
+      # workflow_run job (pull-requests: write + CLAUDE_CODE_OAUTH_TOKEN), so
+      # untrusted PR content must not enter the workspace. The agent only reads
+      # CI results and comments, both via gh.
+      - name: Claude verifies and comments
+        if: steps.pr.outputs.number != ''
+        # A mutable tag is a supply-chain risk in this privileged job, so a SHA
+        # pin is required before enabling — but it must be the AUDITED v1 commit.
+        # (An earlier guess of 787c5a0 was wrong; codex notes current v1 = 20c8abf.)
+        # Pinning to the verified full SHA is tracked in #17, before activation.
+        uses: anthropics/claude-code-action@v1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: |
+            --max-turns 6
+            --allowedTools "Bash(gh run view:*),Bash(gh pr comment:*)"
+          prompt: |
+            The "CI" workflow (type-check + e2e) succeeded for PR #${{ steps.pr.outputs.number }} in ${{ github.repository }}.
+
+            Do the following, then stop:
+            1. Inspect the CI run: `gh run view ${{ github.event.workflow_run.id }} --repo ${{ github.repository }}` (add `--log-failed` or `--log` only if you need detail).
+            2. Briefly verify and summarize the type-check and e2e results (acceptance criteria AC-1..AC-4 / AC-7).
+            3. Post exactly ONE concise verification summary as a PR comment:
+               `gh pr comment ${{ steps.pr.outputs.number }} --repo ${{ github.repository }} --body "<summary>"`
+               Keep it short: overall pass/fail and a few key points. Do NOT commit or modify any files, and do NOT push.

@@ -5,7 +5,7 @@
 変更が必要な場合は **先に本書を改訂し、PR 内で根拠を述べた上で実装に着手する**。
 
 - **対象バージョン**: v1 系（Linux 専用、Claude Code 公式 CLI を Docker でサンドボックス化）
-- **最終更新**: 2026-05-20
+- **最終更新**: 2026-05-24
 - **位置づけ**: 要件 ＞ 設計 ＞ 実装。本書未記載の事項は CLAUDE.md / README.md の記述に従う。
 
 ---
@@ -41,7 +41,7 @@
 - カスタム seccomp / AppArmor プロファイル、user namespace remap。
 - マルチユーザー / マルチプロジェクト同時実行のためのオーケストレーション。
 - Claude Code 以外の AI CLI（Gemini CLI 等）のサポート。
-- CI/CD パイプライン、pre-commit フック、テストランナー（codex 自動レビューは bot ベースで設定済みだが、CI ジョブとしては存在しない。FR-7 参照）。
+- pre-commit フック、汎用テストランナー（unit テスト等）。ただし CI/CD は本書改訂によりスコープ内へ移行し、GitHub Actions による**型チェック**と **e2e** を提供する（FR-8 参照）。codex 自動レビューは引き続き bot ベースで、CI からは投稿しない（FR-7 参照）。
 
 ---
 
@@ -89,7 +89,7 @@
 - FR-3.3: ボリューム配下のファイルは `build` 時の `HOST_UID:HOST_GID` で所有される。`agent` ユーザ自体も `Dockerfile` で同 UID/GID を持って生成されるため、ホストの UID/GID が変わった場合は **`aidock build` でイメージを再構築 → `aidock logout` でボリュームを破棄 → `aidock login`** の順で実施する（イメージを再ビルドせずにボリュームのみ作り直しても、`HOME=/home/agent` の所有者は古い UID/GID のままで AC-7 が失敗し続ける）。**マルチユーザー共用ホストでは利用終了時に必ず `aidock logout` を実行する**（資格情報がボリュームに残るため）。
 
 ### FR-4: ファイアウォール初期化
-- コンテナ起動時、`AIDOCK_SKIP_FIREWALL=1` でない限り `init-firewall.sh` を実行する。
+- コンテナ起動時、`AIDOCK_SKIP_FIREWALL=1` でない限り `init-firewall.sh` を実行する。entrypoint は **root** で起動して `init-firewall.sh` を直接実行し（sudo は使わない）、初期化後に `gosu agent` でワークロードを exec する（SEC-6 / SEC-7 参照）。
 - FR-4.0: `AIDOCK_SKIP_FIREWALL=1` が設定されているときに限り初期化をスキップする。**デバッグ専用** であり、CI および共有ホストでは設定しない（SEC-13）。
 - FR-4.1: 既定で `INPUT`/`FORWARD`/`OUTPUT` を `DROP`。
 - FR-4.2: loopback、`ESTABLISHED,RELATED`、DNS(53/udp,tcp) のみ恒久許可。
@@ -98,7 +98,7 @@
 - FR-4.5: GitHub `https://api.github.com/meta` から CIDR を取得し ipset へ追加。取得した CIDR は SEC-12.1 / SEC-12.2 の検証を通過した場合にのみ追加する。**現状実装は SEC-12.1（正規表現）のみ通過確認しており、SEC-12.2（octet/prefix 範囲）は要件先行で未実装** — follow-up PR で実装する。meta 取得自体が失敗した場合は **warn ログのみで継続**し、ホスト名解決で得た IP の範囲に縮退する。
 - FR-4.6: 最後に検証プローブを実行する（AC-4 と同表現で揃える）。
   - `curl -fsS --max-time 3 https://example.com` が **non-zero exit** であること（接続拒否・タイムアウト・名前解決失敗のいずれも成功扱い）。到達した場合は exit 1。**実装済み**（`init-firewall.sh:98`）。
-  - `curl -sS --max-time 8 -o /dev/null -w '%{http_code}\n' https://api.anthropic.com` の出力が `^[1-9][0-9]{2}$` に一致すること。`000`（curl の transport failure 印）は不合格扱い、4xx/5xx は合格。**現状実装は `^[0-9]+$`（`init-firewall.sh:105`）で `000` も許容してしまう。要件先行・未実装** — follow-up PR で `init-firewall.sh:105` を `^[1-9][0-9]{2}$` に修正する。
+  - `curl -sS --max-time 8 -o /dev/null -w '%{http_code}\n' https://api.anthropic.com` の出力が `^[1-9][0-9]{2}$` に一致すること。`000`（curl の transport failure 印）は不合格扱い、4xx/5xx は合格。**実装済み**（`init-firewall.sh` の api.anthropic.com プローブを `^[1-9][0-9]{2}$` に修正し、`000` を不合格化）。
 - FR-4.7: FR-4.3 / FR-4.5 のホスト解決と CIDR 取得は **best-effort**。個別ホストの失敗で初期化を中止しない。**終端プローブ（FR-4.6）が失敗した場合のみ `exit 1`** とする。
 
 ### FR-5: ログ出力
@@ -110,7 +110,7 @@
 - 機能を追加・削除・変更したら、**同じ PR 内で関連 doc を更新**する。
 
 ### FR-7: codex 自動レビュー
-- `chatgpt-codex-connector[bot]`（codex 自動レビュー）がリポジトリレベルで有効化されている（OpenAI 側設定）。本リポジトリには CI ワークフローは存在しない。
+- `chatgpt-codex-connector[bot]`（codex 自動レビュー）がリポジトリレベルで有効化されている（OpenAI 側設定）。codex はコードレビュー担当であり、CI（`ci.yml`）から codex へコメント投稿（`@codex review`）は行わない。なお CI 成功後の**検証サマリ**は別途 Claude Code Action（FR-9）が PR にコメントする（codex とは別物）。
 - レビューが発火する条件は次のいずれか:
   - PR を **draft → ready** に変える（誰の操作でも発火）。
   - **Codex 接続済み GitHub アカウント** から `@codex review` コメントを投稿。
@@ -119,6 +119,27 @@
   - **運用ルール**: Claude は **差分 push を伴う報告コメントの末尾に `@codex review` を追記**して再レビューを発火させる。質問への返信や再レビューを要しない状況報告コメントには付けない。
   - 初回レビューは draft → ready 化（izumacha でも Claude でも可）で発火する。
   - Claude の操作が `github-actions[bot]` 等の bot 名義になる実行環境では従来どおり受理されないため、izumacha の手動 ready 化または `@codex review` 投稿が必要。
+
+### FR-8: CI ワークフロー
+`.github/workflows/ci.yml`（GitHub Actions）で**型チェック**と **e2e** を実行する。push（全ブランチ）および `main` への pull_request で発火し、`permissions: contents: read` のみを付与する（FR-7 に従い codex へのコメント投稿は行わない）。
+
+- FR-8.1: **type-check ジョブ**は次の静的解析を実行し、いずれか失敗で CI を不合格とする。
+  - `shellcheck`（v0.11.0、GitHub Releases から取得した固定版）を全シェルスクリプト（`bin/aidock`・`docker/init-firewall.sh`・`docker/entrypoint.sh`）に適用。
+  - `bash -n` による構文チェック。
+  - `hadolint`（v2.14.0、GitHub Releases から取得した固定版）で `docker/Dockerfile` を検査。`DL3008`（apt パッケージのバージョン固定）は `.hadolint.yaml` で除外する（理由は NFR-5.1: 再現性は `CLAUDE_CODE_VERSION` 固定と `--no-install-recommends` で担保し、OS ライブラリの逐一ピン留めは方針外）。
+  - `docker compose -f compose.yaml config -q` による compose 定義の妥当性検証。
+- FR-8.2: **e2e ジョブ**（type-check 成功後に実行）は GitHub-hosted runner 上で受け入れ基準を実機検証する。検証項目と AC の対応は AC-8 を参照。SEC-13 に従い `AIDOCK_SKIP_FIREWALL` は設定せず、**実ファイアウォールを起動した状態で検証する**。
+- FR-8.3: e2e は外部 egress（`api.anthropic.com` / `claude.ai` / `api.github.com`）に依存する。各プローブは `--max-time` を持つが、ネットワーク要因による一時失敗の可能性がある（残存リスク）。
+
+### FR-9: CI 後の Claude 検証エージェント
+`.github/workflows/post-ci-verify.yml`（GitHub Actions）で、CI 成功後に Claude Code Action（`anthropics/claude-code-action@v1`）を起動し、結果を検証・要約して PR にコメントする。
+
+- FR-9.1: トリガは `workflow_run`（`workflows: ["CI"]`, `types: [completed]`）。`github.event.workflow_run.conclusion == 'success'` かつ `event == 'pull_request'` のときのみ実行する。
+- FR-9.2: PR 番号は `workflow_run.pull_requests[0].number` で解決する。空の場合のフォールバックは **同一リポジトリ実行（`head_repository.full_name == owner/repo`）に限定**し、`head_branch` の open PR のうち **`head.sha == workflow_run.head_sha` に一致する PR** を選ぶ（同名 head ブランチの複数 PR で誤った相手にコメントしないため）。fork PR は `pull_requests[]` が空かつ同一リポジトリ判定で弾かれ実質スキップ（セキュリティ上も望ましい）。
+- FR-9.3: 認証は **Claude GitHub App + OAuth**。リポジトリ secret `CLAUDE_CODE_OAUTH_TOKEN` を `claude_code_oauth_token` 入力で渡す（代替として `ANTHROPIC_API_KEY` + `anthropic_api_key` も可）。当該 secret は **GitHub Actions secret** でありイメージ層・コンテナには持ち込まない（SEC-10 と整合）。`permissions` は `contents: read` / `pull-requests: write` / `actions: read`。
+- FR-9.4: エージェントは type-check / e2e（AC-1〜AC-4 / AC-7）の結果を検証・要約し、PR に**コメント1件**を投稿する。**コミット・ファイル変更・push は行わない**（CI は push/PR でのみ発火し、コメントでは再発火しないため無限ループしない）。
+- FR-9.5: `workflow_run` は**デフォルトブランチ（`main`）上のワークフローのみ発火**する。本ワークフローは `main` マージ後の PR から有効になる。
+- FR-9.6: 特権ワークフロー（`pull-requests: write` ＋ secret）の堅牢化として、(a) PR head を **checkout しない**（非信頼コードをワークスペースに展開しない）、(b) `claude-code-action` は **有効化前に監査済み v1 commit の SHA へピン**する（可変タグの供給網リスク回避。フル SHA の確認は #17）、(c) Claude のツールを **`gh run view` / `gh pr comment` に限定**する（`--allowedTools`）、(d) `github_token` 入力を省略し **Claude GitHub App 認証**を用いるため、有効化時に **`permissions: id-token: write`** を付与する（OIDC トークン交換に必須。未付与だと検証 step が認証失敗。SHA ピンと併せて #17 で対応）。
 
 ---
 
@@ -130,13 +151,13 @@
 
 | ID | 内容 | 根拠ファイル |
 | --- | --- | --- |
-| SEC-1 | `cap_drop: ALL` を維持。追加 cap は `NET_ADMIN`/`NET_RAW` のみ（ファイアウォール用）。 | `compose.yaml` |
+| SEC-1 | `cap_drop: ALL` を維持。追加 cap は `NET_ADMIN`/`NET_RAW`（ファイアウォール用）と `SETUID`/`SETGID`（entrypoint が root→agent へ降格する `gosu` 用）のみ。降格後の `agent` プロセスは capability を持たない。 | `compose.yaml` |
 | SEC-2 | `security_opt: no-new-privileges:true` を維持。 | `compose.yaml` |
 | SEC-3 | `read_only: true` を維持し、書き込み可能領域は `/workspace:rw` の明示 bind mount、必要最小限の `tmpfs`、および `claude-home` ボリュームに限定する。`/workspace:rw` は **`.git` を含むツリー全体を書き換え可能**であり、コンテナ内プロセスがコミット・履歴書換を実行しうる前提で運用する（read-only 化はサポート外）。 | `compose.yaml` |
 | SEC-4 | `mem_limit`・`pids_limit`・`cpus` の上限を撤廃しない（既定: 4G / 1024 / 2.0）。 | `compose.yaml` |
 | SEC-5 | `iptables -P OUTPUT DROP`（既定拒否）と終端の検証プローブを維持。 | `init-firewall.sh` |
-| SEC-6 | sudo の許可対象は `/usr/local/bin/init-firewall.sh` のみ NOPASSWD。他に NOPASSWD を追加しない。 | `Dockerfile` |
-| SEC-7 | コンテナの最終 `USER` は `agent`。root で実行しない。 | `Dockerfile` |
+| SEC-6 | コンテナイメージに `sudo` を含めない。firewall 初期化は entrypoint が **root で直接実行**し、setuid による昇格を一切使わない（`no-new-privileges` 下では setuid `sudo` が root 化できないため）。 | `Dockerfile` / `entrypoint.sh` |
+| SEC-7 | ワークロード（claude-code 等）は `agent` で実行する。entrypoint は firewall 初期化のためにのみ root で起動し、`gosu agent` で**不可逆に降格**してからコマンドを exec する（`no-new-privileges` 下で setuid による再昇格は不可）。 | `Dockerfile` / `entrypoint.sh` |
 | SEC-8 | ホストの資格情報・設定ファイルがコンテナへ流出することを防ぐ。**一次防御**は (a) `compose.yaml` が `$PWD` と `claude-home` 以外を bind mount しないこと、(b) `bin/aidock` の `guard_workspace()` が `$HOME` と `/` を起動カレントとして拒否すること。**機械的拒否対象**: 次のパス配下から `aidock` を起動すると `guard_workspace()` が exit 2 で拒否する: `~/.ssh`、`~/.aws`、`~/.config/aws`、`~/.gcloud`、`~/.config/gcloud`、`~/.azure`、`~/.config/azure`、`~/.gitconfig`、`~/.git-credentials`、`~/.config/git`、`~/.config/gh`、`~/.netrc`、`~/.kube`（kubeconfig）、`~/.docker`、`/var/run/docker.sock`、`~/.npmrc`、`~/.pypirc`。`guard_workspace()` は判定基準を常に passwd データベース（`getent passwd "$(id -u)"`）の実 home から導出し、呼び出し側の `$HOME` は一切信用しない。passwd home が解決できない（取得失敗・非ディレクトリ・`realpath` 失敗）場合は **fail closed** で `exit 2` とし、`$HOME` へはフォールバックしない。これにより `HOME=` クリア・`unset HOME`・別の実在ディレクトリへの偽装（`HOME=/tmp` 等）のいずれでもバイパスできない。運用上もこれらの配下から `aidock` を起動しないことを推奨する。 | `compose.yaml` / `bin/aidock` |
 | SEC-9 | `guard_workspace()` の `/` および `$HOME` 拒否を撤去・回避しない。 | `bin/aidock` |
 | SEC-10 | OAuth 資格情報はイメージ層・ホスト FS に書き出さない（名前付きボリュームのみ）。 | `compose.yaml` |
@@ -159,6 +180,7 @@
 - すべての shell スクリプトは Bash で書き、先頭に `set -euo pipefail` を付ける。
 - インデントは 4 スペース、タブ禁止。
 - 重要な分岐・例外には意図が分かるコメントを残す（言語は問わない。既存実装は英語コメント中心）。
+- すべてのシェルスクリプトは CI（FR-8.1）の `shellcheck` を、`docker/Dockerfile` は `hadolint` を通過すること。
 
 ### NFR-5: 再現性
 - NFR-5.1: `Dockerfile` の `ARG CLAUDE_CODE_VERSION` で Claude Code のバージョンを固定し、依存パッケージは `--no-install-recommends` で最小化する。
@@ -196,13 +218,13 @@
     - すべて `exit=2` であること（`HOME` を空・不在値・別の実在ディレクトリ（`/tmp` 等）へ偽装しても、passwd データベースの実 home を基準に判定するため拒否される）。
 
 ### AC-3: 権限
-- コンテナ内 `whoami` が `agent`。
-- `sudo -n /usr/local/bin/init-firewall.sh` のみ実行可能、他コマンドの sudo は失敗する。
-- `cap_add` に列挙されていない capability を要求する操作（例: マウント追加）は失敗する。
+- コンテナ内 `whoami` が `agent`（entrypoint が `gosu` で降格した結果）。
+- コンテナに `sudo` は存在せず、`agent` から root への昇格手段が無い。
+- capability 集合が最小であること（`/proc/self/status` の `CapBnd` で `CAP_SYS_ADMIN` 不在・`CAP_NET_ADMIN` 在を確認）。`mount` 等の syscall はデフォルト seccomp でも遮断されるため、capability の回帰検出には bounding set を直接参照する（`mount` 失敗では検証にならない）。
 
 ### AC-4: ネットワーク
 - `curl -fsS --max-time 3 https://example.com` が **non-zero exit** であること（接続拒否・タイムアウト・名前解決失敗のいずれも成功扱い）。
-- `curl -sS --max-time 8 -o /dev/null -w '%{http_code}\n' https://api.anthropic.com | grep -qE '^[1-9][0-9]{2}$'` が **exit 0** であること。`000` は curl の transport failure 印（DNS / 接続 / TLS 失敗時の sentinel）であり **不合格扱い**。4xx/5xx は合格。**現状の `init-firewall.sh:105` は `grep -qE '^[0-9]+$'` のため `000` も合格扱いになる残存リスクあり**（follow-up PR で同期）。
+- `curl -sS --max-time 8 -o /dev/null -w '%{http_code}\n' https://api.anthropic.com | grep -qE '^[1-9][0-9]{2}$'` が **exit 0** であること。`000` は curl の transport failure 印（DNS / 接続 / TLS 失敗時の sentinel）であり **不合格扱い**。4xx/5xx は合格。**`init-firewall.sh` の api.anthropic.com プローブを `^[1-9][0-9]{2}$` に修正済み**（`000` を不合格化）。
 - `AIDOCK_PROFILE=login` のときに限り、同様の手順で `https://claude.ai` からも 100–599 のステータスが返ること。
 
 ### AC-5: 永続化
@@ -214,6 +236,17 @@
 
 ### AC-7: 資格情報ボリューム所有権
 - `docker compose -f compose.yaml run --rm --no-deps --entrypoint sh claude -c 'stat -c "%u:%g" /home/agent/.claude'` の出力が **`$(id -u):$(id -g)`** と一致する（FR-3.3）。compose 経由で実行するため、Compose プロジェクト名（ボリューム名の prefix）に依存せず判定できる。一致しない場合は **`aidock build` → `aidock logout` → `aidock login`** の順で再構築する（`agent` ユーザの UID/GID は image build 時に baking されるため、ボリュームの作り直しのみでは復旧しない。FR-3.3 と整合）。
+
+### AC-8: CI
+- `.github/workflows/ci.yml` の **type-check** と **e2e** の両ジョブがグリーンであること（PR マージの必須条件、FR-8）。
+- type-check は FR-8.1 の静的解析（`shellcheck` / `bash -n` / `hadolint` / `docker compose config`）をすべて通過する。
+- e2e は次を GitHub-hosted runner 上で実機検証する: AC-1（ビルド + 起動プローブ）、AC-2（`$HOME` / `/` 起動を exit 2 で拒否）、AC-3（`whoami=agent` / `sudo` 不在 / capability 制限）、AC-4（run プロファイルの example.com 遮断・api.anthropic.com 到達、login プロファイルの claude.ai 到達）、AC-7（資格情報ボリューム所有権）。
+- **AC-5（永続化）は対話 OAuth ログインを要するため CI 対象外**とし、ローカル手動検証に委ねる。
+
+### AC-9: CI 後検証エージェント
+- `main` 上で `CI` が PR に対して成功すると、`.github/workflows/post-ci-verify.yml`（FR-9）が起動し、Claude が type-check / e2e の結果を検証・要約して PR に**コメント1件**を投稿する。
+- 当該ワークフローはコメントのみで、コミット・push は行わない。`CLAUDE_CODE_OAUTH_TOKEN` secret が前提。
+- `workflow_run` の仕様上、`main` にマージされるまでは発火しない（PR ブランチ単独では検証不可）。
 
 ---
 
@@ -236,6 +269,17 @@
 
 | 日付 | 改訂内容 | 担当 |
 | --- | --- | --- |
+| 2026-05-24 | codex レビュー（5巡目）反映: (1) `post-ci-verify.yml` の PR fallback を **`head.sha == workflow_run.head_sha` 一致**で厳密化し、同名 head ブランチの複数 PR で誤った PR にコメントする経路を排除（P2、FR-9.2 更新）。(2) Claude GitHub App 認証パスが要求する **`id-token: write`** の付与を有効化前タスクとして #17 に集約（codex P1。公式 setup docs で要否を確認済み。SHA ピンと同じ扱い、FR-9.6 に (d) を追記）。 | Claude Code |
+| 2026-05-24 | codex レビュー（4巡目）反映: `post-ci-verify.yml` の PR 番号 fallback に **同一リポジトリ判定**（`head_repository.full_name == owner/repo`）を追加し、fork のブランチ名衝突で無関係 PR にコメントする経路を遮断（P3）。action の SHA ピン（claude-code-action / github-script、P1/P2）はフル SHA をこの環境で確認できないため有効化前タスクとして #17 に集約。 | Claude Code |
+| 2026-05-24 | codex レビュー（3巡目）反映: (1) e2e の run-profile（AC-1/AC-4）を `claude true` から `api.anthropic.com` の **明示 egress アサーション**（`^[1-9][0-9]{2}$`）に変更。(2) `post-ci-verify.yml` のピン SHA が誤り（`787c5a0` は v1≠、codex によれば現 v1=`20c8abf`）だったため `@v1` に戻し、監査済み SHA へのピンを有効化前タスクとして #17 に集約（FR-9.6 更新）。 | Claude Code |
+| 2026-05-24 | 運用ルール追加: Claude は PR への実装変更を push した後、GitHub MCP（izumacha 認証＝Codex 接続済みアカウント名義）で `@codex review` を自動投稿する（workflow の bot 名義投稿は FR-7 のとおり拒否されるため代替）。FR-7 と CLAUDE.md「Git ワークフロー」を更新。 | Claude Code |
+| 2026-05-24 | codex レビュー（2巡目）反映: (1) CI の AC-3 capability 検証を `mount` プローブから `/proc/self/status` の `CapBnd` 直接検査へ変更（`mount` はデフォルト seccomp で常に失敗し cap 回帰を検出できないため）。(2) `post-ci-verify.yml` を堅牢化: PR head の checkout を撤去、`claude-code-action` を commit SHA でピン、Claude のツールを `gh run view` / `gh pr comment` に限定（FR-9.6）。`init-firewall.sh:105` の `000` 是正と run-profile プローブは既に対応済み。 | Claude Code |
+| 2026-05-24 | CI 後の Claude 検証エージェントを追加: `.github/workflows/post-ci-verify.yml` を新設し、`workflow_run`（CI 成功・PR）で `anthropics/claude-code-action@v1` を起動、type-check / e2e 結果を検証・要約して PR にコメント1件を投稿（コミットしない）。認証は Claude GitHub App + `CLAUDE_CODE_OAUTH_TOKEN`。FR-9 / AC-9 を新設、FR-7 を改訂（codex とは別の検証コメントである旨）。`workflow_run` は `main` 上のワークフローのみ発火するため `main` マージ後に有効。CLAUDE.md / README.md も同期。既存コードは未変更。 | Claude Code |
+| 2026-05-24 | e2e で判明した gosu 降格失敗を修正: `cap_drop: ALL` が `CAP_SETUID`/`CAP_SETGID` を剥奪するため root→agent 降格が `operation not permitted` で失敗していた。`cap_add` に `SETUID`/`SETGID` を追加し SEC-1 を改訂（降格後の `agent` は capability ゼロ）。これで firewall は通過済み（`[firewall] ok`）の状態で起動経路が完結する。 | Claude Code |
+| 2026-05-24 | codex レビュー反映: `init-firewall.sh` の api.anthropic.com プローブ正規表現を `^[0-9]+$` → `^[1-9][0-9]{2}$` に修正し curl の `000`（transport failure）を不合格化（FR-4.6 / AC-4 の follow-up を実装）。CI の AC-3 capability チェックを **root 経由**（`--entrypoint sh`）の `mount` 失敗確認に変更し、CAP_SYS_ADMIN の回帰を検出可能にした。 | Claude Code |
+| 2026-05-24 | e2e で判明した DNS 解決不能を修正: `init-firewall.sh` の `iptables -t nat -F`（および mangle flush）が Docker 組込み DNS（`127.0.0.11:53`）の DNAT を消去し、コンテナ内の全ホスト名解決が失敗していた（allowlist が空になり AC-4 プローブが失敗）。nat/mangle のフラッシュを撤去（filter テーブルのリセットは維持）。egress 拒否方針（SEC-5）は不変。 | Claude Code |
+| 2026-05-24 | e2e で判明した起動経路の不具合を修正: `no-new-privileges`（SEC-2）下では setuid `sudo` が root 化できず entrypoint の `sudo init-firewall.sh` が失敗するため、**root 起動 → `gosu agent` 降格** 方式へ変更（`sudo` を廃止しイメージから除去、`gosu` を追加、`USER agent` を撤去して entrypoint を root 起動に）。SEC-6 / SEC-7 を再定義し、FR-4 / AC-3 を更新、CI の AC-3 を sudo 非依存に変更。CLAUDE.md / README.md の脅威モデルも同期。 | Claude Code |
+| 2026-05-24 | CI ワークフロー（型チェック + e2e）を新設: `.github/workflows/ci.yml` と `.hadolint.yaml`（DL3008 除外）を追加。type-check は GitHub Releases から取得した固定版 shellcheck 0.11.0 / hadolint 2.14.0 と `bash -n` / `docker compose config`、e2e は AC-1〜AC-4 / AC-7 を GitHub-hosted runner で実機検証（AC-5 は対話ログイン要のため対象外）。§1.3 を CI スコープ内へ改訂、FR-8 / AC-8 を追加、FR-7 / NFR-4 を更新。`bin/aidock` の SC2155（declare-and-assign 分離）、`docker/Dockerfile` の `useradd` の `-l` 欠落（hadolint DL3046）、および node ユーザ削除順序（`groupdel` を `userdel` より先に実行していたためクリーンビルドが exit 8 で失敗）を修正。CLAUDE.md / README.md も同期。 | Claude Code |
 | 2026-05-23 | SEC-8 の follow-up を実装: `bin/aidock` の `guard_workspace()` を拡張し、機密ディレクトリ/ファイル配下（`~/.ssh`、`~/.aws`、`~/.config/gh` など）および `/var/run/docker.sock` 配下からの起動を機械的に拒否。README/CLAUDE の説明も運用依存から実装済み表現へ同期。 | Codex |
 | 2026-05-23 | 追加レビュー反映: `guard_workspace()` の拒否対象に `~/.config/gcloud` と `~/.git-credentials` を追加し、関連ドキュメントの機密パス一覧を同期。 | Codex |
 | 2026-05-23 | 追加レビュー反映: クラウド資格情報配置の揺れを考慮し、`guard_workspace()` の拒否対象に `~/.config/aws` と `~/.config/azure` を追加。README/CLAUDE/要件の機密パス一覧を同期。 | Codex |
