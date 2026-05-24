@@ -15,34 +15,46 @@ compose() {
 }
 
 guard_workspace() {
-    local pwd_abs home_abs
+    local pwd_abs home_abs passwd_home
     pwd_abs="$(realpath "$PWD")"
-    home_abs="$(realpath "${HOME:-/nonexistent}" 2>/dev/null || echo "")"
+
+    # Anchor the guard base strictly to the passwd entry for the current
+    # UID. Never fall back to the caller-supplied $HOME: a forged HOME (e.g.
+    # HOME=/tmp) would relocate the comparison base and skip the SEC-8
+    # sensitive-path checks. If the passwd home cannot be resolved to a real
+    # directory, fail closed (exit 2) rather than trusting untrusted input.
+    home_abs=""
+    passwd_home="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6 || true)"
+    if [[ -n "$passwd_home" && -d "$passwd_home" ]]; then
+        home_abs="$(realpath "$passwd_home" 2>/dev/null || true)"
+    fi
+    if [[ -z "$home_abs" ]]; then
+        echo "aidock: cannot resolve home directory from passwd database; refusing to proceed" >&2
+        exit 2
+    fi
 
     if [[ "$pwd_abs" == "/" ]]; then
         echo "aidock: refusing to mount / as /workspace" >&2
         exit 2
     fi
-    if [[ -n "$home_abs" && "$pwd_abs" == "$home_abs" ]]; then
+    if [[ "$pwd_abs" == "$home_abs" ]]; then
         echo "aidock: refusing to mount \$HOME as /workspace. cd into a project subdirectory first." >&2
         exit 2
     fi
 
     # Block known sensitive locations from being mounted into /workspace.
-    if [[ -n "$home_abs" ]]; then
-        local rel
-        rel="${pwd_abs#"$home_abs"/}"
-        case "$rel" in
-            .ssh|.ssh/*|.aws|.aws/*|.gcloud|.gcloud/*|.config/gcloud|.config/gcloud/*|.azure|.azure/*|.config/azure|.config/azure/*|.config/aws|.config/aws/*|.config/git|.config/git/*|.config/gh|.config/gh/*|.kube|.kube/*|.docker|.docker/*)
-                echo "aidock: refusing to mount sensitive directory under \$HOME: $pwd_abs" >&2
-                exit 2
-                ;;
-            .gitconfig|.git-credentials|.netrc|.npmrc|.pypirc)
-                echo "aidock: refusing to mount sensitive file under \$HOME: $pwd_abs" >&2
-                exit 2
-                ;;
-        esac
-    fi
+    local rel
+    rel="${pwd_abs#"$home_abs"/}"
+    case "$rel" in
+        .ssh|.ssh/*|.aws|.aws/*|.gcloud|.gcloud/*|.config/gcloud|.config/gcloud/*|.azure|.azure/*|.config/azure|.config/azure/*|.config/aws|.config/aws/*|.config/git|.config/git/*|.config/gh|.config/gh/*|.kube|.kube/*|.docker|.docker/*)
+            echo "aidock: refusing to mount sensitive directory under \$HOME: $pwd_abs" >&2
+            exit 2
+            ;;
+        .gitconfig|.git-credentials|.netrc|.npmrc|.pypirc)
+            echo "aidock: refusing to mount sensitive file under \$HOME: $pwd_abs" >&2
+            exit 2
+            ;;
+    esac
 
     if [[ "$pwd_abs" == "/var/run/docker.sock" || "$pwd_abs" == "/var/run/docker.sock/"* ]]; then
         echo "aidock: refusing to mount docker socket path: $pwd_abs" >&2
