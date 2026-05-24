@@ -65,8 +65,17 @@ jobs:
           echo "HOST_GID=$(id -g)"   >> "$GITHUB_ENV"
           echo "HOST_WORKSPACE=$PWD" >> "$GITHUB_ENV"
 
+      - name: Diagnose build prerequisites (network)
+        run: |
+          set +e
+          echo "docker server: $(docker version --format '{{.Server.Version}}' 2>/dev/null)"
+          docker pull node:22-slim >/dev/null 2>&1 && echo "DOCKERHUB_PULL=OK" || echo "DOCKERHUB_PULL=FAIL"
+          curl -fsS --max-time 10 -o /dev/null https://deb.debian.org/debian/ && echo "DEBIAN_MIRROR=OK" || echo "DEBIAN_MIRROR=FAIL"
+          curl -fsS --max-time 10 -o /dev/null https://registry.npmjs.org/ && echo "NPM_REGISTRY=OK" || echo "NPM_REGISTRY=FAIL"
+          true
+
       - name: AC-1 build
-        run: ./bin/aidock build
+        run: ./bin/aidock build --progress=plain
 
       - name: AC-2 guard rejects $HOME and /
         run: |
