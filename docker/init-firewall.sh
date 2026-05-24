@@ -103,7 +103,7 @@ fi
 if ! curl -fsS --max-time 8 -o /dev/null https://api.anthropic.com 2>/dev/null; then
     # api.anthropic.com returns 404 on /; -fsS makes 4xx a failure, that's fine.
     # We only care that the TCP/TLS handshake completed.
-    if ! curl -sS --max-time 8 -o /dev/null -w '%{http_code}\n' https://api.anthropic.com 2>/dev/null | grep -qE '^[0-9]+$'; then
+    if ! curl -sS --max-time 8 -o /dev/null -w '%{http_code}\n' https://api.anthropic.com 2>/dev/null | grep -qE '^[1-9][0-9]{2}$'; then
         log "FAIL: api.anthropic.com unreachable"
         exit 1
     fi

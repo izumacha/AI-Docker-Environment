@@ -98,7 +98,7 @@
 - FR-4.5: GitHub `https://api.github.com/meta` から CIDR を取得し ipset へ追加。取得した CIDR は SEC-12.1 / SEC-12.2 の検証を通過した場合にのみ追加する。**現状実装は SEC-12.1（正規表現）のみ通過確認しており、SEC-12.2（octet/prefix 範囲）は要件先行で未実装** — follow-up PR で実装する。meta 取得自体が失敗した場合は **warn ログのみで継続**し、ホスト名解決で得た IP の範囲に縮退する。
 - FR-4.6: 最後に検証プローブを実行する（AC-4 と同表現で揃える）。
   - `curl -fsS --max-time 3 https://example.com` が **non-zero exit** であること（接続拒否・タイムアウト・名前解決失敗のいずれも成功扱い）。到達した場合は exit 1。**実装済み**（`init-firewall.sh:98`）。
-  - `curl -sS --max-time 8 -o /dev/null -w '%{http_code}\n' https://api.anthropic.com` の出力が `^[1-9][0-9]{2}$` に一致すること。`000`（curl の transport failure 印）は不合格扱い、4xx/5xx は合格。**現状実装は `^[0-9]+$`（`init-firewall.sh:105`）で `000` も許容してしまう。要件先行・未実装** — follow-up PR で `init-firewall.sh:105` を `^[1-9][0-9]{2}$` に修正する。
+  - `curl -sS --max-time 8 -o /dev/null -w '%{http_code}\n' https://api.anthropic.com` の出力が `^[1-9][0-9]{2}$` に一致すること。`000`（curl の transport failure 印）は不合格扱い、4xx/5xx は合格。**実装済み**（`init-firewall.sh` の api.anthropic.com プローブを `^[1-9][0-9]{2}$` に修正し、`000` を不合格化）。
 - FR-4.7: FR-4.3 / FR-4.5 のホスト解決と CIDR 取得は **best-effort**。個別ホストの失敗で初期化を中止しない。**終端プローブ（FR-4.6）が失敗した場合のみ `exit 1`** とする。
 
 ### FR-5: ログ出力
@@ -204,7 +204,7 @@
 
 ### AC-4: ネットワーク
 - `curl -fsS --max-time 3 https://example.com` が **non-zero exit** であること（接続拒否・タイムアウト・名前解決失敗のいずれも成功扱い）。
-- `curl -sS --max-time 8 -o /dev/null -w '%{http_code}\n' https://api.anthropic.com | grep -qE '^[1-9][0-9]{2}$'` が **exit 0** であること。`000` は curl の transport failure 印（DNS / 接続 / TLS 失敗時の sentinel）であり **不合格扱い**。4xx/5xx は合格。**現状の `init-firewall.sh:105` は `grep -qE '^[0-9]+$'` のため `000` も合格扱いになる残存リスクあり**（follow-up PR で同期）。
+- `curl -sS --max-time 8 -o /dev/null -w '%{http_code}\n' https://api.anthropic.com | grep -qE '^[1-9][0-9]{2}$'` が **exit 0** であること。`000` は curl の transport failure 印（DNS / 接続 / TLS 失敗時の sentinel）であり **不合格扱い**。4xx/5xx は合格。**`init-firewall.sh` の api.anthropic.com プローブを `^[1-9][0-9]{2}$` に修正済み**（`000` を不合格化）。
 - `AIDOCK_PROFILE=login` のときに限り、同様の手順で `https://claude.ai` からも 100–599 のステータスが返ること。
 
 ### AC-5: 永続化
@@ -244,6 +244,7 @@
 
 | 日付 | 改訂内容 | 担当 |
 | --- | --- | --- |
+| 2026-05-24 | codex レビュー反映: `init-firewall.sh` の api.anthropic.com プローブ正規表現を `^[0-9]+$` → `^[1-9][0-9]{2}$` に修正し curl の `000`（transport failure）を不合格化（FR-4.6 / AC-4 の follow-up を実装）。CI の AC-3 capability チェックを **root 経由**（`--entrypoint sh`）の `mount` 失敗確認に変更し、CAP_SYS_ADMIN の回帰を検出可能にした。 | Claude Code |
 | 2026-05-24 | e2e で判明した DNS 解決不能を修正: `init-firewall.sh` の `iptables -t nat -F`（および mangle flush）が Docker 組込み DNS（`127.0.0.11:53`）の DNAT を消去し、コンテナ内の全ホスト名解決が失敗していた（allowlist が空になり AC-4 プローブが失敗）。nat/mangle のフラッシュを撤去（filter テーブルのリセットは維持）。egress 拒否方針（SEC-5）は不変。 | Claude Code |
 | 2026-05-24 | e2e で判明した起動経路の不具合を修正: `no-new-privileges`（SEC-2）下では setuid `sudo` が root 化できず entrypoint の `sudo init-firewall.sh` が失敗するため、**root 起動 → `gosu agent` 降格** 方式へ変更（`sudo` を廃止しイメージから除去、`gosu` を追加、`USER agent` を撤去して entrypoint を root 起動に）。SEC-6 / SEC-7 を再定義し、FR-4 / AC-3 を更新、CI の AC-3 を sudo 非依存に変更。CLAUDE.md / README.md の脅威モデルも同期。 | Claude Code |
 | 2026-05-24 | CI ワークフロー（型チェック + e2e）を新設: `.github/workflows/ci.yml` と `.hadolint.yaml`（DL3008 除外）を追加。type-check は GitHub Releases から取得した固定版 shellcheck 0.11.0 / hadolint 2.14.0 と `bash -n` / `docker compose config`、e2e は AC-1〜AC-4 / AC-7 を GitHub-hosted runner で実機検証（AC-5 は対話ログイン要のため対象外）。§1.3 を CI スコープ内へ改訂、FR-8 / AC-8 を追加、FR-7 / NFR-4 を更新。`bin/aidock` の SC2155（declare-and-assign 分離）、`docker/Dockerfile` の `useradd` の `-l` 欠落（hadolint DL3046）、および node ユーザ削除順序（`groupdel` を `userdel` より先に実行していたためクリーンビルドが exit 8 で失敗）を修正。CLAUDE.md / README.md も同期。 | Claude Code |

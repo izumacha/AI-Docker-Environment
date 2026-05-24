@@ -101,12 +101,22 @@ jobs:
 
       - name: AC-3 user / no privilege escalation / capability limits
         run: |
+          # Normal entrypoint path: the workload runs as the unprivileged agent
+          # user (via gosu) with no sudo/escalation path.
           docker compose -f compose.yaml run --rm -T claude bash -lc '
             set -e
             test "$(whoami)" = agent || { echo "FAIL: whoami != agent"; exit 1; }
             if command -v sudo >/dev/null 2>&1; then echo "FAIL: sudo must not be present (no escalation path)"; exit 1; fi
-            if mount -t tmpfs none /mnt >/dev/null 2>&1; then echo "FAIL: mount should fail (CAP_SYS_ADMIN dropped)"; exit 1; fi
-            echo "AC-3 ok"
+            echo "agent checks ok"
+          '
+          # Bypass the entrypoint to run as root: even root must not be able to
+          # mount, proving CAP_SYS_ADMIN is dropped (would regress if the compose
+          # capability set were broadened).
+          docker compose -f compose.yaml run --rm -T --entrypoint sh claude -c '
+            set -e
+            test "$(id -u)" = 0 || { echo "FAIL: expected uid 0 via --entrypoint sh"; exit 1; }
+            if mount -t tmpfs none /mnt 2>/dev/null; then echo "FAIL: mount succeeded as root; CAP_SYS_ADMIN not dropped"; exit 1; fi
+            echo "capability checks ok"
           '
 
       - name: AC-7 credential volume ownership
