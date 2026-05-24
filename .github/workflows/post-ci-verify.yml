@@ -30,8 +30,10 @@ jobs:
           script: |
             const run = context.payload.workflow_run;
             let number = run.pull_requests?.[0]?.number;
-            if (!number) {
-              // Fallback: resolve the open PR from the head branch (same-repo only).
+            // Fallback only for same-repo runs: a fork could pick a branch name
+            // matching an open same-repo branch and hijack the comment target.
+            const sameRepo = run.head_repository?.full_name === `${context.repo.owner}/${context.repo.repo}`;
+            if (!number && sameRepo) {
               const prs = await github.rest.pulls.list({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
