@@ -5,7 +5,7 @@
 変更が必要な場合は **先に本書を改訂し、PR 内で根拠を述べた上で実装に着手する**。
 
 - **対象バージョン**: v1 系（Linux 専用、Claude Code 公式 CLI を Docker でサンドボックス化）
-- **最終更新**: 2026-05-20
+- **最終更新**: 2026-05-24
 - **位置づけ**: 要件 ＞ 設計 ＞ 実装。本書未記載の事項は CLAUDE.md / README.md の記述に従う。
 
 ---
@@ -41,7 +41,7 @@
 - カスタム seccomp / AppArmor プロファイル、user namespace remap。
 - マルチユーザー / マルチプロジェクト同時実行のためのオーケストレーション。
 - Claude Code 以外の AI CLI（Gemini CLI 等）のサポート。
-- CI/CD パイプライン、pre-commit フック、テストランナー（codex 自動レビューは bot ベースで設定済みだが、CI ジョブとしては存在しない。FR-7 参照）。
+- pre-commit フック、汎用テストランナー（unit テスト等）。ただし CI/CD は本書改訂によりスコープ内へ移行し、GitHub Actions による**型チェック**と **e2e** を提供する（FR-8 参照）。codex 自動レビューは引き続き bot ベースで、CI からは投稿しない（FR-7 参照）。
 
 ---
 
@@ -110,12 +110,23 @@
 - 機能を追加・削除・変更したら、**同じ PR 内で関連 doc を更新**する。
 
 ### FR-7: codex 自動レビュー
-- `chatgpt-codex-connector[bot]`（codex 自動レビュー）がリポジトリレベルで有効化されている（OpenAI 側設定）。本リポジトリには CI ワークフローは存在しない。
+- `chatgpt-codex-connector[bot]`（codex 自動レビュー）がリポジトリレベルで有効化されている（OpenAI 側設定）。本リポジトリの CI ワークフロー（FR-8）は型チェックと e2e のみを実行し、codex へのコメント投稿は行わない。
 - レビューが発火する条件は次のいずれか:
   - PR を **draft → ready** に変える（誰の操作でも発火）。
   - **Codex 接続済み GitHub アカウント** から `@codex review` コメントを投稿。
 - **`github-actions[bot]` 等の bot 名義の `@codex review` は拒否される**ため、ワークフローによる自動投稿は **採用しない**（過去に `.github/workflows/codex-review.yml` で試みたが codex 側が「create a Codex account」と返却するため撤去済み）。
 - Claude は draft で PR を作るため、**初回レビューと差分 push 後の再レビューは izumacha が手動で ready 化または `@codex review` を投稿する** 必要がある。本書 §7 変更管理プロセスにおいて、レビュー再依頼は izumacha のアクションを前提とする。
+
+### FR-8: CI ワークフロー
+`.github/workflows/ci.yml`（GitHub Actions）で**型チェック**と **e2e** を実行する。push（全ブランチ）および `main` への pull_request で発火し、`permissions: contents: read` のみを付与する（FR-7 に従い codex へのコメント投稿は行わない）。
+
+- FR-8.1: **type-check ジョブ**は次の静的解析を実行し、いずれか失敗で CI を不合格とする。
+  - `shellcheck` を全シェルスクリプト（`bin/aidock`・`docker/init-firewall.sh`・`docker/entrypoint.sh`）に適用。
+  - `bash -n` による構文チェック。
+  - `hadolint`（`docker/Dockerfile`）。`DL3008`（apt パッケージのバージョン固定）は `.hadolint.yaml` で除外する（理由は NFR-5.1: 再現性は `CLAUDE_CODE_VERSION` 固定と `--no-install-recommends` で担保し、OS ライブラリの逐一ピン留めは方針外）。
+  - `docker compose -f compose.yaml config -q` による compose 定義の妥当性検証。
+- FR-8.2: **e2e ジョブ**（type-check 成功後に実行）は GitHub-hosted runner 上で受け入れ基準を実機検証する。検証項目と AC の対応は AC-8 を参照。SEC-13 に従い `AIDOCK_SKIP_FIREWALL` は設定せず、**実ファイアウォールを起動した状態で検証する**。
+- FR-8.3: e2e は外部 egress（`api.anthropic.com` / `claude.ai` / `api.github.com`）に依存する。各プローブは `--max-time` を持つが、ネットワーク要因による一時失敗の可能性がある（残存リスク）。
 
 ---
 
@@ -156,6 +167,7 @@
 - すべての shell スクリプトは Bash で書き、先頭に `set -euo pipefail` を付ける。
 - インデントは 4 スペース、タブ禁止。
 - 重要な分岐・例外には意図が分かるコメントを残す（言語は問わない。既存実装は英語コメント中心）。
+- すべてのシェルスクリプトは CI（FR-8.1）の `shellcheck` を、`docker/Dockerfile` は `hadolint` を通過すること。
 
 ### NFR-5: 再現性
 - NFR-5.1: `Dockerfile` の `ARG CLAUDE_CODE_VERSION` で Claude Code のバージョンを固定し、依存パッケージは `--no-install-recommends` で最小化する。
@@ -205,6 +217,12 @@
 ### AC-7: 資格情報ボリューム所有権
 - `docker compose -f compose.yaml run --rm --no-deps --entrypoint sh claude -c 'stat -c "%u:%g" /home/agent/.claude'` の出力が **`$(id -u):$(id -g)`** と一致する（FR-3.3）。compose 経由で実行するため、Compose プロジェクト名（ボリューム名の prefix）に依存せず判定できる。一致しない場合は **`aidock build` → `aidock logout` → `aidock login`** の順で再構築する（`agent` ユーザの UID/GID は image build 時に baking されるため、ボリュームの作り直しのみでは復旧しない。FR-3.3 と整合）。
 
+### AC-8: CI
+- `.github/workflows/ci.yml` の **type-check** と **e2e** の両ジョブがグリーンであること（PR マージの必須条件、FR-8）。
+- type-check は FR-8.1 の静的解析（`shellcheck` / `bash -n` / `hadolint` / `docker compose config`）をすべて通過する。
+- e2e は次を GitHub-hosted runner 上で実機検証する: AC-1（ビルド + 起動プローブ）、AC-2（`$HOME` / `/` 起動を exit 2 で拒否）、AC-3（`whoami=agent` / scoped sudo / capability 制限）、AC-4（run プロファイルの example.com 遮断・api.anthropic.com 到達、login プロファイルの claude.ai 到達）、AC-7（資格情報ボリューム所有権）。
+- **AC-5（永続化）は対話 OAuth ログインを要するため CI 対象外**とし、ローカル手動検証に委ねる。
+
 ---
 
 ## 7. 変更管理プロセス
@@ -226,6 +244,7 @@
 
 | 日付 | 改訂内容 | 担当 |
 | --- | --- | --- |
+| 2026-05-24 | CI ワークフロー（型チェック + e2e）を新設: `.github/workflows/ci.yml` と `.hadolint.yaml` を追加。type-check は shellcheck / bash -n / hadolint / `docker compose config`、e2e は AC-1〜AC-4 / AC-7 を GitHub-hosted runner で実機検証（AC-5 は対話ログイン要のため対象外）。§1.3 を CI スコープ内へ改訂、FR-8 / AC-8 を追加、FR-7 / NFR-4 を更新。`bin/aidock` の SC2155（declare-and-assign 分離）を修正。CLAUDE.md / README.md も同期。 | Claude Code |
 | 2026-05-23 | SEC-8 の follow-up を実装: `bin/aidock` の `guard_workspace()` を拡張し、機密ディレクトリ/ファイル配下（`~/.ssh`、`~/.aws`、`~/.config/gh` など）および `/var/run/docker.sock` 配下からの起動を機械的に拒否。README/CLAUDE の説明も運用依存から実装済み表現へ同期。 | Codex |
 | 2026-05-23 | 追加レビュー反映: `guard_workspace()` の拒否対象に `~/.config/gcloud` と `~/.git-credentials` を追加し、関連ドキュメントの機密パス一覧を同期。 | Codex |
 | 2026-05-23 | 追加レビュー反映: クラウド資格情報配置の揺れを考慮し、`guard_workspace()` の拒否対象に `~/.config/aws` と `~/.config/azure` を追加。README/CLAUDE/要件の機密パス一覧を同期。 | Codex |

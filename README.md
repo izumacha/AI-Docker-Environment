@@ -66,10 +66,22 @@ cd ~/some-project
 - **OAuth トークン**は `claude-home` 名前付きボリュームに保持。共有マシンでは
   使い終わったら `aidock logout` で破棄。
 
+## CI
+
+GitHub Actions（`.github/workflows/ci.yml`）で 2 つのジョブを実行する。
+
+- **type-check**: `shellcheck`（全シェルスクリプト）/ `hadolint`（`docker/Dockerfile`）/ `docker compose config`（`compose.yaml` 妥当性検証）。
+- **e2e**: イメージをビルドし、GitHub-hosted runner 上で受け入れ基準を実機検証する（`$HOME` / `/` 起動拒否、firewall プローブ、`agent` 権限・sudo スコープ・capability 制限、資格情報ボリューム所有権）。
+
+詳細・受け入れ基準は `docs/requirements.md` の FR-8 / AC-8 を参照。
+
 ## ファイル構成
 
 ```
 .
+├── .github/
+│   └── workflows/
+│       └── ci.yml          # 型チェック + e2e
 ├── docker/
 │   ├── Dockerfile          # node:22-slim ベース、agent ユーザー
 │   ├── init-firewall.sh    # default-deny + ipset allowlist
@@ -78,6 +90,7 @@ cd ~/some-project
 ├── bin/aidock              # ラッパー CLI
 ├── docs/
 │   └── requirements.md     # 要件定義書（正本 / Source of Truth）
+├── .hadolint.yaml          # hadolint 設定（DL3008 除外）
 ├── .dockerignore
 └── .gitignore
 ```

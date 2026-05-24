@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  type-check:
+    name: type-check (shellcheck / hadolint / compose)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: shellcheck
+        run: shellcheck bin/aidock docker/init-firewall.sh docker/entrypoint.sh
+
+      - name: bash syntax check
+        run: |
+          for f in bin/aidock docker/init-firewall.sh docker/entrypoint.sh; do
+              bash -n "$f"
+          done
+
+      - name: hadolint (Dockerfile)
+        run: docker run --rm -i hadolint/hadolint:latest-debian hadolint - < docker/Dockerfile
+
+      - name: compose config validation
+        run: docker compose -f compose.yaml config -q
+
+  e2e:
+    name: e2e (acceptance criteria)
+    runs-on: ubuntu-latest
+    needs: type-check
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pin build/runtime UID/GID and workspace
+        run: |
+          echo "HOST_UID=$(id -u)"   >> "$GITHUB_ENV"
+          echo "HOST_GID=$(id -g)"   >> "$GITHUB_ENV"
+          echo "HOST_WORKSPACE=$PWD" >> "$GITHUB_ENV"
+
+      - name: AC-1 build
+        run: ./bin/aidock build
+
+      - name: AC-2 guard rejects $HOME and /
+        run: |
+          set +e
+          ( cd "$HOME" && "$GITHUB_WORKSPACE/bin/aidock" run </dev/null )
+          home_code=$?
+          ( cd / && "$GITHUB_WORKSPACE/bin/aidock" run </dev/null )
+          root_code=$?
+          set -e
+          echo "exit codes: \$HOME=$home_code /=$root_code"
+          [ "$home_code" -eq 2 ] || { echo "FAIL: expected exit 2 from \$HOME, got $home_code"; exit 1; }
+          [ "$root_code" -eq 2 ] || { echo "FAIL: expected exit 2 from /, got $root_code"; exit 1; }
+
+      - name: AC-1/AC-4 startup probes (run profile)
+        run: docker compose -f compose.yaml run --rm -T claude true
+
+      - name: AC-4 claude.ai reachable (login profile)
+        env:
+          AIDOCK_PROFILE: login
+        run: |
+          docker compose -f compose.yaml run --rm -T claude bash -lc \
+            'curl -sS --max-time 8 -o /dev/null -w "%{http_code}\n" https://claude.ai | grep -qE "^[1-9][0-9]{2}$"'
+
+      - name: AC-3 user / sudo scope / capability limits
+        run: |
+          docker compose -f compose.yaml run --rm -T claude bash -lc '
+            set -e
+            test "$(whoami)" = agent || { echo "FAIL: whoami != agent"; exit 1; }
+            sudo -n /usr/local/bin/init-firewall.sh >/dev/null 2>&1 || { echo "FAIL: scoped sudo for init-firewall.sh denied"; exit 1; }
+            if sudo -n id >/dev/null 2>&1; then echo "FAIL: sudo for unlisted command should be denied"; exit 1; fi
+            if mount -t tmpfs none /mnt >/dev/null 2>&1; then echo "FAIL: mount should fail (CAP_SYS_ADMIN dropped)"; exit 1; fi
+            echo "AC-3 ok"
+          '
+
+      - name: AC-7 credential volume ownership
+        run: |
+          out="$(docker compose -f compose.yaml run --rm -T --no-deps --entrypoint sh claude -c 'stat -c "%u:%g" /home/agent/.claude')"
+          out="$(printf '%s' "$out" | tr -d '\r')"
+          expected="$(id -u):$(id -g)"
+          echo "ownership: $out (expected $expected)"
+          [ "$out" = "$expected" ] || { echo "FAIL: ownership mismatch"; exit 1; }
