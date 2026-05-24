@@ -18,11 +18,26 @@ jobs:
     name: type-check (shellcheck / hadolint / compose)
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      SHELLCHECK_VERSION: "0.11.0"
+      HADOLINT_VERSION: "2.14.0"
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install pinned lint tools
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz" | tar -xJ
+          sudo install "shellcheck-v${SHELLCHECK_VERSION}/shellcheck" /usr/local/bin/shellcheck
+          rm -rf "shellcheck-v${SHELLCHECK_VERSION}"
+          curl -fsSL -o hadolint "https://github.com/hadolint/hadolint/releases/download/v${HADOLINT_VERSION}/hadolint-Linux-x86_64"
+          sudo install hadolint /usr/local/bin/hadolint
+          rm -f hadolint
+          shellcheck --version
+          hadolint --version
+
       - name: shellcheck
-        run: docker run --rm -v "$PWD:/mnt" -w /mnt koalaman/shellcheck:v0.11.0 bin/aidock docker/init-firewall.sh docker/entrypoint.sh
+        run: shellcheck bin/aidock docker/init-firewall.sh docker/entrypoint.sh
 
       - name: bash syntax check
         run: |
@@ -31,7 +46,7 @@ jobs:
           done
 
       - name: hadolint (Dockerfile)
-        run: docker run --rm -i hadolint/hadolint:latest-debian hadolint - < docker/Dockerfile
+        run: hadolint docker/Dockerfile
 
       - name: compose config validation
         run: docker compose -f compose.yaml config -q

@@ -121,9 +121,9 @@
 `.github/workflows/ci.yml`（GitHub Actions）で**型チェック**と **e2e** を実行する。push（全ブランチ）および `main` への pull_request で発火し、`permissions: contents: read` のみを付与する（FR-7 に従い codex へのコメント投稿は行わない）。
 
 - FR-8.1: **type-check ジョブ**は次の静的解析を実行し、いずれか失敗で CI を不合格とする。
-  - `shellcheck`（`koalaman/shellcheck:v0.11.0` イメージ）を全シェルスクリプト（`bin/aidock`・`docker/init-firewall.sh`・`docker/entrypoint.sh`）に適用。
+  - `shellcheck`（v0.11.0、GitHub Releases から取得した固定版）を全シェルスクリプト（`bin/aidock`・`docker/init-firewall.sh`・`docker/entrypoint.sh`）に適用。
   - `bash -n` による構文チェック。
-  - `hadolint`（`docker/Dockerfile`）を `hadolint/hadolint:latest-debian` イメージで実行。
+  - `hadolint`（v2.14.0、GitHub Releases から取得した固定版）で `docker/Dockerfile` を検査。`DL3008`（apt パッケージのバージョン固定）は `.hadolint.yaml` で除外する（理由は NFR-5.1: 再現性は `CLAUDE_CODE_VERSION` 固定と `--no-install-recommends` で担保し、OS ライブラリの逐一ピン留めは方針外）。
   - `docker compose -f compose.yaml config -q` による compose 定義の妥当性検証。
 - FR-8.2: **e2e ジョブ**（type-check 成功後に実行）は GitHub-hosted runner 上で受け入れ基準を実機検証する。検証項目と AC の対応は AC-8 を参照。SEC-13 に従い `AIDOCK_SKIP_FIREWALL` は設定せず、**実ファイアウォールを起動した状態で検証する**。
 - FR-8.3: e2e は外部 egress（`api.anthropic.com` / `claude.ai` / `api.github.com`）に依存する。各プローブは `--max-time` を持つが、ネットワーク要因による一時失敗の可能性がある（残存リスク）。
@@ -244,7 +244,7 @@
 
 | 日付 | 改訂内容 | 担当 |
 | --- | --- | --- |
-| 2026-05-24 | CI ワークフロー（型チェック + e2e）を新設: `.github/workflows/ci.yml` を追加。type-check は shellcheck / bash -n / hadolint / `docker compose config`、e2e は AC-1〜AC-4 / AC-7 を GitHub-hosted runner で実機検証（AC-5 は対話ログイン要のため対象外）。§1.3 を CI スコープ内へ改訂、FR-8 / AC-8 を追加、FR-7 / NFR-4 を更新。`bin/aidock` の SC2155（declare-and-assign 分離）と `docker/Dockerfile` の `useradd` の `-l` 欠落（hadolint DL3046）を修正。CLAUDE.md / README.md も同期。 | Claude Code |
+| 2026-05-24 | CI ワークフロー（型チェック + e2e）を新設: `.github/workflows/ci.yml` と `.hadolint.yaml`（DL3008 除外）を追加。type-check は GitHub Releases から取得した固定版 shellcheck 0.11.0 / hadolint 2.14.0 と `bash -n` / `docker compose config`、e2e は AC-1〜AC-4 / AC-7 を GitHub-hosted runner で実機検証（AC-5 は対話ログイン要のため対象外）。§1.3 を CI スコープ内へ改訂、FR-8 / AC-8 を追加、FR-7 / NFR-4 を更新。`bin/aidock` の SC2155（declare-and-assign 分離）と `docker/Dockerfile` の `useradd` の `-l` 欠落（hadolint DL3046）を修正。CLAUDE.md / README.md も同期。 | Claude Code |
 | 2026-05-23 | SEC-8 の follow-up を実装: `bin/aidock` の `guard_workspace()` を拡張し、機密ディレクトリ/ファイル配下（`~/.ssh`、`~/.aws`、`~/.config/gh` など）および `/var/run/docker.sock` 配下からの起動を機械的に拒否。README/CLAUDE の説明も運用依存から実装済み表現へ同期。 | Codex |
 | 2026-05-23 | 追加レビュー反映: `guard_workspace()` の拒否対象に `~/.config/gcloud` と `~/.git-credentials` を追加し、関連ドキュメントの機密パス一覧を同期。 | Codex |
 | 2026-05-23 | 追加レビュー反映: クラウド資格情報配置の揺れを考慮し、`guard_workspace()` の拒否対象に `~/.config/aws` と `~/.config/azure` を追加。README/CLAUDE/要件の機密パス一覧を同期。 | Codex |
