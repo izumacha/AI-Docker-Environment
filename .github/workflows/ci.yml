@@ -99,24 +99,19 @@ jobs:
           docker compose -f compose.yaml run --rm -T claude bash -lc \
             'curl -sS --max-time 8 -o /dev/null -w "%{http_code}\n" https://claude.ai | grep -qE "^[1-9][0-9]{2}$"'
 
-      - name: AC-3 user / no privilege escalation / capability limits
+      - name: AC-3 user / no privilege escalation / capability set
         run: |
-          # Normal entrypoint path: the workload runs as the unprivileged agent
-          # user (via gosu) with no sudo/escalation path.
           docker compose -f compose.yaml run --rm -T claude bash -lc '
             set -e
             test "$(whoami)" = agent || { echo "FAIL: whoami != agent"; exit 1; }
             if command -v sudo >/dev/null 2>&1; then echo "FAIL: sudo must not be present (no escalation path)"; exit 1; fi
-            echo "agent checks ok"
-          '
-          # Bypass the entrypoint to run as root: even root must not be able to
-          # mount, proving CAP_SYS_ADMIN is dropped (would regress if the compose
-          # capability set were broadened).
-          docker compose -f compose.yaml run --rm -T --entrypoint sh claude -c '
-            set -e
-            test "$(id -u)" = 0 || { echo "FAIL: expected uid 0 via --entrypoint sh"; exit 1; }
-            if mount -t tmpfs none /mnt 2>/dev/null; then echo "FAIL: mount succeeded as root; CAP_SYS_ADMIN not dropped"; exit 1; fi
-            echo "capability checks ok"
+            # Verify the capability bounding set directly. This is seccomp-independent,
+            # unlike a mount probe (default seccomp blocks mount regardless of caps).
+            capbnd=$(grep -m1 ^CapBnd: /proc/self/status | cut -f2)
+            echo "CapBnd=$capbnd"
+            [ $(( 0x$capbnd & (1 << 21) )) -eq 0 ] || { echo "FAIL: CAP_SYS_ADMIN present in bounding set"; exit 1; }
+            [ $(( 0x$capbnd & (1 << 12) )) -ne 0 ] || { echo "FAIL: CAP_NET_ADMIN missing from bounding set"; exit 1; }
+            echo "AC-3 ok"
           '
 
       - name: AC-7 credential volume ownership

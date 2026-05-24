@@ -136,6 +136,7 @@
 - FR-9.3: 認証は **Claude GitHub App + OAuth**。リポジトリ secret `CLAUDE_CODE_OAUTH_TOKEN` を `claude_code_oauth_token` 入力で渡す（代替として `ANTHROPIC_API_KEY` + `anthropic_api_key` も可）。当該 secret は **GitHub Actions secret** でありイメージ層・コンテナには持ち込まない（SEC-10 と整合）。`permissions` は `contents: read` / `pull-requests: write` / `actions: read`。
 - FR-9.4: エージェントは type-check / e2e（AC-1〜AC-4 / AC-7）の結果を検証・要約し、PR に**コメント1件**を投稿する。**コミット・ファイル変更・push は行わない**（CI は push/PR でのみ発火し、コメントでは再発火しないため無限ループしない）。
 - FR-9.5: `workflow_run` は**デフォルトブランチ（`main`）上のワークフローのみ発火**する。本ワークフローは `main` マージ後の PR から有効になる。
+- FR-9.6: 特権ワークフロー（`pull-requests: write` ＋ secret）の堅牢化として、(a) PR head を **checkout しない**（非信頼コードをワークスペースに展開しない）、(b) `claude-code-action` を **commit SHA でピン**（可変タグの供給網リスク回避）、(c) Claude のツールを **`gh run view` / `gh pr comment` に限定**する（`--allowedTools`）。
 
 ---
 
@@ -209,7 +210,7 @@
 ### AC-3: 権限
 - コンテナ内 `whoami` が `agent`（entrypoint が `gosu` で降格した結果）。
 - コンテナに `sudo` は存在せず、`agent` から root への昇格手段が無い。
-- `cap_add` に列挙されていない capability を要求する操作（例: マウント追加）は失敗する。
+- capability 集合が最小であること（`/proc/self/status` の `CapBnd` で `CAP_SYS_ADMIN` 不在・`CAP_NET_ADMIN` 在を確認）。`mount` 等の syscall はデフォルト seccomp でも遮断されるため、capability の回帰検出には bounding set を直接参照する（`mount` 失敗では検証にならない）。
 
 ### AC-4: ネットワーク
 - `curl -fsS --max-time 3 https://example.com` が **non-zero exit** であること（接続拒否・タイムアウト・名前解決失敗のいずれも成功扱い）。
@@ -258,6 +259,7 @@
 
 | 日付 | 改訂内容 | 担当 |
 | --- | --- | --- |
+| 2026-05-24 | codex レビュー（2巡目）反映: (1) CI の AC-3 capability 検証を `mount` プローブから `/proc/self/status` の `CapBnd` 直接検査へ変更（`mount` はデフォルト seccomp で常に失敗し cap 回帰を検出できないため）。(2) `post-ci-verify.yml` を堅牢化: PR head の checkout を撤去、`claude-code-action` を commit SHA でピン、Claude のツールを `gh run view` / `gh pr comment` に限定（FR-9.6）。`init-firewall.sh:105` の `000` 是正と run-profile プローブは既に対応済み。 | Claude Code |
 | 2026-05-24 | CI 後の Claude 検証エージェントを追加: `.github/workflows/post-ci-verify.yml` を新設し、`workflow_run`（CI 成功・PR）で `anthropics/claude-code-action@v1` を起動、type-check / e2e 結果を検証・要約して PR にコメント1件を投稿（コミットしない）。認証は Claude GitHub App + `CLAUDE_CODE_OAUTH_TOKEN`。FR-9 / AC-9 を新設、FR-7 を改訂（codex とは別の検証コメントである旨）。`workflow_run` は `main` 上のワークフローのみ発火するため `main` マージ後に有効。CLAUDE.md / README.md も同期。既存コードは未変更。 | Claude Code |
 | 2026-05-24 | e2e で判明した gosu 降格失敗を修正: `cap_drop: ALL` が `CAP_SETUID`/`CAP_SETGID` を剥奪するため root→agent 降格が `operation not permitted` で失敗していた。`cap_add` に `SETUID`/`SETGID` を追加し SEC-1 を改訂（降格後の `agent` は capability ゼロ）。これで firewall は通過済み（`[firewall] ok`）の状態で起動経路が完結する。 | Claude Code |
 | 2026-05-24 | codex レビュー反映: `init-firewall.sh` の api.anthropic.com プローブ正規表現を `^[0-9]+$` → `^[1-9][0-9]{2}$` に修正し curl の `000`（transport failure）を不合格化（FR-4.6 / AC-4 の follow-up を実装）。CI の AC-3 capability チェックを **root 経由**（`--entrypoint sh`）の `mount` 失敗確認に変更し、CAP_SYS_ADMIN の回帰を検出可能にした。 | Claude Code |

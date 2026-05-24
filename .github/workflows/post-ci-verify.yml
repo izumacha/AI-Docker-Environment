@@ -42,20 +42,23 @@ jobs:
             }
             core.setOutput('number', number || '');
 
-      - name: Checkout PR head
-        if: steps.pr.outputs.number != ''
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.workflow_run.head_sha }}
-
+      # Intentionally do NOT check out the PR head: this is a privileged
+      # workflow_run job (pull-requests: write + CLAUDE_CODE_OAUTH_TOKEN), so
+      # untrusted PR content must not enter the workspace. The agent only reads
+      # CI results and comments, both via gh.
       - name: Claude verifies and comments
         if: steps.pr.outputs.number != ''
-        uses: anthropics/claude-code-action@v1
+        # Pinned to a commit SHA (mutable tags are a supply-chain risk in a
+        # privileged job). TODO(#17): verify this SHA matches the upstream v1
+        # release before enabling the workflow.
+        uses: anthropics/claude-code-action@787c5a0ce96a9a6cfb050ea0c8f4c05f2447c251 # v1
         env:
           GH_TOKEN: ${{ github.token }}
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          claude_args: "--max-turns 6 --allowedTools Bash,Read"
+          claude_args: |
+            --max-turns 6
+            --allowedTools "Bash(gh run view:*),Bash(gh pr comment:*)"
           prompt: |
             The "CI" workflow (type-check + e2e) succeeded for PR #${{ steps.pr.outputs.number }} in ${{ github.repository }}.
 
