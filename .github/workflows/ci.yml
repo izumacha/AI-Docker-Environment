@@ -90,7 +90,12 @@ jobs:
           [ "$root_code" -eq 2 ] || { echo "FAIL: expected exit 2 from /, got $root_code"; exit 1; }
 
       - name: AC-1/AC-4 startup probes (run profile)
-        run: docker compose -f compose.yaml run --rm -T claude true
+        run: |
+          # The entrypoint runs init-firewall.sh first (it blocks example.com and
+          # checks api.anthropic.com, exiting non-zero on failure); then assert the
+          # run-profile egress explicitly here (api.anthropic.com reachable).
+          docker compose -f compose.yaml run --rm -T claude bash -lc \
+            'curl -sS --max-time 8 -o /dev/null -w "%{http_code}\n" https://api.anthropic.com | grep -qE "^[1-9][0-9]{2}$"'
 
       - name: AC-4 claude.ai reachable (login profile)
         env:

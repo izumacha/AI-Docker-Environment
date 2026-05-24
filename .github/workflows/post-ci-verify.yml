@@ -48,10 +48,11 @@ jobs:
       # CI results and comments, both via gh.
       - name: Claude verifies and comments
         if: steps.pr.outputs.number != ''
-        # Pinned to a commit SHA (mutable tags are a supply-chain risk in a
-        # privileged job). TODO(#17): verify this SHA matches the upstream v1
-        # release before enabling the workflow.
-        uses: anthropics/claude-code-action@787c5a0ce96a9a6cfb050ea0c8f4c05f2447c251 # v1
+        # A mutable tag is a supply-chain risk in this privileged job, so a SHA
+        # pin is required before enabling — but it must be the AUDITED v1 commit.
+        # (An earlier guess of 787c5a0 was wrong; codex notes current v1 = 20c8abf.)
+        # Pinning to the verified full SHA is tracked in #17, before activation.
+        uses: anthropics/claude-code-action@v1
         env:
           GH_TOKEN: ${{ github.token }}
         with:
