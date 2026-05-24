@@ -17,21 +17,18 @@ guard_workspace() {
     local pwd_abs home_abs passwd_home
     pwd_abs="$(realpath "$PWD")"
 
-    # Derive the guard base from the passwd entry, never from the caller's
-    # $HOME: a forged HOME pointing at another existing directory (e.g.
-    # HOME=/tmp) would otherwise relocate the comparison base and skip the
-    # SEC-8 sensitive-path checks for the user's real home. Fall back to
-    # $HOME only when the passwd lookup yields nothing.
+    # Anchor the guard base strictly to the passwd entry for the current
+    # UID. Never fall back to the caller-supplied $HOME: a forged HOME (e.g.
+    # HOME=/tmp) would relocate the comparison base and skip the SEC-8
+    # sensitive-path checks. If the passwd home cannot be resolved to a real
+    # directory, fail closed (exit 2) rather than trusting untrusted input.
     home_abs=""
-    passwd_home="$(getent passwd "$(id -un)" 2>/dev/null | cut -d: -f6 || true)"
+    passwd_home="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6 || true)"
     if [[ -n "$passwd_home" && -d "$passwd_home" ]]; then
         home_abs="$(realpath "$passwd_home" 2>/dev/null || true)"
     fi
-    if [[ -z "$home_abs" && -n "${HOME:-}" && -d "${HOME}" ]]; then
-        home_abs="$(realpath "$HOME" 2>/dev/null || true)"
-    fi
     if [[ -z "$home_abs" ]]; then
-        echo "aidock: cannot resolve home directory; refusing to proceed" >&2
+        echo "aidock: cannot resolve home directory from passwd database; refusing to proceed" >&2
         exit 2
     fi
 
