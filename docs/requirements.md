@@ -89,7 +89,7 @@
 - FR-3.3: ボリューム配下のファイルは `build` 時の `HOST_UID:HOST_GID` で所有される。`agent` ユーザ自体も `Dockerfile` で同 UID/GID を持って生成されるため、ホストの UID/GID が変わった場合は **`aidock build` でイメージを再構築 → `aidock logout` でボリュームを破棄 → `aidock login`** の順で実施する（イメージを再ビルドせずにボリュームのみ作り直しても、`HOME=/home/agent` の所有者は古い UID/GID のままで AC-7 が失敗し続ける）。**マルチユーザー共用ホストでは利用終了時に必ず `aidock logout` を実行する**（資格情報がボリュームに残るため）。
 
 ### FR-4: ファイアウォール初期化
-- コンテナ起動時、`AIDOCK_SKIP_FIREWALL=1` でない限り `init-firewall.sh` を実行する。
+- コンテナ起動時、`AIDOCK_SKIP_FIREWALL=1` でない限り `init-firewall.sh` を実行する。entrypoint は **root** で起動して `init-firewall.sh` を直接実行し（sudo は使わない）、初期化後に `gosu agent` でワークロードを exec する（SEC-6 / SEC-7 参照）。
 - FR-4.0: `AIDOCK_SKIP_FIREWALL=1` が設定されているときに限り初期化をスキップする。**デバッグ専用** であり、CI および共有ホストでは設定しない（SEC-13）。
 - FR-4.1: 既定で `INPUT`/`FORWARD`/`OUTPUT` を `DROP`。
 - FR-4.2: loopback、`ESTABLISHED,RELATED`、DNS(53/udp,tcp) のみ恒久許可。
@@ -143,8 +143,8 @@
 | SEC-3 | `read_only: true` を維持し、書き込み可能領域は `/workspace:rw` の明示 bind mount、必要最小限の `tmpfs`、および `claude-home` ボリュームに限定する。`/workspace:rw` は **`.git` を含むツリー全体を書き換え可能**であり、コンテナ内プロセスがコミット・履歴書換を実行しうる前提で運用する（read-only 化はサポート外）。 | `compose.yaml` |
 | SEC-4 | `mem_limit`・`pids_limit`・`cpus` の上限を撤廃しない（既定: 4G / 1024 / 2.0）。 | `compose.yaml` |
 | SEC-5 | `iptables -P OUTPUT DROP`（既定拒否）と終端の検証プローブを維持。 | `init-firewall.sh` |
-| SEC-6 | sudo の許可対象は `/usr/local/bin/init-firewall.sh` のみ NOPASSWD。他に NOPASSWD を追加しない。 | `Dockerfile` |
-| SEC-7 | コンテナの最終 `USER` は `agent`。root で実行しない。 | `Dockerfile` |
+| SEC-6 | コンテナイメージに `sudo` を含めない。firewall 初期化は entrypoint が **root で直接実行**し、setuid による昇格を一切使わない（`no-new-privileges` 下では setuid `sudo` が root 化できないため）。 | `Dockerfile` / `entrypoint.sh` |
+| SEC-7 | ワークロード（claude-code 等）は `agent` で実行する。entrypoint は firewall 初期化のためにのみ root で起動し、`gosu agent` で**不可逆に降格**してからコマンドを exec する（`no-new-privileges` 下で setuid による再昇格は不可）。 | `Dockerfile` / `entrypoint.sh` |
 | SEC-8 | ホストの資格情報・設定ファイルがコンテナへ流出することを防ぐ。**一次防御**は (a) `compose.yaml` が `$PWD` と `claude-home` 以外を bind mount しないこと、(b) `bin/aidock` の `guard_workspace()` が `$HOME` と `/` を起動カレントとして拒否すること。**運用上の禁止事項**として、次のパス配下を `aidock` の起動カレントディレクトリに設定しない: `~/.ssh`、`~/.aws`、`~/.config/aws`、`~/.gcloud`、`~/.config/gcloud`、`~/.azure`、`~/.config/azure`、`~/.gitconfig`、`~/.git-credentials`、`~/.config/git`、`~/.config/gh`、`~/.netrc`、`~/.kube`（kubeconfig）、`~/.docker`、`/var/run/docker.sock`、`~/.npmrc`、`~/.pypirc`。これら各パスは `guard_workspace()` で機械的に拒否する。 | `compose.yaml` / `bin/aidock` |
 | SEC-9 | `guard_workspace()` の `/` および `$HOME` 拒否を撤去・回避しない。 | `bin/aidock` |
 | SEC-10 | OAuth 資格情報はイメージ層・ホスト FS に書き出さない（名前付きボリュームのみ）。 | `compose.yaml` |
@@ -198,8 +198,8 @@
 - `/` で実行しても拒否される。
 
 ### AC-3: 権限
-- コンテナ内 `whoami` が `agent`。
-- `sudo -n /usr/local/bin/init-firewall.sh` のみ実行可能、他コマンドの sudo は失敗する。
+- コンテナ内 `whoami` が `agent`（entrypoint が `gosu` で降格した結果）。
+- コンテナに `sudo` は存在せず、`agent` から root への昇格手段が無い。
 - `cap_add` に列挙されていない capability を要求する操作（例: マウント追加）は失敗する。
 
 ### AC-4: ネットワーク
@@ -244,6 +244,7 @@
 
 | 日付 | 改訂内容 | 担当 |
 | --- | --- | --- |
+| 2026-05-24 | e2e で判明した起動経路の不具合を修正: `no-new-privileges`（SEC-2）下では setuid `sudo` が root 化できず entrypoint の `sudo init-firewall.sh` が失敗するため、**root 起動 → `gosu agent` 降格** 方式へ変更（`sudo` を廃止しイメージから除去、`gosu` を追加、`USER agent` を撤去して entrypoint を root 起動に）。SEC-6 / SEC-7 を再定義し、FR-4 / AC-3 を更新、CI の AC-3 を sudo 非依存に変更。CLAUDE.md / README.md の脅威モデルも同期。 | Claude Code |
 | 2026-05-24 | CI ワークフロー（型チェック + e2e）を新設: `.github/workflows/ci.yml` と `.hadolint.yaml`（DL3008 除外）を追加。type-check は GitHub Releases から取得した固定版 shellcheck 0.11.0 / hadolint 2.14.0 と `bash -n` / `docker compose config`、e2e は AC-1〜AC-4 / AC-7 を GitHub-hosted runner で実機検証（AC-5 は対話ログイン要のため対象外）。§1.3 を CI スコープ内へ改訂、FR-8 / AC-8 を追加、FR-7 / NFR-4 を更新。`bin/aidock` の SC2155（declare-and-assign 分離）、`docker/Dockerfile` の `useradd` の `-l` 欠落（hadolint DL3046）、および node ユーザ削除順序（`groupdel` を `userdel` より先に実行していたためクリーンビルドが exit 8 で失敗）を修正。CLAUDE.md / README.md も同期。 | Claude Code |
 | 2026-05-23 | SEC-8 の follow-up を実装: `bin/aidock` の `guard_workspace()` を拡張し、機密ディレクトリ/ファイル配下（`~/.ssh`、`~/.aws`、`~/.config/gh` など）および `/var/run/docker.sock` 配下からの起動を機械的に拒否。README/CLAUDE の説明も運用依存から実装済み表現へ同期。 | Codex |
 | 2026-05-23 | 追加レビュー反映: `guard_workspace()` の拒否対象に `~/.config/gcloud` と `~/.git-credentials` を追加し、関連ドキュメントの機密パス一覧を同期。 | Codex |

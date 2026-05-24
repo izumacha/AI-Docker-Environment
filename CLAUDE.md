@@ -12,7 +12,7 @@
 `AI-Docker-Environment` は Linux ホスト上で **Claude Code (`@anthropic-ai/claude-code`)** を安全に実行するための Docker サンドボックスです。Anthropic 公式 devcontainer のセキュリティモデルを踏襲し、次の防御層を組み合わせています。
 
 - **デフォルト拒否の egress ファイアウォール**（iptables + ipset 許可リスト）
-- **最小権限モデル**（`cap_drop: ALL`、`no-new-privileges`、scoped sudo）
+- **最小権限モデル**（`cap_drop: ALL`、`no-new-privileges`、root 起動 → `gosu` で agent 降格・sudo 不使用）
 - **ファイルシステム分離**（read-only rootfs + tmpfs、`$PWD` のみ bind mount）
 - **リソース上限**（メモリ 4G、CPU 2 コア、PID 1024）
 - **OAuth 資格情報の隔離**（名前付きボリューム `claude-home` に保存）
@@ -63,9 +63,9 @@
   - `read_only: true` + 必要最小限の `tmpfs`
   - `mem_limit`, `pids_limit`, `cpus` の上限
   - ホストパスの追加 bind mount は原則禁止（特に `~/.ssh`、`~/.aws`、`~/.gitconfig` 等）
-- `docker/Dockerfile`:
-  - sudo は `/usr/local/bin/init-firewall.sh` のみ NOPASSWD（スコープを広げない）
-  - 最終 `USER agent` を維持（root では実行しない）
+- `docker/Dockerfile` / `docker/entrypoint.sh`:
+  - コンテナに `sudo` を含めない。entrypoint を root で起動し firewall 初期化後に `gosu agent` で降格する（setuid 昇格を使わない）
+  - ワークロード（claude-code）は `agent` で実行する。root では実行しない
 - `docker/init-firewall.sh`:
   - `iptables -P OUTPUT DROP`（デフォルト拒否）を維持
   - 終端の検証プローブ（`example.com` ブロック確認、`api.anthropic.com` 到達確認）を維持
