@@ -244,6 +244,7 @@
 
 | 日付 | 改訂内容 | 担当 |
 | --- | --- | --- |
+| 2026-05-24 | e2e で判明した DNS 解決不能を修正: `init-firewall.sh` の `iptables -t nat -F`（および mangle flush）が Docker 組込み DNS（`127.0.0.11:53`）の DNAT を消去し、コンテナ内の全ホスト名解決が失敗していた（allowlist が空になり AC-4 プローブが失敗）。nat/mangle のフラッシュを撤去（filter テーブルのリセットは維持）。egress 拒否方針（SEC-5）は不変。 | Claude Code |
 | 2026-05-24 | e2e で判明した起動経路の不具合を修正: `no-new-privileges`（SEC-2）下では setuid `sudo` が root 化できず entrypoint の `sudo init-firewall.sh` が失敗するため、**root 起動 → `gosu agent` 降格** 方式へ変更（`sudo` を廃止しイメージから除去、`gosu` を追加、`USER agent` を撤去して entrypoint を root 起動に）。SEC-6 / SEC-7 を再定義し、FR-4 / AC-3 を更新、CI の AC-3 を sudo 非依存に変更。CLAUDE.md / README.md の脅威モデルも同期。 | Claude Code |
 | 2026-05-24 | CI ワークフロー（型チェック + e2e）を新設: `.github/workflows/ci.yml` と `.hadolint.yaml`（DL3008 除外）を追加。type-check は GitHub Releases から取得した固定版 shellcheck 0.11.0 / hadolint 2.14.0 と `bash -n` / `docker compose config`、e2e は AC-1〜AC-4 / AC-7 を GitHub-hosted runner で実機検証（AC-5 は対話ログイン要のため対象外）。§1.3 を CI スコープ内へ改訂、FR-8 / AC-8 を追加、FR-7 / NFR-4 を更新。`bin/aidock` の SC2155（declare-and-assign 分離）、`docker/Dockerfile` の `useradd` の `-l` 欠落（hadolint DL3046）、および node ユーザ削除順序（`groupdel` を `userdel` より先に実行していたためクリーンビルドが exit 8 で失敗）を修正。CLAUDE.md / README.md も同期。 | Claude Code |
 | 2026-05-23 | SEC-8 の follow-up を実装: `bin/aidock` の `guard_workspace()` を拡張し、機密ディレクトリ/ファイル配下（`~/.ssh`、`~/.aws`、`~/.config/gh` など）および `/var/run/docker.sock` 配下からの起動を機械的に拒否。README/CLAUDE の説明も運用依存から実装済み表現へ同期。 | Codex |

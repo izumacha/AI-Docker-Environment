@@ -16,8 +16,9 @@ fi
 
 iptables -F
 iptables -X
-iptables -t nat -F 2>/dev/null || true
-iptables -t mangle -F 2>/dev/null || true
+# Intentionally do NOT flush the nat/mangle tables: flushing nat removes
+# Docker's embedded-DNS DNAT (127.0.0.11:53) and breaks all name resolution
+# for the allowlist built below. The egress policy lives in the filter table.
 ipset destroy allowed-hosts 2>/dev/null || true
 
 iptables -P INPUT   DROP
