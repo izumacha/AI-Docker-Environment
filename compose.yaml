@@ -29,7 +29,12 @@ services:
       NODE_OPTIONS: "--max-old-space-size=4096"
       AIDOCK_PROFILE: "${AIDOCK_PROFILE:-run}"
     volumes:
-      - "${HOST_WORKSPACE:-./}:/workspace:rw"
+      # No default on purpose: invoking `docker compose run claude` directly
+      # (bypassing bin/aidock) must fail fast rather than silently mounting the
+      # current directory as /workspace. This preserves SEC-8 primary defense
+      # (a). bin/aidock always sets HOST_WORKSPACE (the guarded $PWD for
+      # run/login/shell, a non-sensitive placeholder for build/logout/refresh).
+      - "${HOST_WORKSPACE:?HOST_WORKSPACE is unset; run via bin/aidock or set it explicitly}:/workspace:rw"
       - claude-home:/home/agent/.claude
     working_dir: /workspace
     stdin_open: true

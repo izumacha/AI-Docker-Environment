@@ -39,11 +39,18 @@ cd ~/some-project
 `$PWD` が `$HOME` または `/` のとき、ラッパーは起動を拒否する
 (うっかり広域マウントの事故防止)。
 
+`compose.yaml` の `HOST_WORKSPACE` にはデフォルト値がないため、`bin/aidock` を
+経由せず `docker compose run claude` を**直接実行すると起動に失敗する**
+(カレントディレクトリの暗黙マウント防止 / fail-closed)。直接実行する場合は
+`HOST_WORKSPACE` を明示的に設定すること (例: `HOST_WORKSPACE="$PWD" docker compose ... run claude`)。
+ただし `guard_workspace()` のガードは `bin/aidock` 経由でのみ働くため、通常は
+`bin/aidock` の利用を推奨する。
+
 ## 脅威モデル / 設計の意図
 
 | リスク | 対策 |
 | --- | --- |
-| ホスト FS の破壊 | bind mount は `$PWD` のみ。`read_only` rootfs + `tmpfs` |
+| ホスト FS の破壊 | bind mount は `$PWD` のみ。`read_only` rootfs + `tmpfs`。`HOST_WORKSPACE` はデフォルト値なし → `bin/aidock` 非経由の直接 `docker compose run` は fail-closed で起動失敗 |
 | ホスト資格情報の流出 | `~/.ssh` / `~/.aws` / `gcloud` / `~/.gitconfig` 等を追加 bind mount しない。`$HOME` と `/` は起動拒否。ただし機密ディレクトリ配下からの起動は禁止（機械的拒否は follow-up） |
 | 任意外部送信 | iptables 既定 DROP + ipset allowlist (api.anthropic.com, npm, GitHub等のみ) |
 | 暴走プロセス | `mem_limit=4g`, `pids_limit=1024`, `cpus=2.0`, `tini` で reap |
