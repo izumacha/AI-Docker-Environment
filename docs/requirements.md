@@ -96,7 +96,7 @@
 - FR-4.2: loopback、`ESTABLISHED,RELATED`、DNS(53/udp,tcp) のみ恒久許可。
 - FR-4.3: `CORE_HOSTS` 全件を DNS 解決し ipset `allowed-hosts` に投入。DNS 解決に失敗したホストは **warn ログを残してスキップ**し、初期化は継続する。
 - FR-4.4: `AIDOCK_PROFILE=login` の場合のみ `LOGIN_EXTRA_HOSTS` も投入。
-- FR-4.5: GitHub `https://api.github.com/meta` から CIDR を取得し ipset へ追加。取得した CIDR は SEC-12.1 / SEC-12.2 の検証を通過した場合にのみ追加する。**現状実装は SEC-12.1（正規表現）のみ通過確認しており、SEC-12.2（octet/prefix 範囲）は要件先行で未実装** — follow-up PR で実装する。meta 取得自体が失敗した場合は **warn ログのみで継続**し、ホスト名解決で得た IP の範囲に縮退する。
+- FR-4.5: GitHub `https://api.github.com/meta` から CIDR を取得し ipset へ追加。取得した CIDR は SEC-12.1 / SEC-12.2 の検証を通過した場合にのみ追加する（**両者とも実装済み**。範囲外の CIDR は warn ログを出してスキップする）。meta 取得自体が失敗した場合は **warn ログのみで継続**し、ホスト名解決で得た IP の範囲に縮退する。
 - FR-4.6: 最後に検証プローブを実行する（AC-4 と同表現で揃える）。
   - `curl -fsS --max-time 3 https://example.com` が **non-zero exit** であること（接続拒否・タイムアウト・名前解決失敗のいずれも成功扱い）。到達した場合は exit 1。**実装済み**（`init-firewall.sh:98`）。
   - `curl -sS --max-time 8 -o /dev/null -w '%{http_code}\n' https://api.anthropic.com` の出力が `^[1-9][0-9]{2}$` に一致すること。`000`（curl の transport failure 印）は不合格扱い、4xx/5xx は合格。**実装済み**（`init-firewall.sh` の api.anthropic.com プローブを `^[1-9][0-9]{2}$` に修正し、`000` を不合格化）。
@@ -164,7 +164,7 @@
 | SEC-10 | OAuth 資格情報はイメージ層・ホスト FS に書き出さない（名前付きボリュームのみ）。 | `compose.yaml` |
 | SEC-11 | allowlist に新規ホストを足すときは PR で必要性を述べる。テレメトリ系（statsig / sentry）は **削除可** だが追加は最小限に。 | `init-firewall.sh` |
 | SEC-12.1 | CIDR を ipset に追加する前に正規表現 `^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$` の一致を検証する。**実装済み**（`init-firewall.sh:83`）。 | `init-firewall.sh` |
-| SEC-12.2 | 各 octet が `0`–`255`、prefix が `0`–`32` の範囲であることを併せて検証する。**要件先行・未実装**。実装は follow-up PR で対応。SEC-12.2 が未実装である間、形式的に正規表現を通る `999.999.999.999/33` 等が ipset に追加されうる **残存リスク** が存在する。 | `init-firewall.sh` |
+| SEC-12.2 | 各 octet が `0`–`255`、prefix が `0`–`32` の範囲であることを併せて検証する。**実装済み**（`init-firewall.sh` の `valid_cidr()`）。SEC-12.1（正規表現）通過後に `valid_cidr()` で範囲を検証し、`999.999.999.999/33` 等は ipset に追加せず warn ログを出してスキップする。 | `init-firewall.sh` |
 | SEC-13 | `AIDOCK_SKIP_FIREWALL=1` の常用を禁止する。**デバッグ用バックドア**であり、CI および共有ホストでは設定しない。一時的に使用した場合はその都度 `unset` する。 | `entrypoint.sh` |
 | SEC-14 | `bin/aidock run [args...]` の追加引数は `compose run --rm claude` に **位置引数として無変換で渡される**。コマンド置換（`$()`・バッククォート）等を含めない責任は呼び出し側が負う。ラッパー側で eval/sh -c 等の二次評価を導入してはならない。 | `bin/aidock` |
 

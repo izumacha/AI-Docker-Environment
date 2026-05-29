@@ -35,6 +35,27 @@ iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT
 
 ipset create allowed-hosts hash:net family inet hashsize 1024 maxelem 65536
 
+# SEC-12.2: range-validate a CIDR after the SEC-12.1 regex match. The regex
+# only constrains digit counts, so values like 999.999.999.999/33 still pass
+# it; here we reject any octet outside 0-255 or prefix outside 0-32.
+valid_cidr() {
+    local cidr="$1"
+    local addr="${cidr%/*}"
+    local prefix="${cidr#*/}"
+    local o
+    [[ "$prefix" =~ ^[0-9]+$ ]] || return 1
+    (( prefix >= 0 && prefix <= 32 )) || return 1
+    local IFS=.
+    # shellcheck disable=SC2086
+    set -- $addr
+    [[ "$#" -eq 4 ]] || return 1
+    for o in "$@"; do
+        [[ "$o" =~ ^[0-9]+$ ]] || return 1
+        (( o >= 0 && o <= 255 )) || return 1
+    done
+    return 0
+}
+
 resolve_and_add() {
     local host="$1"
     local ips
@@ -84,8 +105,10 @@ if [[ -n "$META_JSON" ]]; then
     CIDR_RE='^[0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2}$'
     while IFS= read -r cidr; do
         [[ -z "$cidr" ]] && continue
-        if [[ "$cidr" =~ $CIDR_RE ]]; then
+        if [[ "$cidr" =~ $CIDR_RE ]] && valid_cidr "$cidr"; then
             ipset add allowed-hosts "$cidr" -exist
+        else
+            log "WARN: skipping invalid CIDR from github meta: $cidr"
         fi
     done < <(echo "$META_JSON" | jq -r '.web[]?, .api[]?, .git[]?' 2>/dev/null | grep -E '^[0-9]+\.')
     log "added GitHub meta CIDRs"
