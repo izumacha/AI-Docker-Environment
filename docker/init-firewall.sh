@@ -50,6 +50,21 @@ resolve_and_add() {
     log "added $host -> $(echo "$ips" | tr '\n' ' ')"
 }
 
+# Range-validate a dotted-quad CIDR beyond its regex shape (SEC-12.2): every
+# octet must be 0-255 and the prefix length 0-32. The caller guarantees the
+# string already matched CIDR_RE, so all five fields are present and numeric.
+# `10#` forces base-10 so values like `010` are not read as octal. Returns 0
+# when valid, 1 otherwise.
+cidr_in_range() {
+    local cidr="$1" o1 o2 o3 o4 plen octet
+    IFS='./' read -r o1 o2 o3 o4 plen <<< "$cidr"
+    for octet in "$o1" "$o2" "$o3" "$o4"; do
+        (( 10#$octet <= 255 )) || return 1
+    done
+    (( 10#$plen <= 32 )) || return 1
+    return 0
+}
+
 CORE_HOSTS=(
     api.anthropic.com
     statsig.anthropic.com
@@ -85,7 +100,14 @@ if [[ -n "$META_JSON" ]]; then
     while IFS= read -r cidr; do
         [[ -z "$cidr" ]] && continue
         if [[ "$cidr" =~ $CIDR_RE ]]; then
-            ipset add allowed-hosts "$cidr" -exist
+            # SEC-12.1 (regex shape) passed; now enforce SEC-12.2 (octet/prefix
+            # ranges). Out-of-range values (e.g. 999.999.999.999/33) are skipped
+            # with a warning per FR-4.7 best-effort; initialization continues.
+            if cidr_in_range "$cidr"; then
+                ipset add allowed-hosts "$cidr" -exist
+            else
+                log "WARN: skipping out-of-range CIDR from github meta: $cidr"
+            fi
         fi
     done < <(echo "$META_JSON" | jq -r '.web[]?, .api[]?, .git[]?' 2>/dev/null | grep -E '^[0-9]+\.')
     log "added GitHub meta CIDRs"

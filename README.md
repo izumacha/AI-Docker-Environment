@@ -60,7 +60,7 @@ cd ~/some-project
 
 `docker/init-firewall.sh` の `CORE_HOSTS` / `LOGIN_EXTRA_HOSTS` を編集して
 ホストを増減できる。GitHub の CIDR ブロックは `https://api.github.com/meta`
-から動的取得して ipset に追加 (jq + 正規表現で形式検証)。
+から動的取得して ipset に追加 (jq + 正規表現の形式検証に加え、各 octet 0-255 / prefix 0-32 の範囲検証を実施。範囲外はスキップ)。
 
 ## 防げないもの (既知の限界)
 
