@@ -116,7 +116,7 @@
 - **`github-actions[bot]` 等の bot 名義の `@codex review` は拒否される**ため、ワークフローによる自動投稿は **採用しない**（過去に `.github/workflows/codex-review.yml` で試みたが codex 側が「create a Codex account」と返却するため撤去済み）。
 - Claude は **PR を open（draft ではない）で作成**する。**Claude Code の GitHub 操作（MCP）が izumacha 名義（OWNER）で記録される実行環境では、Claude が投稿する `@codex review` コメントも Codex に受理される**（実証済み）ため、Claude 自身がレビューを発火できる。
   - **運用ルール**: Claude は **差分を push するたびに（初回 PR 作成時を含む）`@codex review` コメントを投稿**して初回・再レビューを発火させる。質問への返信やレビューを要しない状況報告コメントには付けない。
-  - Claude はこの実行環境で **CI の成否（グリーン）を確認できない**ため、CI が成功した旨を確認・主張しない（CI 結果の検証・要約は FR-9 の Claude Code Action が担う）。
+  - **CI の成否（グリーン）は Claude が GitHub MCP（check-runs / status）で取得し、Claude 上（チャット）で報告する**（PR コメントでの検証・要約は引き続き FR-9 の Claude Code Action が担う）。
   - Claude の操作が `github-actions[bot]` 等の bot 名義になる実行環境では従来どおり受理されないため、izumacha の手動 `@codex review` 投稿が必要。
 
 ### FR-8: CI ワークフロー
@@ -269,6 +269,7 @@
 
 | 日付 | 改訂内容 | 担当 |
 | --- | --- | --- |
+| 2026-05-29 | 運用ルール再改訂（FR-7）: 「CI の成否はこの実行環境で確認できない」前提を撤去し、**Claude が GitHub MCP（check-runs / status）で CI 結果を取得し Claude 上（チャット）で報告する**方針に変更。post-ci-verify（FR-9）の PR コメント要約は維持。CLAUDE.md / README.md も同期。 | Claude Code |
 | 2026-05-29 | `README.md` に「コードレビュー / PR 運用」節を追加し、codex 自動レビューと PR 作成フロー（open 作成 / `@codex review` 投稿でレビュー発火 / push ごとの投稿 / CI グリーンを主張しない）を利用者向けに記載。FR-7（正本）と CLAUDE.md の運用を要約・同期。 | Claude Code |
 | 2026-05-29 | 運用ルール改訂（FR-7）: Claude は PR を **draft ではなく open** で作成し、**差分を push するたびに（初回 PR 作成時を含む）`@codex review` を投稿**して初回・再レビューを発火させる。PR を open 作成にするため **draft → ready トリガ記述を撤去**。この実行環境では **CI の成否（グリーン）を確認できない**ため、Claude が CI 成功を確認・主張しない旨を明記（CI 結果の検証・要約は FR-9 が担う）。CLAUDE.md「Git ワークフロー」も同期。 | Claude Code |
 | 2026-05-29 | issue #6（P1）対応: `init-firewall.sh` に `cidr_in_range()` を追加し SEC-12.2（octet 0-255 / prefix 0-32 の範囲検証）を実装。SEC-12.1 の正規表現通過後に base-10（`10#`）で範囲比較し、`999.999.999.999/33` 等の範囲外 CIDR を warn ログ付きでスキップ（FR-4.7 best-effort、初期化は継続）。SEC-12.2 / FR-4.5 を「実装済み」に更新。 | Claude Code |
