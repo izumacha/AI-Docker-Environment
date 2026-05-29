@@ -269,6 +269,7 @@
 
 | 日付 | 改訂内容 | 担当 |
 | --- | --- | --- |
+| 2026-05-29 | `README.md` に「コードレビュー / PR 運用」節を追加し、codex 自動レビューと PR 作成フロー（open 作成 / `@codex review` 投稿でレビュー発火 / push ごとの投稿 / CI グリーンを主張しない）を利用者向けに記載。FR-7（正本）と CLAUDE.md の運用を要約・同期。 | Claude Code |
 | 2026-05-29 | 運用ルール改訂（FR-7）: Claude は PR を **draft ではなく open** で作成し、**差分を push するたびに（初回 PR 作成時を含む）`@codex review` を投稿**して初回・再レビューを発火させる。PR を open 作成にするため **draft → ready トリガ記述を撤去**。この実行環境では **CI の成否（グリーン）を確認できない**ため、Claude が CI 成功を確認・主張しない旨を明記（CI 結果の検証・要約は FR-9 が担う）。CLAUDE.md「Git ワークフロー」も同期。 | Claude Code |
 | 2026-05-29 | issue #6（P1）対応: `init-firewall.sh` に `cidr_in_range()` を追加し SEC-12.2（octet 0-255 / prefix 0-32 の範囲検証）を実装。SEC-12.1 の正規表現通過後に base-10（`10#`）で範囲比較し、`999.999.999.999/33` 等の範囲外 CIDR を warn ログ付きでスキップ（FR-4.7 best-effort、初期化は継続）。SEC-12.2 / FR-4.5 を「実装済み」に更新。 | Claude Code |
 | 2026-05-29 | issue #8（P1）対応: `compose.yaml` の `/workspace` マウントから `HOST_WORKSPACE` のデフォルト `:-./` を撤去し `${HOST_WORKSPACE:?...}` に変更。`bin/aidock` 非経由の直接 `docker compose run` がカレントディレクトリを暗黙マウントせず fail-closed で停止するようにし、SEC-8 一次防御 (a) を補強。`bin/aidock` の `compose()` ラッパーでマウント不要なサブコマンド（build/logout/firewall-refresh）向けに非機密プレースホルダ（`/nonexistent`）を供給。FR-2.4 を新設、SEC-8(a) と AC-2 を更新。README も同期。 | Claude Code |
