@@ -49,7 +49,10 @@ jobs:
         run: hadolint docker/Dockerfile
 
       - name: compose config validation
-        run: docker compose -f compose.yaml config -q
+        # HOST_WORKSPACE has no default in compose.yaml (fail-closed for direct
+        # `docker compose run`, see FR-2.4 / SEC-8(a)); supply a non-sensitive
+        # placeholder for interpolation, mirroring bin/aidock's compose() wrapper.
+        run: HOST_WORKSPACE=/nonexistent docker compose -f compose.yaml config -q
 
   e2e:
     name: e2e (acceptance criteria)

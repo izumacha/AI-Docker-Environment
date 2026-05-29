@@ -5,7 +5,7 @@
 変更が必要な場合は **先に本書を改訂し、PR 内で根拠を述べた上で実装に着手する**。
 
 - **対象バージョン**: v1 系（Linux 専用、Claude Code 公式 CLI を Docker でサンドボックス化）
-- **最終更新**: 2026-05-24
+- **最終更新**: 2026-05-29
 - **位置づけ**: 要件 ＞ 設計 ＞ 実装。本書未記載の事項は CLAUDE.md / README.md の記述に従う。
 
 ---
@@ -81,6 +81,7 @@
 - FR-2.1: **`/` を `/workspace` としてマウントしてはならない**。検知時は exit code 2 で拒否（`guard_workspace`）。
 - FR-2.2: **`$HOME` を `/workspace` としてマウントしてはならない**。同上。
 - FR-2.3: `$HOME` / `/` 以外への追加 bind mount を勝手に増やさない（特に `~/.ssh`・`~/.aws`・`~/.gitconfig`・`~/.config/gh` 等）。
+- FR-2.4: `compose.yaml` の `HOST_WORKSPACE` には **デフォルト値を持たせない**（`${HOST_WORKSPACE:?...}`）。`bin/aidock` を経由せず `docker compose run claude` を直接実行した場合は、カレントディレクトリを暗黙にマウントせず **起動失敗（fail-closed）** とする。`bin/aidock` は `compose()` ラッパーで常に `HOST_WORKSPACE` を設定する: マウントを伴う `run` / `login` / `shell` は `guard_workspace()` 通過後の `$PWD`、マウント不要な `build` / `logout` / `firewall-refresh` は補間のための非機密プレースホルダ（`/nonexistent`、コンテナを対話起動しないため実マウントされない）。これにより SEC-8 一次防御 (a) を `bin/aidock` 非経由でも機能させる。
 
 ### FR-3: OAuth 資格情報
 - `claude-home` という名前付きボリュームを `/home/agent/.claude` にマウントする。
@@ -158,7 +159,7 @@
 | SEC-5 | `iptables -P OUTPUT DROP`（既定拒否）と終端の検証プローブを維持。 | `init-firewall.sh` |
 | SEC-6 | コンテナイメージに `sudo` を含めない。firewall 初期化は entrypoint が **root で直接実行**し、setuid による昇格を一切使わない（`no-new-privileges` 下では setuid `sudo` が root 化できないため）。 | `Dockerfile` / `entrypoint.sh` |
 | SEC-7 | ワークロード（claude-code 等）は `agent` で実行する。entrypoint は firewall 初期化のためにのみ root で起動し、`gosu agent` で**不可逆に降格**してからコマンドを exec する（`no-new-privileges` 下で setuid による再昇格は不可）。 | `Dockerfile` / `entrypoint.sh` |
-| SEC-8 | ホストの資格情報・設定ファイルがコンテナへ流出することを防ぐ。**一次防御**は (a) `compose.yaml` が `$PWD` と `claude-home` 以外を bind mount しないこと、(b) `bin/aidock` の `guard_workspace()` が `$HOME` と `/` を起動カレントとして拒否すること。**機械的拒否対象**: 次のパス配下から `aidock` を起動すると `guard_workspace()` が exit 2 で拒否する: `~/.ssh`、`~/.aws`、`~/.config/aws`、`~/.gcloud`、`~/.config/gcloud`、`~/.azure`、`~/.config/azure`、`~/.gitconfig`、`~/.git-credentials`、`~/.config/git`、`~/.config/gh`、`~/.netrc`、`~/.kube`（kubeconfig）、`~/.docker`、`/var/run/docker.sock`、`~/.npmrc`、`~/.pypirc`。`guard_workspace()` は判定基準を常に passwd データベース（`getent passwd "$(id -u)"`）の実 home から導出し、呼び出し側の `$HOME` は一切信用しない。passwd home が解決できない（取得失敗・非ディレクトリ・`realpath` 失敗）場合は **fail closed** で `exit 2` とし、`$HOME` へはフォールバックしない。これにより `HOME=` クリア・`unset HOME`・別の実在ディレクトリへの偽装（`HOME=/tmp` 等）のいずれでもバイパスできない。運用上もこれらの配下から `aidock` を起動しないことを推奨する。 | `compose.yaml` / `bin/aidock` |
+| SEC-8 | ホストの資格情報・設定ファイルがコンテナへ流出することを防ぐ。**一次防御**は (a) `compose.yaml` が `$PWD`（`HOST_WORKSPACE`）と `claude-home` 以外を bind mount しないこと。`HOST_WORKSPACE` は **デフォルト値を持たず**（`${HOST_WORKSPACE:?...}`、FR-2.4）、`bin/aidock` を経由しない直接の `docker compose run` は **fail-closed** で起動失敗する（カレントディレクトリの暗黙マウントを防ぐ）。(b) `bin/aidock` の `guard_workspace()` が `$HOME` と `/` を起動カレントとして拒否すること。**機械的拒否対象**: 次のパス配下から `aidock` を起動すると `guard_workspace()` が exit 2 で拒否する: `~/.ssh`、`~/.aws`、`~/.config/aws`、`~/.gcloud`、`~/.config/gcloud`、`~/.azure`、`~/.config/azure`、`~/.gitconfig`、`~/.git-credentials`、`~/.config/git`、`~/.config/gh`、`~/.netrc`、`~/.kube`（kubeconfig）、`~/.docker`、`/var/run/docker.sock`、`~/.npmrc`、`~/.pypirc`。`guard_workspace()` は判定基準を常に passwd データベース（`getent passwd "$(id -u)"`）の実 home から導出し、呼び出し側の `$HOME` は一切信用しない。passwd home が解決できない（取得失敗・非ディレクトリ・`realpath` 失敗）場合は **fail closed** で `exit 2` とし、`$HOME` へはフォールバックしない。これにより `HOME=` クリア・`unset HOME`・別の実在ディレクトリへの偽装（`HOME=/tmp` 等）のいずれでもバイパスできない。運用上もこれらの配下から `aidock` を起動しないことを推奨する。 | `compose.yaml` / `bin/aidock` |
 | SEC-9 | `guard_workspace()` の `/` および `$HOME` 拒否を撤去・回避しない。 | `bin/aidock` |
 | SEC-10 | OAuth 資格情報はイメージ層・ホスト FS に書き出さない（名前付きボリュームのみ）。 | `compose.yaml` |
 | SEC-11 | allowlist に新規ホストを足すときは PR で必要性を述べる。テレメトリ系（statsig / sentry）は **削除可** だが追加は最小限に。 | `init-firewall.sh` |
@@ -210,6 +211,7 @@
 - `$HOME` で `./bin/aidock` を実行すると exit code 2 で拒否される。
 - `/` で実行しても拒否される。
 - SEC-8 列挙パス配下（`~/.ssh`、`~/.aws`、`~/.config/gcloud` 等）で `./bin/aidock` を実行すると exit code 2 で拒否される。
+- `bin/aidock` を経由せず `HOST_WORKSPACE` 未設定のまま `docker compose -f compose.yaml run --rm claude ...`（または `config`）を実行すると、`HOST_WORKSPACE is unset` で **non-zero exit** となり起動しない（FR-2.4 / SEC-8(a) の fail-closed。カレントディレクトリは暗黙マウントされない）。検証: `unset HOST_WORKSPACE; docker compose -f compose.yaml config -q; echo $?` が非ゼロ。
 - 上記 SEC-8 パス配下から `HOME=` クリア、`unset HOME`、または存在しないパスを指す `HOME` で実行しても、passwd データベース（`getent passwd "$(id -u)"`）から実 home を解決して同様に exit code 2 で拒否される（バイパスできない）。
 - 検証手順（リポジトリルートで実行。任意の SEC-8 列挙パスを使用、例: `~/.aws/test`）:
     - `repo="$PWD"`
@@ -269,6 +271,7 @@
 
 | 日付 | 改訂内容 | 担当 |
 | --- | --- | --- |
+| 2026-05-29 | issue #8（P1）対応: `compose.yaml` の `/workspace` マウントから `HOST_WORKSPACE` のデフォルト `:-./` を撤去し `${HOST_WORKSPACE:?...}` に変更。`bin/aidock` 非経由の直接 `docker compose run` がカレントディレクトリを暗黙マウントせず fail-closed で停止するようにし、SEC-8 一次防御 (a) を補強。`bin/aidock` の `compose()` ラッパーでマウント不要なサブコマンド（build/logout/firewall-refresh）向けに非機密プレースホルダ（`/nonexistent`）を供給。FR-2.4 を新設、SEC-8(a) と AC-2 を更新。README も同期。 | Claude Code |
 | 2026-05-24 | codex レビュー（5巡目）反映: (1) `post-ci-verify.yml` の PR fallback を **`head.sha == workflow_run.head_sha` 一致**で厳密化し、同名 head ブランチの複数 PR で誤った PR にコメントする経路を排除（P2、FR-9.2 更新）。(2) Claude GitHub App 認証パスが要求する **`id-token: write`** の付与を有効化前タスクとして #17 に集約（codex P1。公式 setup docs で要否を確認済み。SHA ピンと同じ扱い、FR-9.6 に (d) を追記）。 | Claude Code |
 | 2026-05-24 | codex レビュー（4巡目）反映: `post-ci-verify.yml` の PR 番号 fallback に **同一リポジトリ判定**（`head_repository.full_name == owner/repo`）を追加し、fork のブランチ名衝突で無関係 PR にコメントする経路を遮断（P3）。action の SHA ピン（claude-code-action / github-script、P1/P2）はフル SHA をこの環境で確認できないため有効化前タスクとして #17 に集約。 | Claude Code |
 | 2026-05-24 | codex レビュー（3巡目）反映: (1) e2e の run-profile（AC-1/AC-4）を `claude true` から `api.anthropic.com` の **明示 egress アサーション**（`^[1-9][0-9]{2}$`）に変更。(2) `post-ci-verify.yml` のピン SHA が誤り（`787c5a0` は v1≠、codex によれば現 v1=`20c8abf`）だったため `@v1` に戻し、監査済み SHA へのピンを有効化前タスクとして #17 に集約（FR-9.6 更新）。 | Claude Code |

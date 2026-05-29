@@ -11,7 +11,14 @@ HOST_GID="$(id -g)"
 export HOST_UID HOST_GID
 
 compose() {
-    docker compose -f "${REPO_ROOT}/compose.yaml" "$@"
+    # compose.yaml requires HOST_WORKSPACE (no default) so that bypassing this
+    # wrapper with a bare `docker compose run claude` fails closed instead of
+    # mounting the repo. Subcommands that do not mount a user workspace
+    # (build/logout/firewall-refresh) still need the variable to interpolate,
+    # so supply a non-sensitive placeholder here. run/login/shell export the
+    # guarded $PWD before calling compose, which takes precedence over this.
+    HOST_WORKSPACE="${HOST_WORKSPACE:-/nonexistent}" \
+        docker compose -f "${REPO_ROOT}/compose.yaml" "$@"
 }
 
 guard_workspace() {
