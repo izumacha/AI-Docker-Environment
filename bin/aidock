@@ -82,14 +82,16 @@ cmd_login() {
 
 cmd_logout() {
     # `compose down -v` is the authoritative teardown (it removes the project's
-    # claude-home volume). Propagate its exit code and only claim success when
-    # it actually succeeded, so a failed logout on a shared host is not silently
-    # reported as done with the credential volume left behind (AC-5 / SEC-10).
-    # The trailing `docker volume rm` is best-effort reinforcement only and must
-    # not mask a failed teardown.
-    if ! compose down -v --remove-orphans; then
-        echo "aidock: logout failed; credential volume may still exist (check 'docker volume ls')" >&2
-        exit 1
+    # claude-home volume). Capture and propagate its exact exit code and only
+    # claim success when it actually succeeded, so a failed logout on a shared
+    # host is not silently reported as done with the credential volume left
+    # behind (AC-5 / SEC-10 / FR-1.6). The trailing `docker volume rm` is
+    # best-effort reinforcement only and must not mask a failed teardown.
+    local status=0
+    compose down -v --remove-orphans || status=$?
+    if (( status != 0 )); then
+        echo "aidock: logout failed (compose down -v exited $status); credential volume may still exist (check 'docker volume ls')" >&2
+        exit "$status"
     fi
     docker volume rm aidock_claude-home 2>/dev/null || true
     echo "aidock: credential volume removed"
