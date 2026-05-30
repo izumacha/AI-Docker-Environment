@@ -72,7 +72,7 @@
 | FR-1.3 | `run [args...]` / 引数なし | `$PWD` を `/workspace` に bind mount して Claude Code を起動。`run` は既定サブコマンド。追加 `args` は `compose run --rm claude` に **位置引数として無変換で渡される**（SEC-14 参照）。 |
 | FR-1.4 | `shell` / `bash` | 同マウントで bash を起動。 |
 | FR-1.5 | `firewall-refresh` | 稼働中コンテナ内で `init-firewall.sh` を再実行（DNS 再解決）。 |
-| FR-1.6 | `logout` | `compose down -v` でサービスと名前付きボリューム（`claude-home`）を破棄し、OAuth 資格情報を失わせる。**現状実装は補強として `docker volume rm aidock_claude-home` も実行する**。Compose プロジェクト名が `aidock` 以外では当該名のボリュームは別文脈（他チェックアウト・別プロジェクト等で作られた **同名グローバルボリューム**）を指しうるため、**意図せず他プロジェクトの資格情報を削除する破壊的副作用**がある（既知の defect。follow-up PR で `compose down -v` のみに集約予定）。 |
+| FR-1.6 | `logout` | `compose down -v` でサービスと名前付きボリューム（`claude-home`）を破棄し、OAuth 資格情報を失わせる。**`compose down -v` の終了コードを伝播する**: 失敗時は stderr に警告を出し非ゼロ exit、成功時のみ success メッセージを表示する（best-effort で握りつぶさない。AC-5 / SEC-10）。**現状実装は補強として `docker volume rm aidock_claude-home` も best-effort で実行する**（`compose down -v` 成功後にのみ実行し、その失敗は無視する＝テアダウン成否をマスクしない）。Compose プロジェクト名が `aidock` 以外では当該名のボリュームは別文脈（他チェックアウト・別プロジェクト等で作られた **同名グローバルボリューム**）を指しうるため、**意図せず他プロジェクトの資格情報を削除する破壊的副作用**がある（既知の defect。`docker volume rm` 行の撤去とボリューム名の動的解決は #9 で対応）。 |
 | FR-1.7 | `help` / `-h` / `--help` | `usage` を表示。 |
 | FR-1.8 | 未知のサブコマンド | エラーメッセージを stderr に出力し exit code 1。 |
 
@@ -231,7 +231,7 @@
 
 ### AC-5: 永続化
 - `aidock login` 実行後、コンテナを再作成しても OAuth セッションが保持される。
-- `aidock logout` が **正常に完了した場合**（`compose down -v` および `docker volume rm` の少なくとも一方が実際にボリュームを破棄した場合）、再度 `aidock` 起動時に未ログイン状態になる。**現状実装は両コマンドに `|| true` が付いており Docker 不在時にも success メッセージを出すため、終了コードや出力で破棄成功を保証できない**（follow-up PR で `bin/aidock logout` の失敗を非ゼロ exit で伝播するよう修正予定）。検証は `docker volume ls` で当該ボリュームが消えていることで補強する。
+- `aidock logout` が **正常に完了した場合**（`compose down -v` が成功した場合）、再度 `aidock` 起動時に未ログイン状態になる。**`compose down -v` が失敗した場合は success メッセージを出さず stderr に警告を出して非ゼロ exit する**（Docker 不在・権限不足・ボリューム使用中などを握りつぶさない。FR-1.6）。補強の `docker volume rm` は `compose down -v` 成功後にのみ best-effort で実行し、その失敗はテアダウン成否をマスクしない。検証は `docker volume ls` で当該ボリュームが消えていることで補強する。
 
 ### AC-6: ドキュメント
 - 機能変更時、本書 §3 / §4 と `README.md` の表 / `CLAUDE.md` のコマンド表が一致している。
@@ -271,6 +271,7 @@
 
 | 日付 | 改訂内容 | 担当 |
 | --- | --- | --- |
+| 2026-05-29 | issue #7（P1）対応: `bin/aidock` の `cmd_logout()` で `compose down -v` の終了コードを伝播するよう修正。失敗時は stderr に警告を出して非ゼロ exit し、success メッセージは成功時のみ表示（従来の `\|\| true` による失敗握りつぶしを解消＝共有ホストで logout 失敗を成功と誤認する経路を排除）。補強の `docker volume rm` は `compose down -v` 成功後にのみ best-effort 実行しテアダウン成否をマスクしない。FR-1.6 / AC-5 を更新（`docker volume rm` 行撤去とボリューム名動的解決は #9 で別途対応）。 | Claude Code |
 | 2026-05-29 | issue #6（P1）対応: `init-firewall.sh` に `cidr_in_range()` を追加し SEC-12.2（octet 0-255 / prefix 0-32 の範囲検証）を実装。SEC-12.1 の正規表現通過後に base-10（`10#`）で範囲比較し、`999.999.999.999/33` 等の範囲外 CIDR を warn ログ付きでスキップ（FR-4.7 best-effort、初期化は継続）。SEC-12.2 / FR-4.5 を「実装済み」に更新。 | Claude Code |
 | 2026-05-29 | issue #8（P1）対応: `compose.yaml` の `/workspace` マウントから `HOST_WORKSPACE` のデフォルト `:-./` を撤去し `${HOST_WORKSPACE:?...}` に変更。`bin/aidock` 非経由の直接 `docker compose run` がカレントディレクトリを暗黙マウントせず fail-closed で停止するようにし、SEC-8 一次防御 (a) を補強。`bin/aidock` の `compose()` ラッパーでマウント不要なサブコマンド（build/logout/firewall-refresh）向けに非機密プレースホルダ（`/nonexistent`）を供給。FR-2.4 を新設、SEC-8(a) と AC-2 を更新。README も同期。 | Claude Code |
 | 2026-05-24 | codex レビュー（5巡目）反映: (1) `post-ci-verify.yml` の PR fallback を **`head.sha == workflow_run.head_sha` 一致**で厳密化し、同名 head ブランチの複数 PR で誤った PR にコメントする経路を排除（P2、FR-9.2 更新）。(2) Claude GitHub App 認証パスが要求する **`id-token: write`** の付与を有効化前タスクとして #17 に集約（codex P1。公式 setup docs で要否を確認済み。SHA ピンと同じ扱い、FR-9.6 に (d) を追記）。 | Claude Code |
