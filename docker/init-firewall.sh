@@ -20,6 +20,7 @@ iptables -X
 # Docker's embedded-DNS DNAT (127.0.0.11:53) and breaks all name resolution
 # for the allowlist built below. The egress policy lives in the filter table.
 ipset destroy allowed-hosts 2>/dev/null || true
+ipset destroy allowed-dns 2>/dev/null || true
 
 iptables -P INPUT   DROP
 iptables -P FORWARD DROP
@@ -30,8 +31,30 @@ iptables -A OUTPUT -o lo -j ACCEPT
 iptables -A INPUT  -m state --state ESTABLISHED,RELATED -j ACCEPT
 iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 
-iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
-iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT
+# DNS: allow port 53 only to the nameservers declared in /etc/resolv.conf
+# instead of every destination. A wide-open DNS egress is the one hole in the
+# default-deny policy that lets a low-bandwidth DNS-tunnel exfiltration channel
+# slip secrets out via query names to an attacker-controlled resolver. Pinning
+# 53 to the configured resolvers closes that channel while keeping normal name
+# resolution working. Docker rewrites /etc/resolv.conf inside the container
+# (commonly the embedded resolver 127.0.0.11), so reading it at startup is
+# reliable; `firewall-refresh` re-reads it if the host DNS later changes.
+ipset create allowed-dns hash:ip family inet hashsize 64 maxelem 256
+dns_count=0
+while IFS= read -r ns; do
+    [[ -z "$ns" ]] && continue
+    ipset add allowed-dns "$ns" -exist
+    dns_count=$((dns_count + 1))
+done < <(awk '/^nameserver/ { print $2 }' /etc/resolv.conf 2>/dev/null \
+    | grep -E '^[0-9]{1,3}(\.[0-9]{1,3}){3}$')
+if [[ "$dns_count" -eq 0 ]]; then
+    log "WARN: no IPv4 nameserver in /etc/resolv.conf; DNS egress will be blocked"
+else
+    log "allowed DNS servers: $(ipset list allowed-dns | grep -E '^[0-9]' | tr '\n' ' ')"
+fi
+
+iptables -A OUTPUT -p udp --dport 53 -m set --match-set allowed-dns dst -j ACCEPT
+iptables -A OUTPUT -p tcp --dport 53 -m set --match-set allowed-dns dst -j ACCEPT
 
 ipset create allowed-hosts hash:net family inet hashsize 1024 maxelem 65536
 

@@ -93,7 +93,7 @@
 - コンテナ起動時、`AIDOCK_SKIP_FIREWALL=1` でない限り `init-firewall.sh` を実行する。entrypoint は **root** で起動して `init-firewall.sh` を直接実行し（sudo は使わない）、初期化後に `gosu agent` でワークロードを exec する（SEC-6 / SEC-7 参照）。
 - FR-4.0: `AIDOCK_SKIP_FIREWALL=1` が設定されているときに限り初期化をスキップする。**デバッグ専用** であり、CI および共有ホストでは設定しない（SEC-13）。
 - FR-4.1: 既定で `INPUT`/`FORWARD`/`OUTPUT` を `DROP`。
-- FR-4.2: loopback、`ESTABLISHED,RELATED`、DNS(53/udp,tcp) のみ恒久許可。
+- FR-4.2: loopback、`ESTABLISHED,RELATED`、DNS(53/udp,tcp) のみ恒久許可。DNS(53) は **全宛先ではなく `/etc/resolv.conf` の `nameserver` に列挙された IPv4 アドレス**（ipset `allowed-dns`）に限定する（SEC-15）。`nameserver` を 1 件も検出できない場合は warn ログを残し、DNS egress は遮断される（終端プローブ FR-4.6 が名前解決失敗で fail するため fail-closed に倒れる）。**実装済み**。
 - FR-4.3: `CORE_HOSTS` 全件を DNS 解決し ipset `allowed-hosts` に投入。DNS 解決に失敗したホストは **warn ログを残してスキップ**し、初期化は継続する。
 - FR-4.4: `AIDOCK_PROFILE=login` の場合のみ `LOGIN_EXTRA_HOSTS` も投入。
 - FR-4.5: GitHub `https://api.github.com/meta` から CIDR を取得し ipset へ追加。取得した CIDR は SEC-12.1（正規表現）/ SEC-12.2（octet 0-255・prefix 0-32 の範囲）の検証を **両方** 通過した場合にのみ追加する（いずれも実装済み）。範囲外の CIDR は warn ログを残してスキップする（FR-4.7 best-effort）。meta 取得自体が失敗した場合は **warn ログのみで継続**し、ホスト名解決で得た IP の範囲に縮退する。
@@ -165,6 +165,7 @@
 | SEC-12.2 | 各 octet が `0`–`255`、prefix が `0`–`32` の範囲であることを併せて検証する。**実装済み**（`init-firewall.sh` の `cidr_in_range()`。SEC-12.1 の正規表現通過後にフィールド分解し base-10（`10#`）で範囲比較。範囲外は warn ログを残してスキップし初期化は継続＝FR-4.7 best-effort）。形式的に正規表現を通る `999.999.999.999/33` 等は ipset に追加されない。 | `init-firewall.sh` |
 | SEC-13 | `AIDOCK_SKIP_FIREWALL=1` の常用を禁止する。**デバッグ用バックドア**であり、CI および共有ホストでは設定しない。一時的に使用した場合はその都度 `unset` する。 | `entrypoint.sh` |
 | SEC-14 | `bin/aidock run [args...]` の追加引数は `compose run --rm claude` に **位置引数として無変換で渡される**。コマンド置換（`$()`・バッククォート）等を含めない責任は呼び出し側が負う。ラッパー側で eval/sh -c 等の二次評価を導入してはならない。 | `bin/aidock` |
+| SEC-15 | DNS(53/udp,tcp) の egress を **全宛先許可にしない**。`/etc/resolv.conf` の `nameserver` 行から抽出した IPv4 アドレスを ipset `allowed-dns` に投入し、`-m set --match-set allowed-dns dst` で宛先を限定する。これにより DNS query 名を介した低帯域 exfiltration（攻撃者制御リゾルバへの送信）を遮断する。**実装済み**（`init-firewall.sh`。`nameserver` 不検出時は warn ログを残し DNS を遮断＝fail-closed）。 | `init-firewall.sh` |
 
 ### NFR-2: 性能・リソース
 - 既定リソース上限（mem 4G / cpus 2.0 / pids 1024）で Claude Code が通常運用可能であること。
@@ -269,6 +270,7 @@
 
 | 日付 | 改訂内容 | 担当 |
 | --- | --- | --- |
+| 2026-05-30 | issue #12（P2）対応: `init-firewall.sh` の DNS(53) egress を全宛先許可から `/etc/resolv.conf` の `nameserver` IPv4（ipset `allowed-dns`、`-m set --match-set allowed-dns dst`）限定に変更し、DNS query 名を介した低帯域 exfiltration を遮断。`nameserver` 不検出時は warn ログを残し DNS を遮断（fail-closed）。SEC-15 を新設、FR-4.2 を更新。 | Claude Code |
 | 2026-05-29 | issue #7（P1）対応: `bin/aidock` の `cmd_logout()` で `compose down -v` の終了コードを伝播するよう修正。失敗時は stderr に警告を出して非ゼロ exit し、success メッセージは成功時のみ表示（従来の `\|\| true` による失敗握りつぶしを解消＝共有ホストで logout 失敗を成功と誤認する経路を排除）。補強の `docker volume rm` は `compose down -v` 成功後にのみ best-effort 実行しテアダウン成否をマスクしない。FR-1.6 / AC-5 を更新（`docker volume rm` 行撤去とボリューム名動的解決は #9 で別途対応）。 | Claude Code |
 | 2026-05-29 | 運用ルール再改訂（FR-7）: 「CI の成否はこの実行環境で確認できない」前提を撤去し、**Claude が GitHub MCP（check-runs / status）で CI 結果を取得し Claude 上（チャット）で報告する**方針に変更。post-ci-verify（FR-9）の PR コメント要約は維持。CLAUDE.md / README.md も同期。 | Claude Code |
 | 2026-05-29 | `README.md` に「コードレビュー / PR 運用」節を追加し、codex 自動レビューと PR 作成フロー（open 作成 / `@codex review` 投稿でレビュー発火 / push ごとの投稿 / CI グリーンを主張しない）を利用者向けに記載。FR-7（正本）と CLAUDE.md の運用を要約・同期。 | Claude Code |
