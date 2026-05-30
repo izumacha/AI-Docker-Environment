@@ -52,7 +52,7 @@ cd ~/some-project
 | --- | --- |
 | ホスト FS の破壊 | bind mount は `$PWD` のみ。`read_only` rootfs + `tmpfs`。`HOST_WORKSPACE` はデフォルト値なし → `bin/aidock` 非経由の直接 `docker compose run` は fail-closed で起動失敗 |
 | ホスト資格情報の流出 | `~/.ssh` / `~/.aws` / `gcloud` / `~/.gitconfig` 等を追加 bind mount しない。`$HOME` と `/` は起動拒否。ただし機密ディレクトリ配下からの起動は禁止（機械的拒否は follow-up） |
-| 任意外部送信 | iptables 既定 DROP + ipset allowlist (api.anthropic.com, npm, GitHub等のみ) |
+| 任意外部送信 | iptables 既定 DROP + ipset allowlist (api.anthropic.com, npm, GitHub等のみ)。DNS(53) も `/etc/resolv.conf` の nameserver に限定し DNS トンネル exfiltration を遮断 |
 | 暴走プロセス | `mem_limit=4g`, `pids_limit=1024`, `cpus=2.0`, `tini` で reap |
 | 権限昇格 | `cap_drop: ALL` → `NET_ADMIN`/`NET_RAW`（+ 降格用 `SETUID`/`SETGID`）のみ復帰、`no-new-privileges`、entrypoint は root 起動 → `gosu` で agent 降格 (sudo 不使用) |
 
@@ -61,6 +61,11 @@ cd ~/some-project
 `docker/init-firewall.sh` の `CORE_HOSTS` / `LOGIN_EXTRA_HOSTS` を編集して
 ホストを増減できる。GitHub の CIDR ブロックは `https://api.github.com/meta`
 から動的取得して ipset に追加 (jq + 正規表現の形式検証に加え、各 octet 0-255 / prefix 0-32 の範囲検証を実施。範囲外はスキップ)。
+
+DNS(53/udp,tcp) は全宛先許可ではなく、`/etc/resolv.conf` の `nameserver`
+行から抽出した IPv4 アドレス (ipset `allowed-dns`) に限定する。これにより
+DNS query 名へ機密を載せて攻撃者制御のリゾルバへ送る低帯域 exfiltration を
+遮断する。ホスト DNS が変わった場合は `aidock firewall-refresh` で再取得する。
 
 ## 防げないもの (既知の限界)
 
