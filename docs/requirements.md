@@ -72,7 +72,7 @@
 | FR-1.3 | `run [args...]` / 引数なし | `$PWD` を `/workspace` に bind mount して Claude Code を起動。`run` は既定サブコマンド。追加 `args` は `compose run --rm claude` に **位置引数として無変換で渡される**（SEC-14 参照）。 |
 | FR-1.4 | `shell` / `bash` | 同マウントで bash を起動。 |
 | FR-1.5 | `firewall-refresh` | 稼働中コンテナ内で `init-firewall.sh` を再実行（DNS 再解決）。 |
-| FR-1.6 | `logout` | `compose down -v` でサービスと名前付きボリューム（`claude-home`）を破棄し、OAuth 資格情報を失わせる。**現状実装は補強として `docker volume rm aidock_claude-home` も実行する**。Compose プロジェクト名が `aidock` 以外では当該名のボリュームは別文脈（他チェックアウト・別プロジェクト等で作られた **同名グローバルボリューム**）を指しうるため、**意図せず他プロジェクトの資格情報を削除する破壊的副作用**がある（既知の defect。follow-up PR で `compose down -v` のみに集約予定）。 |
+| FR-1.6 | `logout` | `compose down -v` でサービスと名前付きボリューム（`claude-home`）を破棄し、OAuth 資格情報を失わせる。**`compose down -v` の終了コードを伝播する**: 失敗時は stderr に警告を出し非ゼロ exit、成功時のみ success メッセージを表示する（best-effort で握りつぶさない。AC-5 / SEC-10）。**現状実装は補強として `docker volume rm aidock_claude-home` も best-effort で実行する**（`compose down -v` 成功後にのみ実行し、その失敗は無視する＝テアダウン成否をマスクしない）。Compose プロジェクト名が `aidock` 以外では当該名のボリュームは別文脈（他チェックアウト・別プロジェクト等で作られた **同名グローバルボリューム**）を指しうるため、**意図せず他プロジェクトの資格情報を削除する破壊的副作用**がある（既知の defect。`docker volume rm` 行の撤去とボリューム名の動的解決は #9 で対応）。 |
 | FR-1.7 | `help` / `-h` / `--help` | `usage` を表示。 |
 | FR-1.8 | 未知のサブコマンド | エラーメッセージを stderr に出力し exit code 1。 |
 
@@ -229,7 +229,7 @@
 
 ### AC-5: 永続化
 - `aidock login` 実行後、コンテナを再作成しても OAuth セッションが保持される。
-- `aidock logout` が **正常に完了した場合**（`compose down -v` および `docker volume rm` の少なくとも一方が実際にボリュームを破棄した場合）、再度 `aidock` 起動時に未ログイン状態になる。**現状実装は両コマンドに `|| true` が付いており Docker 不在時にも success メッセージを出すため、終了コードや出力で破棄成功を保証できない**（follow-up PR で `bin/aidock logout` の失敗を非ゼロ exit で伝播するよう修正予定）。検証は `docker volume ls` で当該ボリュームが消えていることで補強する。
+- `aidock logout` が **正常に完了した場合**（`compose down -v` が成功した場合）、再度 `aidock` 起動時に未ログイン状態になる。**`compose down -v` が失敗した場合は success メッセージを出さず stderr に警告を出して非ゼロ exit する**（Docker 不在・権限不足・ボリューム使用中などを握りつぶさない。FR-1.6）。補強の `docker volume rm` は `compose down -v` 成功後にのみ best-effort で実行し、その失敗はテアダウン成否をマスクしない。検証は `docker volume ls` で当該ボリュームが消えていることで補強する。
 
 ### AC-6: ドキュメント
 - 機能変更時、本書 §3 / §4 と `README.md` の表 / `CLAUDE.md` のコマンド表が一致している。
@@ -269,6 +269,7 @@
 
 | 日付 | 改訂内容 | 担当 |
 | --- | --- | --- |
+| 2026-05-29 | issue #7（P1）対応: `bin/aidock` の `cmd_logout()` で `compose down -v` の終了コードを伝播するよう修正。失敗時は stderr に警告を出して非ゼロ exit し、success メッセージは成功時のみ表示（従来の `\|\| true` による失敗握りつぶしを解消＝共有ホストで logout 失敗を成功と誤認する経路を排除）。補強の `docker volume rm` は `compose down -v` 成功後にのみ best-effort 実行しテアダウン成否をマスクしない。FR-1.6 / AC-5 を更新（`docker volume rm` 行撤去とボリューム名動的解決は #9 で別途対応）。 | Claude Code |
 | 2026-05-29 | 運用ルール再改訂（FR-7）: 「CI の成否はこの実行環境で確認できない」前提を撤去し、**Claude が GitHub MCP（check-runs / status）で CI 結果を取得し Claude 上（チャット）で報告する**方針に変更。post-ci-verify（FR-9）の PR コメント要約は維持。CLAUDE.md / README.md も同期。 | Claude Code |
 | 2026-05-29 | `README.md` に「コードレビュー / PR 運用」節を追加し、codex 自動レビューと PR 作成フロー（open 作成 / `@codex review` 投稿でレビュー発火 / push ごとの投稿 / CI グリーンを主張しない）を利用者向けに記載。FR-7（正本）と CLAUDE.md の運用を要約・同期。 | Claude Code |
 | 2026-05-29 | 運用ルール改訂（FR-7）: Claude は PR を **draft ではなく open** で作成し、**差分を push するたびに（初回 PR 作成時を含む）`@codex review` を投稿**して初回・再レビューを発火させる。PR を open 作成にするため **draft → ready トリガ記述を撤去**。この実行環境では **CI の成否（グリーン）を確認できない**ため、Claude が CI 成功を確認・主張しない旨を明記（CI 結果の検証・要約は FR-9 が担う）。CLAUDE.md「Git ワークフロー」も同期。 | Claude Code |
