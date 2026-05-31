@@ -32,13 +32,16 @@ iptables -A INPUT  -m state --state ESTABLISHED,RELATED -j ACCEPT
 iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 
 # DNS: allow port 53 only to the nameservers declared in /etc/resolv.conf
-# instead of every destination. A wide-open DNS egress is the one hole in the
-# default-deny policy that lets a low-bandwidth DNS-tunnel exfiltration channel
-# slip secrets out via query names to an attacker-controlled resolver. Pinning
-# 53 to the configured resolvers closes that channel while keeping normal name
-# resolution working. Docker rewrites /etc/resolv.conf inside the container
-# (commonly the embedded resolver 127.0.0.11), so reading it at startup is
-# reliable; `firewall-refresh` re-reads it if the host DNS later changes.
+# instead of every destination (defense-in-depth, SEC-15). This blocks a
+# process from sending 53 directly to an attacker-controlled resolver (a crude
+# DNS-tunnel / covert channel), but does NOT stop query-name exfiltration that
+# recurses through the legitimate resolver to an attacker's authoritative NS
+# (e.g. <secret>.attacker.example) -- that residual risk is accepted, since
+# query-name filtering is not expressible here and dropping 53 after the
+# allowlist is built would break runtime re-resolution. Docker rewrites
+# /etc/resolv.conf inside the container (commonly the embedded resolver
+# 127.0.0.11), so reading it at startup is reliable; `firewall-refresh`
+# re-reads it if the host DNS later changes.
 ipset create allowed-dns hash:ip family inet hashsize 64 maxelem 256
 dns_count=0
 while IFS= read -r ns; do
