@@ -114,13 +114,25 @@ cmd_shell() {
 }
 
 cmd_firewall_refresh() {
-    local cid
-    cid="$(compose ps -q claude || true)"
-    if [[ -z "$cid" ]]; then
-        echo "aidock: no running claude container" >&2
-        exit 1
-    fi
-    docker exec -u root "$cid" /usr/local/bin/init-firewall.sh
+    # `compose ps -q claude` can emit more than one CID when several claude
+    # containers run concurrently (e.g. `run` + `shell` in parallel). Capture
+    # every line into an array instead of a scalar so a multi-line result is
+    # not passed verbatim as docker exec's first argument (FR-1.5).
+    local cids
+    mapfile -t cids < <(compose ps -q claude)
+    case "${#cids[@]}" in
+        0)
+            echo "aidock: no running claude container" >&2
+            exit 1
+            ;;
+        1)
+            docker exec -u root "${cids[0]}" /usr/local/bin/init-firewall.sh
+            ;;
+        *)
+            echo "aidock: ${#cids[@]} claude containers running; refusing to guess. Stop the extras or target one with 'docker exec -u root <id> /usr/local/bin/init-firewall.sh'." >&2
+            exit 1
+            ;;
+    esac
 }
 
 usage() {
