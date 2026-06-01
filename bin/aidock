@@ -114,25 +114,24 @@ cmd_shell() {
 }
 
 cmd_firewall_refresh() {
-    # `compose ps -q claude` can emit more than one CID when several claude
-    # containers run concurrently (e.g. `run` + `shell` in parallel). Capture
-    # every line into an array instead of a scalar so a multi-line result is
-    # not passed verbatim as docker exec's first argument (FR-1.5).
-    local cids
-    mapfile -t cids < <(compose ps -q claude)
-    case "${#cids[@]}" in
-        0)
-            echo "aidock: no running claude container" >&2
-            exit 1
-            ;;
-        1)
-            docker exec -u root "${cids[0]}" /usr/local/bin/init-firewall.sh
-            ;;
-        *)
-            echo "aidock: ${#cids[@]} claude containers running; refusing to guess. Stop the extras or target one with 'docker exec -u root <id> /usr/local/bin/init-firewall.sh'." >&2
-            exit 1
-            ;;
-    esac
+    # firewall-refresh re-resolves the DNS allowlist (e.g. after CDN IPs
+    # rotate). `compose ps -q claude` can list more than one CID when several
+    # claude containers run concurrently (e.g. `run` + `shell` in parallel);
+    # every one of them needs the refresh. Collect the CIDs line-by-line into
+    # an array (skipping blank lines) so each newline-separated CID stays a
+    # distinct container ID instead of being concatenated into one invalid
+    # argument to `docker exec`, then refresh each (FR-1.5).
+    local cids=() cid
+    while IFS= read -r cid; do
+        [[ -n "$cid" ]] && cids+=("$cid")
+    done < <(compose ps -q claude)
+    if [[ "${#cids[@]}" -eq 0 ]]; then
+        echo "aidock: no running claude container" >&2
+        exit 1
+    fi
+    for cid in "${cids[@]}"; do
+        docker exec -u root "$cid" /usr/local/bin/init-firewall.sh
+    done
 }
 
 usage() {

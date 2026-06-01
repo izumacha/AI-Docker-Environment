@@ -33,7 +33,7 @@ cd ~/some-project
 | `aidock login` | `claude /login` を起動。OAuth 用に allowlist を一時的に広げる (`AIDOCK_PROFILE=login`) |
 | `aidock` / `aidock run [args]` | 通常起動。`$PWD` を `/workspace` に bind mount |
 | `aidock shell` | デバッグ用 bash シェル |
-| `aidock firewall-refresh` | 起動中コンテナで firewall を再初期化 (DNS再解決) |
+| `aidock firewall-refresh` | 起動中の全 claude コンテナで firewall を再初期化 (DNS再解決) |
 | `aidock logout` | OAuth 資格情報の名前付きボリュームを破棄 |
 
 `$PWD` が `$HOME` または `/` のとき、ラッパーは起動を拒否する
