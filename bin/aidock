@@ -114,13 +114,30 @@ cmd_shell() {
 }
 
 cmd_firewall_refresh() {
-    local cid
-    cid="$(compose ps -q claude || true)"
-    if [[ -z "$cid" ]]; then
+    # firewall-refresh re-resolves the DNS allowlist (e.g. after CDN IPs
+    # rotate). `compose ps -q claude` can list more than one CID when several
+    # claude containers run concurrently (e.g. `run` + `shell` in parallel);
+    # every one of them needs the refresh. Collect the CIDs line-by-line into
+    # an array (skipping blank lines) so each newline-separated CID stays a
+    # distinct container ID instead of being concatenated into one invalid
+    # argument to `docker exec`, then refresh each (FR-1.5).
+    local cids=() cid status=0
+    while IFS= read -r cid; do
+        [[ -n "$cid" ]] && cids+=("$cid")
+    done < <(compose ps -q claude)
+    if [[ "${#cids[@]}" -eq 0 ]]; then
         echo "aidock: no running claude container" >&2
         exit 1
     fi
-    docker exec -u root "$cid" /usr/local/bin/init-firewall.sh
+    # Refresh every container best-effort: a failure in one must not skip the
+    # rest. Record the failure and propagate a non-zero exit at the end.
+    for cid in "${cids[@]}"; do
+        if ! docker exec -u root "$cid" /usr/local/bin/init-firewall.sh; then
+            echo "aidock: firewall refresh failed for container $cid" >&2
+            status=1
+        fi
+    done
+    exit "$status"
 }
 
 usage() {
@@ -132,8 +149,8 @@ Commands:
   login              Run `claude /login` once to seed OAuth credentials.
   run [args...]      Start Claude Code (default). Mounts $PWD as /workspace.
   shell              Open a bash shell inside the sandbox (debugging).
-  firewall-refresh   Re-run the firewall init in the running container
-                     (use after DNS-based IPs rotate).
+  firewall-refresh   Re-run the firewall init in every running claude
+                     container (use after DNS-based IPs rotate).
   logout             Remove the persisted credential volume.
   help               Show this message.
 USAGE
