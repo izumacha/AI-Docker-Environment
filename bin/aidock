@@ -121,7 +121,7 @@ cmd_firewall_refresh() {
     # an array (skipping blank lines) so each newline-separated CID stays a
     # distinct container ID instead of being concatenated into one invalid
     # argument to `docker exec`, then refresh each (FR-1.5).
-    local cids=() cid
+    local cids=() cid status=0
     while IFS= read -r cid; do
         [[ -n "$cid" ]] && cids+=("$cid")
     done < <(compose ps -q claude)
@@ -129,9 +129,15 @@ cmd_firewall_refresh() {
         echo "aidock: no running claude container" >&2
         exit 1
     fi
+    # Refresh every container best-effort: a failure in one must not skip the
+    # rest. Record the failure and propagate a non-zero exit at the end.
     for cid in "${cids[@]}"; do
-        docker exec -u root "$cid" /usr/local/bin/init-firewall.sh
+        if ! docker exec -u root "$cid" /usr/local/bin/init-firewall.sh; then
+            echo "aidock: firewall refresh failed for container $cid" >&2
+            status=1
+        fi
     done
+    exit "$status"
 }
 
 usage() {
@@ -143,8 +149,8 @@ Commands:
   login              Run `claude /login` once to seed OAuth credentials.
   run [args...]      Start Claude Code (default). Mounts $PWD as /workspace.
   shell              Open a bash shell inside the sandbox (debugging).
-  firewall-refresh   Re-run the firewall init in the running container
-                     (use after DNS-based IPs rotate).
+  firewall-refresh   Re-run the firewall init in every running claude
+                     container (use after DNS-based IPs rotate).
   logout             Remove the persisted credential volume.
   help               Show this message.
 USAGE
