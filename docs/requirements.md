@@ -5,7 +5,7 @@
 変更が必要な場合は **先に本書を改訂し、PR 内で根拠を述べた上で実装に着手する**。
 
 - **対象バージョン**: v1 系（Linux 専用、Claude Code 公式 CLI を Docker でサンドボックス化）
-- **最終更新**: 2026-06-01
+- **最終更新**: 2026-06-02
 - **位置づけ**: 要件 ＞ 設計 ＞ 実装。本書未記載の事項は CLAUDE.md / README.md の記述に従う。
 
 ---
@@ -169,7 +169,9 @@
 
 ### NFR-2: 性能・リソース
 - 既定リソース上限（mem 4G / cpus 2.0 / pids 1024）で Claude Code が通常運用可能であること。
-- `NODE_OPTIONS=--max-old-space-size=4096` を維持し、Node ヒープと `mem_limit` を整合させる。
+- `NODE_OPTIONS=--max-old-space-size` の Node ヒープ上限は **`mem_limit` から一定マージン（512 MiB 以上）下げて設定する**。既定は `mem_limit=4096 MiB` に対し `--max-old-space-size=3584`（4096 − 512）。`mem_limit` は SEC-4 の DoS 上限として 4G を維持し、ヒープ側のみ下げる。
+  - 根拠: ヒープ上限と cgroup 上限を同値（旧 `4096`）にすると、ヒープ外領域（V8 の C++ ヒープ、JS スタック、ネイティブモジュール、`git`/`jq`/`ripgrep` 等の子プロセス）が積み上がった際に RSS 合計が `mem_limit` を超え、V8 の graceful な heap-exceeded ハンドリングより先に cgroup OOM killer が SIGKILL を送り、Claude Code が原因不明で落ちる余地があった（issue #11）。マージンを確保することでヒープ外領域の突発的な伸びを cgroup 上限内に収める。
+  - 不変条件: **ヒープ上限 ≦ `mem_limit` − 512 MiB**。`mem_limit` を変更する場合は本値も追従させる。
 
 ### NFR-3: 可搬性
 - Linux + Docker Engine（+ Docker Compose v2）のみ前提。
@@ -270,6 +272,7 @@
 
 | 日付 | 改訂内容 | 担当 |
 | --- | --- | --- |
+| 2026-06-02 | issue #11（P2）対応: `compose.yaml` の `NODE_OPTIONS=--max-old-space-size` を `4096`（= `mem_limit` と同値）から `3584` に下げ、Node ヒープと cgroup 上限の間に 512 MiB のマージンを確保。ヒープ外領域（V8 C++ ヒープ・JS スタック・ネイティブモジュール・子プロセス）が積み上がった際に V8 の graceful な heap-exceeded ハンドリングより先に cgroup OOM killer が SIGKILL する経路を緩和。`mem_limit` は SEC-4 の DoS 上限として 4G を維持しヒープ側のみ調整。NFR-2 に数値根拠と不変条件「ヒープ上限 ≦ `mem_limit` − 512 MiB」を明記。 | Claude Code |
 | 2026-06-01 | issue #10（P2）対応: `bin/aidock` の `cmd_firewall_refresh()` を複数コンテナ耐性化。`compose ps -q claude` の戻り値を行ごとに配列へ取り込み（空行スキップ）、0 件→exit 1、1 件以上→**各コンテナで順に** `init-firewall.sh` を実行（DNS 再解決はどの claude コンテナにも等しく必要なため全件をループ）。従来は複数 CID を単一スカラに格納していたため、複数同時起動時に改行連結された CID が無効なコンテナ ID となり `docker exec` が失敗していた。**再レビュー反映**: ループを best-effort 化し（あるコンテナの失敗で残りをスキップせず、1 件でも失敗なら非ゼロ exit）、`usage()` の help 文言を全コンテナ対象に修正。FR-1.5 / README を全コンテナ対象の挙動に更新。 | Claude Code |
 | 2026-05-30 | issue #12（P2）対応: `init-firewall.sh` の DNS(53) egress を全宛先許可から `/etc/resolv.conf` の `nameserver` IPv4（ipset `allowed-dns`、`-m set --match-set allowed-dns dst`）限定に変更。`nameserver` 不検出時は warn ログを残し DNS を遮断（fail-closed）。SEC-15 を新設、FR-4.2 を更新。**codex レビュー反映**: 本ルールは任意の攻撃者制御リゾルバへの直接送信を断つ defense-in-depth であり、正規リゾルバの再帰解決を経由する query 名 exfiltration は防げない（query 名フィルタは iptables/ipset 不可、構築後の 53 全 DROP は実行時再解決を壊す）ため残余リスクを受容、という効果と限界を SEC-15 / FR-4.2 / README に正確化（当初の「DNSトンネル exfil を遮断」表現は過大だったため訂正）。 | Claude Code |
 | 2026-05-29 | issue #7（P1）対応: `bin/aidock` の `cmd_logout()` で `compose down -v` の終了コードを伝播するよう修正。失敗時は stderr に警告を出して非ゼロ exit し、success メッセージは成功時のみ表示（従来の `\|\| true` による失敗握りつぶしを解消＝共有ホストで logout 失敗を成功と誤認する経路を排除）。補強の `docker volume rm` は `compose down -v` 成功後にのみ best-effort 実行しテアダウン成否をマスクしない。FR-1.6 / AC-5 を更新（`docker volume rm` 行撤去とボリューム名動的解決は #9 で別途対応）。 | Claude Code |

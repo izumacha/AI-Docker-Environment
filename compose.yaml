@@ -26,7 +26,15 @@ services:
     pids_limit: 1024
     cpus: 2.0
     environment:
-      NODE_OPTIONS: "--max-old-space-size=4096"
+      # Keep the Node heap a fixed margin below mem_limit (4096 MiB) so that
+      # non-heap allocations (V8 C++ heap, JS stacks, native modules, and the
+      # git/jq/ripgrep child processes Claude Code spawns) have ~512 MiB of
+      # headroom before the cgroup OOM killer SIGKILLs the process. Sizing the
+      # heap == cgroup let RSS overshoot the limit and crash Node before V8's
+      # own graceful "heap out of memory" handling could engage (issue #11).
+      # mem_limit stays at 4g to preserve the SEC-4 DoS bound; only the heap
+      # ceiling is lowered. Invariant: heap <= mem_limit - 512 MiB (NFR-2).
+      NODE_OPTIONS: "--max-old-space-size=3584"
       AIDOCK_PROFILE: "${AIDOCK_PROFILE:-run}"
     volumes:
       # No default on purpose: invoking `docker compose run claude` directly
