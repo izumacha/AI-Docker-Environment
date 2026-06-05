@@ -124,17 +124,20 @@ iptables -A OUTPUT -m set --match-set allowed-hosts dst -j ACCEPT
 # DNS first lookup, momentary network unavailability, or a rate-limited 429 --
 # would otherwise drop us straight to the hostname-resolved-IP-only fallback,
 # leaving no CIDR coverage if a GitHub IP rotates between resolve and connect
-# time. `--retry 3 --retry-delay 2` (plus --retry-connrefused for a connect
-# race just after the ACCEPT rule lands) re-attempts on those transient errors;
-# a hard failure (e.g. 403 without retry-after) still falls through to the
-# warn-and-continue path below, preserving the FR-4.5 / FR-4.7 best-effort
-# contract. `--retry-max-time 20` caps the *cumulative* retry wall-clock:
-# curl honors a server `Retry-After` header on 403/429 (GitHub secondary rate
-# limits), which would otherwise let a single response stall container startup
-# for the server-dictated delay per attempt; --max-time only bounds each
-# transfer and is reset per retry, so without this cap startup is unbounded.
+# time. `--retry 3 --retry-delay 2 --retry-all-errors` re-attempts on *any*
+# curl failure: plain --retry only covers timeouts and HTTP 408/429/5xx (and
+# --retry-connrefused only adds ECONNREFUSED), neither of which retries a
+# name-resolution failure (curl exit 6) -- the very flaky-first-DNS case this
+# change targets -- so --retry-all-errors is required to cover it. A failure
+# that persists across all attempts still falls through to the warn-and-continue
+# path below, preserving the FR-4.5 / FR-4.7 best-effort contract.
+# `--retry-max-time 20` caps the *cumulative* retry wall-clock: curl honors a
+# server `Retry-After` header on 403/429 (GitHub secondary rate limits), which
+# would otherwise let a single response stall container startup for the
+# server-dictated delay per attempt; --max-time only bounds each transfer and
+# is reset per retry, so without this cap startup is unbounded.
 META_JSON="$(curl -fsSL --max-time 10 --retry 3 --retry-delay 2 \
-    --retry-max-time 20 --retry-connrefused https://api.github.com/meta || true)"
+    --retry-max-time 20 --retry-all-errors https://api.github.com/meta || true)"
 if [[ -n "$META_JSON" ]]; then
     CIDR_RE='^[0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2}$'
     while IFS= read -r cidr; do
