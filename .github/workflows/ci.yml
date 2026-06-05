@@ -37,13 +37,19 @@ jobs:
           hadolint --version
 
       - name: shellcheck
-        run: shellcheck bin/aidock docker/init-firewall.sh docker/entrypoint.sh
+        run: shellcheck bin/aidock docker/init-firewall.sh docker/entrypoint.sh test/guard_test.sh
 
       - name: bash syntax check
         run: |
-          for f in bin/aidock docker/init-firewall.sh docker/entrypoint.sh; do
+          for f in bin/aidock docker/init-firewall.sh docker/entrypoint.sh test/guard_test.sh; do
               bash -n "$f"
           done
+
+      - name: guard_workspace unit tests (SEC-8 / AC-2)
+        # Hermetic, Docker-free: rejection paths exit 2 before compose is reached;
+        # the host home is faked via a getent stub and the container via a docker
+        # stub, so this runs in type-check without building the image.
+        run: bash test/guard_test.sh
 
       - name: hadolint (Dockerfile)
         run: hadolint docker/Dockerfile
@@ -53,6 +59,19 @@ jobs:
         # `docker compose run`, see FR-2.4 / SEC-8(a)); supply a non-sensitive
         # placeholder for interpolation, mirroring bin/aidock's compose() wrapper.
         run: HOST_WORKSPACE=/nonexistent docker compose -f compose.yaml config -q
+
+      - name: SEC-8(a) compose fail-closed without HOST_WORKSPACE
+        # The negative of the step above: with HOST_WORKSPACE unset, the
+        # ${HOST_WORKSPACE:?...} guard in compose.yaml must abort (non-zero), so a
+        # bare `docker compose run` that bypasses bin/aidock cannot implicitly
+        # mount the cwd (FR-2.4 / SEC-8(a) / AC-2).
+        run: |
+          set +e
+          ( unset HOST_WORKSPACE; docker compose -f compose.yaml config -q )
+          code=$?
+          set -e
+          echo "compose config exit (HOST_WORKSPACE unset): $code"
+          [ "$code" -ne 0 ] || { echo "FAIL: compose must fail closed when HOST_WORKSPACE is unset"; exit 1; }
 
   e2e:
     name: e2e (acceptance criteria)

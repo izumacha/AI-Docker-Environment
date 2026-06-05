@@ -125,8 +125,9 @@
 - FR-8.1: **type-check ジョブ**は次の静的解析を実行し、いずれか失敗で CI を不合格とする。
   - `shellcheck`（v0.11.0、GitHub Releases から取得した固定版）を全シェルスクリプト（`bin/aidock`・`docker/init-firewall.sh`・`docker/entrypoint.sh`）に適用。
   - `bash -n` による構文チェック。
-  - `hadolint`（v2.14.0、GitHub Releases から取得した固定版）で `docker/Dockerfile` を検査。`DL3008`（apt パッケージのバージョン固定）は `.hadolint.yaml` で除外する（理由は NFR-5.1: 再現性は `CLAUDE_CODE_VERSION` 固定と `--no-install-recommends` で担保し、OS ライブラリの逐一ピン留めは方針外）。
-  - `docker compose -f compose.yaml config -q` による compose 定義の妥当性検証。
+  - `hadolint`（v2.14.0、GitHub Releases から取得した固定版）で `docker/Dockerfile` を検査。`DL3008`（apt パッケージのバージョン固定）は `.hadolint.yaml` で除外する（理由は NFR-5.1: 再現性は `CLAUDE_CODE_VERSION` 固定と `--no-install-recommends` で担保し、OS ライブラリの逐一ピン留めは方針外）。`shellcheck` / `bash -n` は `test/guard_test.sh` も対象に含める。
+  - `docker compose -f compose.yaml config -q` による compose 定義の妥当性検証。加えて `HOST_WORKSPACE` 未設定での `docker compose config` が **非ゼロ exit** することを検証し、SEC-8(a) の fail-closed（`${HOST_WORKSPACE:?...}`）を回帰検出する（AC-2）。
+  - `bash test/guard_test.sh` による `guard_workspace()` の自動テスト（SEC-8 / AC-2）。`getent` / `docker` を PATH スタブで差し替えた**ハーメティック（Docker 不要）**なブラックボックステストで、SEC-8 列挙の全機密パス（ディレクトリ/ファイル名）、`/` と `$HOME` の拒否、`HOME` 偽装（空・unset・`/tmp` 等）でのバイパス不能性、docker socket ブランチ、passwd home 解決失敗時の fail-closed、非機密ディレクトリの通過を `exit 2` / 通過で検証する。拒否系は compose 到達前に `exit 2` するため type-check ジョブで実行する。
 - FR-8.2: **e2e ジョブ**（type-check 成功後に実行）は GitHub-hosted runner 上で受け入れ基準を実機検証する。検証項目と AC の対応は AC-8 を参照。SEC-13 に従い `AIDOCK_SKIP_FIREWALL` は設定せず、**実ファイアウォールを起動した状態で検証する**。
 - FR-8.3: e2e は外部 egress（`api.anthropic.com` / `claude.ai` / `api.github.com`）に依存する。各プローブは `--max-time` を持つが、ネットワーク要因による一時失敗の可能性がある（残存リスク）。
 
@@ -209,6 +210,8 @@
 - `./bin/aidock` 起動時に `init-firewall.sh` のプローブが両方とも成功する（example.com 拒否 / api.anthropic.com 到達）。
 
 ### AC-2: ガード
+> 自動検証: 下記の拒否・通過・`HOME` 偽装・docker socket・passwd 解決失敗・SEC-8(a) compose fail-closed は CI の **type-check** ジョブが `test/guard_test.sh`（Docker 不要のハーメティックなブラックボックステスト）と compose config の負例で機械検証する（FR-8.1）。以下の手動手順は同等の確認をローカルで行うためのもの。
+
 - `$HOME` で `./bin/aidock` を実行すると exit code 2 で拒否される。
 - `/` で実行しても拒否される。
 - SEC-8 列挙パス配下（`~/.ssh`、`~/.aws`、`~/.config/gcloud` 等）で `./bin/aidock` を実行すると exit code 2 で拒否される。
@@ -242,8 +245,8 @@
 
 ### AC-8: CI
 - `.github/workflows/ci.yml` の **type-check** と **e2e** の両ジョブがグリーンであること（PR マージの必須条件、FR-8）。
-- type-check は FR-8.1 の静的解析（`shellcheck` / `bash -n` / `hadolint` / `docker compose config`）をすべて通過する。
-- e2e は次を GitHub-hosted runner 上で実機検証する: AC-1（ビルド + 起動プローブ）、AC-2（`$HOME` / `/` 起動を exit 2 で拒否）、AC-3（`whoami=agent` / `sudo` 不在 / capability 制限）、AC-4（run プロファイルの example.com 遮断・api.anthropic.com 到達、login プロファイルの claude.ai 到達）、AC-7（資格情報ボリューム所有権）。
+- type-check は FR-8.1 の静的解析（`shellcheck` / `bash -n` / `hadolint` / `docker compose config`）と、`guard_workspace()` の自動テスト（`test/guard_test.sh`）・SEC-8(a) compose fail-closed の負例検証をすべて通過する。これにより AC-2 の大半（SEC-8 全機密パス・`HOME` 偽装・docker socket・passwd 解決失敗・compose fail-closed）は **Docker 不要**で type-check ジョブが検証する。
+- e2e は次を GitHub-hosted runner 上で実機検証する: AC-1（ビルド + 起動プローブ）、AC-2（実機での `$HOME` / `/` 起動を exit 2 で拒否）、AC-3（`whoami=agent` / `sudo` 不在 / capability 制限）、AC-4（run プロファイルの example.com 遮断・api.anthropic.com 到達、login プロファイルの claude.ai 到達）、AC-7（資格情報ボリューム所有権）。
 - **AC-5（永続化）は対話 OAuth ログインを要するため CI 対象外**とし、ローカル手動検証に委ねる。
 
 ### AC-9: CI 後検証エージェント
