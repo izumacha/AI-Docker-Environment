@@ -136,8 +136,22 @@ iptables -A OUTPUT -m set --match-set allowed-hosts dst -j ACCEPT
 # would otherwise let a single response stall container startup for the
 # server-dictated delay per attempt; --max-time only bounds each transfer and
 # is reset per retry, so without this cap startup is unbounded.
-META_JSON="$(curl -fsSL --max-time 10 --retry 3 --retry-delay 2 \
-    --retry-max-time 20 --retry-all-errors https://api.github.com/meta || true)"
+#
+# Capture into a temp file via -o, not command substitution: with --retry curl
+# may emit a partial body from a failed attempt before a later attempt
+# succeeds, and stdout accumulates those bytes (curl's manual explicitly warns
+# against parsing retried output from redirected stdout). -o truncates the file
+# per attempt, so on success it holds only the final clean response; we read it
+# only after curl exits 0. /tmp is a tmpfs (compose.yaml), so this is writable
+# under the read-only rootfs.
+META_JSON=""
+META_TMP="$(mktemp)"
+if curl -fsSL --max-time 10 --retry 3 --retry-delay 2 \
+    --retry-max-time 20 --retry-all-errors -o "$META_TMP" \
+    https://api.github.com/meta; then
+    META_JSON="$(cat "$META_TMP")"
+fi
+rm -f "$META_TMP"
 if [[ -n "$META_JSON" ]]; then
     CIDR_RE='^[0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2}$'
     while IFS= read -r cidr; do
