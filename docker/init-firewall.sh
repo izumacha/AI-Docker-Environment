@@ -160,9 +160,20 @@ while :; do
     # Retry only transient failures: any curl transport error (DNS exit 6,
     # connect, timeout, connrefused...) or a retryable HTTP status. A hard HTTP
     # error (e.g. 403/404) breaks out immediately to warn-and-continue.
-    if [[ "$curl_rc" -ne 0 \
-        || "$http_code" == "408" || "$http_code" == "429" \
+    if [[ "$curl_rc" -ne 0 ]]; then
+        # Transport failure. If the earlier CORE_HOSTS resolve_and_add missed
+        # api.github.com (the very initial-DNS-failure case this targets), its
+        # IP is absent from allowed-hosts and the ACCEPT rule above would drop
+        # any freshly-resolved address, so the retry could only time out. Re-
+        # resolve and admit it (idempotent) before retrying; also picks up an
+        # IP that rotated since the first resolution.
+        resolve_and_add api.github.com
+        sleep 2
+        continue
+    fi
+    if [[ "$http_code" == "408" || "$http_code" == "429" \
         || "$http_code" =~ ^5[0-9][0-9]$ ]]; then
+        # The connection already succeeded (so the IP is admitted); just retry.
         sleep 2
         continue
     fi
