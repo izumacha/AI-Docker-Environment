@@ -120,37 +120,54 @@ fi
 # via core resolution above, so this curl works after the rule is installed).
 iptables -A OUTPUT -m set --match-set allowed-hosts dst -j ACCEPT
 
-# best-effort with bounded retries (issue #13): transient failures -- a flaky
-# DNS first lookup, momentary network unavailability, or a rate-limited 429 --
-# would otherwise drop us straight to the hostname-resolved-IP-only fallback,
-# leaving no CIDR coverage if a GitHub IP rotates between resolve and connect
-# time. `--retry 3 --retry-delay 2 --retry-all-errors` re-attempts on *any*
-# curl failure: plain --retry only covers timeouts and HTTP 408/429/5xx (and
-# --retry-connrefused only adds ECONNREFUSED), neither of which retries a
-# name-resolution failure (curl exit 6) -- the very flaky-first-DNS case this
-# change targets -- so --retry-all-errors is required to cover it. A failure
-# that persists across all attempts still falls through to the warn-and-continue
-# path below, preserving the FR-4.5 / FR-4.7 best-effort contract.
-# `--retry-max-time 20` caps the *cumulative* retry wall-clock: curl honors a
-# server `Retry-After` header on 403/429 (GitHub secondary rate limits), which
-# would otherwise let a single response stall container startup for the
-# server-dictated delay per attempt; --max-time only bounds each transfer and
-# is reset per retry, so without this cap startup is unbounded.
+# best-effort fetch with a hand-rolled bounded retry loop (issue #13).
 #
-# Capture into a temp file via -o, not command substitution: with --retry curl
-# may emit a partial body from a failed attempt before a later attempt
-# succeeds, and stdout accumulates those bytes (curl's manual explicitly warns
-# against parsing retried output from redirected stdout). -o truncates the file
-# per attempt, so on success it holds only the final clean response; we read it
-# only after curl exits 0. /tmp is a tmpfs (compose.yaml), so this is writable
-# under the read-only rootfs.
+# Why a shell loop instead of curl's --retry flags: we want to retry *only*
+# transient failures -- a flaky first DNS lookup (curl exit 6), a momentary
+# connect/timeout error, or an HTTP 429/5xx -- so a GitHub IP rotation between
+# resolve and connect time does not leave us with no CIDR coverage. curl's own
+# flags cannot express exactly that set: plain --retry skips name-resolution
+# failures, while --retry-all-errors (with -f) also retries *hard* HTTP errors
+# like 403/404, which contradicts the FR-4.5 contract that a 403 falls straight
+# into the warn-and-continue path and would add avoidable startup delay on every
+# boot under a persistent rate-limit/forbidden response. The loop below retries
+# transient cases and lets hard 4xx fall through immediately.
+#
+# Bounds: at most 3 attempts AND a cumulative ~20s wall-clock deadline, so a
+# server that keeps returning transient errors cannot stall container startup.
+# Response body goes to a temp file (-o) and is read only after a clean 2xx, so
+# partial bytes from a failed attempt can never corrupt the JSON we hand to jq.
+# /tmp is a tmpfs (compose.yaml), writable under the read-only rootfs.
 META_JSON=""
 META_TMP="$(mktemp)"
-if curl -fsSL --max-time 10 --retry 3 --retry-delay 2 \
-    --retry-max-time 20 --retry-all-errors -o "$META_TMP" \
-    https://api.github.com/meta; then
-    META_JSON="$(cat "$META_TMP")"
-fi
+meta_deadline=$(( $(date +%s) + 20 ))
+meta_attempt=0
+while :; do
+    meta_attempt=$((meta_attempt + 1))
+    set +e
+    http_code="$(curl -sSL --max-time 10 -o "$META_TMP" -w '%{http_code}' \
+        https://api.github.com/meta 2>/dev/null)"
+    curl_rc=$?
+    set -e
+    if [[ "$curl_rc" -eq 0 && "$http_code" =~ ^2[0-9][0-9]$ ]]; then
+        META_JSON="$(cat "$META_TMP")"
+        break
+    fi
+    # Stop once attempts are exhausted or the cumulative deadline has passed.
+    if (( meta_attempt >= 3 )) || (( $(date +%s) >= meta_deadline )); then
+        break
+    fi
+    # Retry only transient failures: any curl transport error (DNS exit 6,
+    # connect, timeout, connrefused...) or a retryable HTTP status. A hard HTTP
+    # error (e.g. 403/404) breaks out immediately to warn-and-continue.
+    if [[ "$curl_rc" -ne 0 \
+        || "$http_code" == "408" || "$http_code" == "429" \
+        || "$http_code" =~ ^5[0-9][0-9]$ ]]; then
+        sleep 2
+        continue
+    fi
+    break
+done
 rm -f "$META_TMP"
 if [[ -n "$META_JSON" ]]; then
     CIDR_RE='^[0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2}$'
