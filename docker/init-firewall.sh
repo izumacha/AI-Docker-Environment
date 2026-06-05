@@ -120,7 +120,66 @@ fi
 # via core resolution above, so this curl works after the rule is installed).
 iptables -A OUTPUT -m set --match-set allowed-hosts dst -j ACCEPT
 
-META_JSON="$(curl -fsSL --max-time 10 https://api.github.com/meta || true)"
+# best-effort fetch with a hand-rolled bounded retry loop (issue #13).
+#
+# Why a shell loop instead of curl's --retry flags: we want to retry *only*
+# transient failures -- a flaky first DNS lookup (curl exit 6), a momentary
+# connect/timeout error, or an HTTP 429/5xx -- so a GitHub IP rotation between
+# resolve and connect time does not leave us with no CIDR coverage. curl's own
+# flags cannot express exactly that set: plain --retry skips name-resolution
+# failures, while --retry-all-errors (with -f) also retries *hard* HTTP errors
+# like 403/404, which contradicts the FR-4.5 contract that a 403 falls straight
+# into the warn-and-continue path and would add avoidable startup delay on every
+# boot under a persistent rate-limit/forbidden response. The loop below retries
+# transient cases and lets hard 4xx fall through immediately.
+#
+# Bounds: at most 3 attempts AND a cumulative ~20s wall-clock deadline, so a
+# server that keeps returning transient errors cannot stall container startup.
+# Response body goes to a temp file (-o) and is read only after a clean 2xx, so
+# partial bytes from a failed attempt can never corrupt the JSON we hand to jq.
+# /tmp is a tmpfs (compose.yaml), writable under the read-only rootfs.
+META_JSON=""
+META_TMP="$(mktemp)"
+meta_deadline=$(( $(date +%s) + 20 ))
+meta_attempt=0
+while :; do
+    meta_attempt=$((meta_attempt + 1))
+    set +e
+    http_code="$(curl -sSL --max-time 10 -o "$META_TMP" -w '%{http_code}' \
+        https://api.github.com/meta 2>/dev/null)"
+    curl_rc=$?
+    set -e
+    if [[ "$curl_rc" -eq 0 && "$http_code" =~ ^2[0-9][0-9]$ ]]; then
+        META_JSON="$(cat "$META_TMP")"
+        break
+    fi
+    # Stop once attempts are exhausted or the cumulative deadline has passed.
+    if (( meta_attempt >= 3 )) || (( $(date +%s) >= meta_deadline )); then
+        break
+    fi
+    # Retry only transient failures: any curl transport error (DNS exit 6,
+    # connect, timeout, connrefused...) or a retryable HTTP status. A hard HTTP
+    # error (e.g. 403/404) breaks out immediately to warn-and-continue.
+    if [[ "$curl_rc" -ne 0 ]]; then
+        # Transport failure. If the earlier CORE_HOSTS resolve_and_add missed
+        # api.github.com (the very initial-DNS-failure case this targets), its
+        # IP is absent from allowed-hosts and the ACCEPT rule above would drop
+        # any freshly-resolved address, so the retry could only time out. Re-
+        # resolve and admit it (idempotent) before retrying; also picks up an
+        # IP that rotated since the first resolution.
+        resolve_and_add api.github.com
+        sleep 2
+        continue
+    fi
+    if [[ "$http_code" == "408" || "$http_code" == "429" \
+        || "$http_code" =~ ^5[0-9][0-9]$ ]]; then
+        # The connection already succeeded (so the IP is admitted); just retry.
+        sleep 2
+        continue
+    fi
+    break
+done
+rm -f "$META_TMP"
 if [[ -n "$META_JSON" ]]; then
     CIDR_RE='^[0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2}$'
     while IFS= read -r cidr; do
@@ -138,7 +197,7 @@ if [[ -n "$META_JSON" ]]; then
     done < <(echo "$META_JSON" | jq -r '.web[]?, .api[]?, .git[]?' 2>/dev/null | grep -E '^[0-9]+\.')
     log "added GitHub meta CIDRs"
 else
-    log "WARN: github meta fetch failed; continuing with hostname-resolved IPs only"
+    log "WARN: github meta fetch failed after retries; continuing with hostname-resolved IPs only (retry later with firewall-refresh)"
 fi
 
 iptables -A OUTPUT -j DROP
