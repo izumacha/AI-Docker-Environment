@@ -120,7 +120,16 @@ fi
 # via core resolution above, so this curl works after the rule is installed).
 iptables -A OUTPUT -m set --match-set allowed-hosts dst -j ACCEPT
 
-META_JSON="$(curl -fsSL --max-time 10 https://api.github.com/meta || true)"
+# best-effort with bounded retries (issue #13): transient failures -- a flaky
+# DNS first lookup, momentary network unavailability, or a rate-limited 429 --
+# would otherwise drop us straight to the hostname-resolved-IP-only fallback,
+# leaving no CIDR coverage if a GitHub IP rotates between resolve and connect
+# time. `--retry 3 --retry-delay 2` (plus --retry-connrefused for a connect
+# race just after the ACCEPT rule lands) re-attempts on those transient errors;
+# a hard failure (e.g. 403) still falls through to the warn-and-continue path
+# below, preserving the FR-4.5 / FR-4.7 best-effort contract.
+META_JSON="$(curl -fsSL --max-time 10 --retry 3 --retry-delay 2 \
+    --retry-connrefused https://api.github.com/meta || true)"
 if [[ -n "$META_JSON" ]]; then
     CIDR_RE='^[0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2}$'
     while IFS= read -r cidr; do
@@ -138,7 +147,7 @@ if [[ -n "$META_JSON" ]]; then
     done < <(echo "$META_JSON" | jq -r '.web[]?, .api[]?, .git[]?' 2>/dev/null | grep -E '^[0-9]+\.')
     log "added GitHub meta CIDRs"
 else
-    log "WARN: github meta fetch failed; continuing with hostname-resolved IPs only"
+    log "WARN: github meta fetch failed after retries; continuing with hostname-resolved IPs only (retry later with firewall-refresh)"
 fi
 
 iptables -A OUTPUT -j DROP
