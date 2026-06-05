@@ -5,7 +5,7 @@
 変更が必要な場合は **先に本書を改訂し、PR 内で根拠を述べた上で実装に着手する**。
 
 - **対象バージョン**: v1 系（Linux 専用、Claude Code 公式 CLI を Docker でサンドボックス化）
-- **最終更新**: 2026-06-02
+- **最終更新**: 2026-06-05
 - **位置づけ**: 要件 ＞ 設計 ＞ 実装。本書未記載の事項は CLAUDE.md / README.md の記述に従う。
 
 ---
@@ -72,7 +72,7 @@
 | FR-1.3 | `run [args...]` / 引数なし | `$PWD` を `/workspace` に bind mount して Claude Code を起動。`run` は既定サブコマンド。追加 `args` は `compose run --rm claude` に **位置引数として無変換で渡される**（SEC-14 参照）。 |
 | FR-1.4 | `shell` / `bash` | 同マウントで bash を起動。 |
 | FR-1.5 | `firewall-refresh` | 稼働中の **全 `claude` コンテナ**で `init-firewall.sh` を再実行（DNS 再解決）。`compose ps -q claude` の戻り値は**行ごとに配列へ取り込み**（空行はスキップ）、コンテナが 0 件なら `no running claude container` で exit 1、1 件以上なら**各コンテナで順に** `init-firewall.sh` を実行する。複数 claude コンテナを同時起動した場合（例: `run` と `shell` の並行）に複数 CID を改行連結したまま単一引数として `docker exec` へ渡すと無効なコンテナ ID になり失敗するため、CID は必ず 1 件ずつ分離して渡す。再実行は **best-effort**: あるコンテナで失敗しても残りのコンテナの再実行は中断せず、失敗を stderr に記録した上で **1 件でも失敗があれば最終的に非ゼロ exit** する。 |
-| FR-1.6 | `logout` | `compose down -v` でサービスと名前付きボリューム（`claude-home`）を破棄し、OAuth 資格情報を失わせる。**`compose down -v` の終了コードを伝播する**: 失敗時は stderr に警告を出し非ゼロ exit、成功時のみ success メッセージを表示する（best-effort で握りつぶさない。AC-5 / SEC-10）。**現状実装は補強として `docker volume rm aidock_claude-home` も best-effort で実行する**（`compose down -v` 成功後にのみ実行し、その失敗は無視する＝テアダウン成否をマスクしない）。Compose プロジェクト名が `aidock` 以外では当該名のボリュームは別文脈（他チェックアウト・別プロジェクト等で作られた **同名グローバルボリューム**）を指しうるため、**意図せず他プロジェクトの資格情報を削除する破壊的副作用**がある（既知の defect。`docker volume rm` 行の撤去とボリューム名の動的解決は #9 で対応）。 |
+| FR-1.6 | `logout` | `compose down -v` でサービスと名前付きボリューム（`claude-home`）を破棄し、OAuth 資格情報を失わせる。**`compose down -v` の終了コードを伝播する**: 失敗時は stderr に警告を出し非ゼロ exit、成功時のみ success メッセージを表示する（best-effort で握りつぶさない。AC-5 / SEC-10）。**テアダウンは `compose down -v` のみを唯一の権威ソースとする**: Compose がプロジェクト名でスコープした実ボリューム名（既定では小文字化したディレクトリ名 + `_claude-home`、例 `ai-docker-environment_claude-home`）を自動解決して削除する。**固定名 `docker volume rm aidock_claude-home` は実装しない**（#9 で撤去済み）: 当該リテラルは本リポジトリの実プロジェクト名と一致せず無効であるばかりか、別文脈（他チェックアウト・別プロジェクト等）で作られた **同名グローバルボリューム** を指して **意図せず他プロジェクトの資格情報を削除する破壊的副作用** を持つため、再導入してはならない。 |
 | FR-1.7 | `help` / `-h` / `--help` | `usage` を表示。 |
 | FR-1.8 | 未知のサブコマンド | エラーメッセージを stderr に出力し exit code 1。 |
 
@@ -232,7 +232,7 @@
 
 ### AC-5: 永続化
 - `aidock login` 実行後、コンテナを再作成しても OAuth セッションが保持される。
-- `aidock logout` が **正常に完了した場合**（`compose down -v` が成功した場合）、再度 `aidock` 起動時に未ログイン状態になる。**`compose down -v` が失敗した場合は success メッセージを出さず stderr に警告を出して非ゼロ exit する**（Docker 不在・権限不足・ボリューム使用中などを握りつぶさない。FR-1.6）。補強の `docker volume rm` は `compose down -v` 成功後にのみ best-effort で実行し、その失敗はテアダウン成否をマスクしない。検証は `docker volume ls` で当該ボリュームが消えていることで補強する。
+- `aidock logout` が **正常に完了した場合**（`compose down -v` が成功した場合）、再度 `aidock` 起動時に未ログイン状態になる。**`compose down -v` が失敗した場合は success メッセージを出さず stderr に警告を出して非ゼロ exit する**（Docker 不在・権限不足・ボリューム使用中などを握りつぶさない。FR-1.6）。テアダウンは `compose down -v` のみが行い（Compose がプロジェクトスコープの実ボリューム名を自動解決）、固定名の `docker volume rm` による補強は持たない（#9）。検証は `docker volume ls` で当該ボリュームが消えていることで補強する。
 
 ### AC-6: ドキュメント
 - 機能変更時、本書 §3 / §4 と `README.md` の表 / `CLAUDE.md` のコマンド表が一致している。
@@ -272,6 +272,7 @@
 
 | 日付 | 改訂内容 | 担当 |
 | --- | --- | --- |
+| 2026-06-05 | issue #9（P2）対応: `bin/aidock` の `cmd_logout()` から固定名 `docker volume rm aidock_claude-home` を撤去し、テアダウンを `compose down -v --remove-orphans` のみに集約。当該リテラルは実プロジェクト名（既定で `ai-docker-environment_claude-home`）と一致せず無効である上、別文脈で作られた同名グローバルボリュームを誤削除する破壊的副作用を持つ既知 defect だったため除去。Compose はプロジェクトスコープの実ボリューム名を自動解決して `claude-home` を削除する。FR-1.6 / AC-5 を更新（PR #22 で延期されていた follow-up を完了）。 | Claude Code |
 | 2026-06-02 | issue #11（P2）対応: `compose.yaml` の `NODE_OPTIONS=--max-old-space-size` を `4096`（= `mem_limit` と同値）から `3584` に下げ、Node ヒープと cgroup 上限の間に 512 MiB のマージンを確保。ヒープ外領域（V8 C++ ヒープ・JS スタック・ネイティブモジュール・子プロセス）が積み上がった際に V8 の graceful な heap-exceeded ハンドリングより先に cgroup OOM killer が SIGKILL する経路を緩和。`mem_limit` は SEC-4 の DoS 上限として 4G を維持しヒープ側のみ調整。NFR-2 に数値根拠と不変条件「ヒープ上限 ≦ `mem_limit` − 512 MiB」を明記。 | Claude Code |
 | 2026-06-01 | issue #10（P2）対応: `bin/aidock` の `cmd_firewall_refresh()` を複数コンテナ耐性化。`compose ps -q claude` の戻り値を行ごとに配列へ取り込み（空行スキップ）、0 件→exit 1、1 件以上→**各コンテナで順に** `init-firewall.sh` を実行（DNS 再解決はどの claude コンテナにも等しく必要なため全件をループ）。従来は複数 CID を単一スカラに格納していたため、複数同時起動時に改行連結された CID が無効なコンテナ ID となり `docker exec` が失敗していた。**再レビュー反映**: ループを best-effort 化し（あるコンテナの失敗で残りをスキップせず、1 件でも失敗なら非ゼロ exit）、`usage()` の help 文言を全コンテナ対象に修正。FR-1.5 / README を全コンテナ対象の挙動に更新。 | Claude Code |
 | 2026-05-30 | issue #12（P2）対応: `init-firewall.sh` の DNS(53) egress を全宛先許可から `/etc/resolv.conf` の `nameserver` IPv4（ipset `allowed-dns`、`-m set --match-set allowed-dns dst`）限定に変更。`nameserver` 不検出時は warn ログを残し DNS を遮断（fail-closed）。SEC-15 を新設、FR-4.2 を更新。**codex レビュー反映**: 本ルールは任意の攻撃者制御リゾルバへの直接送信を断つ defense-in-depth であり、正規リゾルバの再帰解決を経由する query 名 exfiltration は防げない（query 名フィルタは iptables/ipset 不可、構築後の 53 全 DROP は実行時再解決を壊す）ため残余リスクを受容、という効果と限界を SEC-15 / FR-4.2 / README に正確化（当初の「DNSトンネル exfil を遮断」表現は過大だったため訂正）。 | Claude Code |
