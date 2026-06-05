@@ -153,6 +153,20 @@ RC=0
 OUT="$(cd "${FAKE_HOME}/.aws/spoof" && env -u HOME bash "$AIDOCK" run </dev/null 2>&1)" || RC=$?
 assert_exit 2 "reject ~/.aws/spoof with HOME unset"
 
+# --- 4b. symlink resolution: realpath must defeat symlinked cwds -------------
+# A cwd that is a symlink into a SEC-8 directory must still be rejected. This is
+# the property guard_workspace()'s `realpath "$PWD"` canonicalization exists to
+# enforce: a regression that compared the logical (un-resolved) path would let a
+# symlink like ~/proj -> ~/.ssh slip through.
+mkdir -p "${FAKE_HOME}/.ssh"
+ln -s "${FAKE_HOME}/.ssh" "${FAKE_HOME}/ssh-symlink"
+aidock_run "${FAKE_HOME}/ssh-symlink"
+assert_exit 2 "reject symlinked cwd resolving into ~/.ssh"
+
+ln -s "${FAKE_HOME}/.aws" "${FAKE_HOME}/aws-symlink"
+aidock_run "${FAKE_HOME}/aws-symlink/sub"
+assert_exit 2 "reject symlinked cwd resolving under ~/.aws/"
+
 # --- 5. docker socket branch (reachable only via the realpath sentinel) -----
 mkdir -p "${FAKE_HOME}/sockcwd"
 RC=0
