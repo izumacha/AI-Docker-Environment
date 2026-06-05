@@ -67,6 +67,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # The action overwrites GH_TOKEN with the Claude App token, whose
+          # default scopes do not include Actions read. `gh run view` needs it
+          # (required for private repos), so request it explicitly.
+          additional_permissions: |
+            actions: read
           claude_args: |
             --max-turns 6
             --allowedTools "Bash(gh run view:*),Bash(gh pr comment:*)"
