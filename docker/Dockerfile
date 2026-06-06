@@ -1,4 +1,9 @@
-FROM node:22-slim
+# Pin the base image by digest for supply-chain reproducibility (issue #35):
+# `node:22-slim` is a moving tag, so a later rebuild could silently pull a
+# different image. The tag is kept alongside the digest only for readability;
+# the digest is authoritative. Refresh both together when bumping Node
+# (NFR-5.2) by re-resolving `docker buildx imagetools inspect node:22-slim`.
+FROM node:22-slim@sha256:7af03b14a13c8cdd38e45058fd957bf00a72bbe17feac43b1c15a689c029c732
 
 ARG HOST_UID=1000
 ARG HOST_GID=1000
