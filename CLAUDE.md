@@ -71,6 +71,7 @@
   - `iptables -P OUTPUT DROP`（デフォルト拒否）を維持
   - 終端の検証プローブ（`example.com` ブロック確認、`api.anthropic.com` 到達確認）を維持
   - 許可ホスト追加は `CORE_HOSTS` / `LOGIN_EXTRA_HOSTS` に追記。新規ホストを追加する際は最小限に留め、PR の説明で理由を述べる
+  - DNS は `nameserver` 限定（ipset `allowed-dns` / SEC-15）。query 名 exfiltration の施行はコンテナ内ユーザー空間 DNS プロキシで query 名 allowlist 化する方針（`docs/requirements.md` FR-11 / SEC-15。要件先行・実装は後続 PR）。53 番は「プロキシ→`127.0.0.11` のみ許可、`agent` 直接 53 は DROP」に絞る
 - `bin/aidock`:
   - `guard_workspace()` の `/` および `$HOME` 拒否を維持
 

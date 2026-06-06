@@ -5,7 +5,7 @@
 変更が必要な場合は **先に本書を改訂し、PR 内で根拠を述べた上で実装に着手する**。
 
 - **対象バージョン**: v1 系（Linux 専用、Claude Code 公式 CLI を Docker でサンドボックス化）
-- **最終更新**: 2026-06-05
+- **最終更新**: 2026-06-06
 - **位置づけ**: 要件 ＞ 設計 ＞ 実装。本書未記載の事項は CLAUDE.md / README.md の記述に従う。
 
 ---
@@ -42,6 +42,8 @@
 - マルチユーザー / マルチプロジェクト同時実行のためのオーケストレーション。
 - Claude Code 以外の AI CLI（Gemini CLI 等）のサポート。
 - pre-commit フック、汎用テストランナー（unit テスト等）。ただし CI/CD は本書改訂によりスコープ内へ移行し、GitHub Actions による**型チェック**と **e2e** を提供する（FR-8 参照）。codex 自動レビューは引き続き bot ベースで、CI からは投稿しない（FR-7 参照）。
+- **カーネルレベルの全 syscall 監査**（seccomp-bpf によるトレース、auditd / eBPF による syscall ログ等）。エージェントの挙動を syscall 粒度で完全記録する「フライトレコーダー」のうち、カーネル介入を要する層は v1 スコープ外とする（DNS query 名の allowlist 施行と拒否ログ＝FR-11 までを v1 の説明責任の到達点とする）。
+- **Sigstore 等の公開透明性ログ（transparency log）への必須記録**。供給網・監査ログの公開検証可能性は **opt-in 拡張**として将来検討の余地を残すが、v1 では必須化しない（ネットワーク依存とプライバシー上の含意があるため既定では無効）。
 
 ---
 
@@ -93,7 +95,7 @@
 - コンテナ起動時、`AIDOCK_SKIP_FIREWALL=1` でない限り `init-firewall.sh` を実行する。entrypoint は **root** で起動して `init-firewall.sh` を直接実行し（sudo は使わない）、初期化後に `gosu agent` でワークロードを exec する（SEC-6 / SEC-7 参照）。
 - FR-4.0: `AIDOCK_SKIP_FIREWALL=1` が設定されているときに限り初期化をスキップする。**デバッグ専用** であり、CI および共有ホストでは設定しない（SEC-13）。
 - FR-4.1: 既定で `INPUT`/`FORWARD`/`OUTPUT` を `DROP`。
-- FR-4.2: loopback、`ESTABLISHED,RELATED`、DNS(53/udp,tcp) のみ恒久許可。DNS(53) は **全宛先ではなく `/etc/resolv.conf` の `nameserver` に列挙された IPv4 アドレス**（ipset `allowed-dns`）に限定する（SEC-15）。これは任意の攻撃者制御リゾルバへの直接送信を断つ defense-in-depth であり、**正規リゾルバの再帰解決を経由する query 名 exfiltration までは防がない**（限界は SEC-15 参照）。`nameserver` を 1 件も検出できない場合は warn ログを残し、DNS egress は遮断される（終端プローブ FR-4.6 が名前解決失敗で fail するため fail-closed に倒れる）。**実装済み**。
+- FR-4.2: loopback、`ESTABLISHED,RELATED`、DNS(53/udp,tcp) のみ恒久許可。DNS(53) は **全宛先ではなく `/etc/resolv.conf` の `nameserver` に列挙された IPv4 アドレス**（ipset `allowed-dns`）に限定する（SEC-15）。これは任意の攻撃者制御リゾルバへの直接送信を断つ defense-in-depth であり、**iptables/ipset 層だけでは正規リゾルバの再帰解決を経由する query 名 exfiltration を防げない**。この query 名フィルタの不足は **FR-11（コンテナ内ユーザー空間 DNS プロキシ）で施行**し、53 番の egress 経路自体も「プロキシ→組込 DNS のみ許可」に絞る（限界と残余リスクは SEC-15 / FR-11 参照）。`nameserver` を 1 件も検出できない場合は warn ログを残し、DNS egress は遮断される（終端プローブ FR-4.6 が名前解決失敗で fail するため fail-closed に倒れる）。**実装済み**（query 名施行を担う FR-11 は要件先行で実装は後続 PR）。
 - FR-4.3: `CORE_HOSTS` 全件を DNS 解決し ipset `allowed-hosts` に投入。DNS 解決に失敗したホストは **warn ログを残してスキップ**し、初期化は継続する。
 - FR-4.4: `AIDOCK_PROFILE=login` の場合のみ `LOGIN_EXTRA_HOSTS` も投入。
 - FR-4.5: GitHub `https://api.github.com/meta` から CIDR を取得し ipset へ追加。取得した CIDR は SEC-12.1（正規表現）/ SEC-12.2（octet 0-255・prefix 0-32 の範囲）の検証を **両方** 通過した場合にのみ追加する（いずれも実装済み）。範囲外の CIDR は warn ログを残してスキップする（FR-4.7 best-effort）。meta 取得は **一過性の失敗に対し shell の有界リトライループ**で再試行する（issue #13）。これは初回 DNS 解決失敗・瞬断・レート制限 429・5xx 等の transient error を吸収し、CIDR フォールバック欠落による（GitHub IP ローテーション時の）接続失敗余地を縮小する目的。**curl のリトライフラグではなく shell ループ**を用いるのは、再試行したい集合が「transport エラー（DNS exit 6・connect・timeout 等）＋ HTTP 408/429/5xx」であり、curl 単体では表現できないため: 素の `--retry` は DNS 解決失敗を再試行せず、`--retry-all-errors`（`-f` 併用）は逆に 403/404 等の**ハード HTTP エラーまで再試行**してしまい「403 は即 warn-continue」という本契約に反し毎起動で無駄な遅延を生む。ループの不変条件: **最大 3 試行かつ累積 ~20s の実時間デッドライン**（transient を返し続ける server がコンテナ起動を無限に引き延ばせない）。レスポンス本文は **`-o <tmpfile>`（`/tmp` tmpfs）で受け、`2xx` 成功時のみ読み出す**ため、失敗試行の部分バイトが JSON を壊して jq の CIDR 抽出を 0 件にすることがない。ハード HTTP エラー（403/404 等）は再試行せず即座に warn ログで継続しホスト名解決 IP の範囲に縮退する。なお **transport 失敗での再試行前には `resolve_and_add api.github.com` を再実行**して新たに解決した IP を allowlist に admit する: 冒頭 CORE_HOSTS の解決が失敗していると ipset に API の IP が無く、直前の ACCEPT ルールが後続の解決 IP も DROP するため、再 admit 無しでは初回 DNS 失敗からリトライで回復できない（IP ローテーションにも追随）。（codex P2 レビュー ×5 反映）。**実装済み**。
@@ -141,6 +143,17 @@
 - FR-9.5: `workflow_run` は**デフォルトブランチ（`main`）上のワークフローのみ発火**する。本ワークフローは `main` マージ後の PR から有効になる。
 - FR-9.6: 特権ワークフロー（`pull-requests: write` ＋ secret）の堅牢化として、(a) PR head を **checkout しない**（非信頼コードをワークスペースに展開しない）、(b) action は **可変タグではなくフル commit SHA へピン**する（供給網リスク回避）。`claude-code-action` は `git ls-remote` で v1 annotated タグから解決した v1.0.135 = `70a6e525…`、`actions/github-script` は v7.1.0 = `f28e40c7…` にピン済み（#17 で確定）、(c) Claude のツールを **`gh run view` / `gh pr comment` に限定**する（`--allowedTools`）。なお action は `GH_TOKEN` を Claude App トークンへ上書きし、その既定スコープに Actions read が含まれないため、`gh run view`（private repo で必須）向けに **`additional_permissions: actions: read`** を明示付与する、(d) `github_token` 入力を省略し **Claude GitHub App 認証**を用いるため、**`permissions: id-token: write`** を付与済み（OIDC トークン交換に必須。未付与だと検証 step が認証失敗）。secret `CLAUDE_CODE_OAUTH_TOKEN` 登録後に有効化（#17）。
 
+### FR-11: コンテナ内 DNS プロキシ（query 名 allowlist 施行）
+SEC-15 が iptables/ipset 層で残していた **query 名 exfiltration** の穴を施行へ転換するため、コンテナ内にユーザー空間の forwarding DNS プロキシを置き、**問い合わせドメイン名（query 名）を policy 由来の allowlist で照合**する。許可名のみ上流（Docker 組込 DNS `127.0.0.11`）へ forward し、未許可名は記録の上 NXDOMAIN を返す。これは「許可した IP へしか出られない」（FR-4 / SEC-15）に加え「**許可したドメイン名しか引けない**」を成立させる第二の関門であり、`<secret>.attacker.example` のような正規リゾルバ経由の query 名チャネルを権威 NS 到達前に遮断する。**要件先行**（実装は後続 PR）。
+
+- FR-11.1: **配置**。コンテナ内 `127.0.0.1:53` にユーザー空間の forwarding プロキシを bind し、`/etc/resolv.conf` の `nameserver` を `127.0.0.1` に向ける。`agent` から発行される全 DNS 問い合わせはまずプロキシを経由する。
+- FR-11.2: **53 番 egress の絞り込み**（iptables）。53/udp,tcp の OUTPUT は **「当該プロキシのプロセス／ループバックから Docker 組込 DNS（`127.0.0.11`）への forward のみ許可」** とし、`agent` プロセスからの **直接 53 番 egress は DROP** する。これにより allowlist を回避してプロキシを迂回する直接問い合わせを断つ。ipset `allowed-dns`（SEC-15）の宛先限定はこの上流 forward に対して引き続き適用する。
+- FR-11.3: **照合ロジック**。プロキシは受信した query 名を **policy 由来の許可ホスト名集合**（`CORE_HOSTS` / `AIDOCK_PROFILE=login` 時の `LOGIN_EXTRA_HOSTS` と同一の単一ソースに由来）と照合する。完全一致に加え、**許可ホストの親ドメイン配下サブドメインの扱いは最小限**に留める（ワイルドカード許可は CDN 等で必要な範囲に限定し、無制限の `*.example.com` 許可を既定にしない）。許可名は上流へ forward し、**拒否名は `[dns-proxy]` プレフィックスで stderr に記録した上で NXDOMAIN（`NXDOMAIN`/`REFUSED`）を返す**（FR-5 のログ方針に従う）。
+- FR-11.4: **fail-closed**。プロキシの起動・bind に失敗した場合、または上流 forward 経路が確立できない場合は **DNS を全断**し、entrypoint を **非ゼロ exit** で停止する（DNS フィルタが効かない状態でワークロードを起動しない）。`AIDOCK_SKIP_FIREWALL=1`（SEC-13、デバッグ専用）配下の挙動のみ例外とし、CI / 共有ホストでは設定しない。
+- FR-11.5: **健全性プローブ**。`init-firewall.sh` 終端の検証プローブ（FR-4.6）に DNS プロキシのプローブを追加する: (a) **許可ドメイン**（例 `api.anthropic.com`）が解決できること、(b) **未許可サブドメイン**（例 `secret.attacker.example`）が **NXDOMAIN になる**こと。いずれか不一致なら `exit 1`（fail-closed）。AC-10 と同表現で揃える。
+- FR-11.6: **二重 allowlist の同期**。本プロキシの「**名前** allowlist」と ipset `allowed-hosts` の「**IP** allowlist」は、いずれも同一の policy（`CORE_HOSTS` / `LOGIN_EXTRA_HOSTS`）を単一ソースとして導出する。両者の不整合（名前は許可だが IP 未投入、またはその逆）は接続失敗や穴につながるため、**将来 Phase で policy を機械可読な単一ファイルへ外出しし、ipset 構築とプロキシ設定の双方が同一ソースを読む構成へ収斂させる**（前方参照: §1.3 のスコープ拡張候補）。本 FR では「同一 policy から導出する」契約の明文化に留め、単一ファイル化は後続とする。
+- FR-11.7: **限界と残余リスク**（誇大表現を避けるため正直に明記）。本プロキシは query 名を allowlist 化するが、**許可ドメイン配下サブドメインを使った低帯域チャネル**（例: 許可した CDN ドメイン配下に攻撃者が制御するサブドメインを用意し、query 名にエンコードした少量データを漏出させる経路）は塞げない。また **許可ドメインへの HTTPS 接続が確立した後の通信本文・TLS SNI を経由する exfiltration** は DNS 層の問題ではなく本 FR の対象外である（egress 先 IP が allowlist 内であっても、許可ドメイン経由のデータ持ち出しは別レイヤの課題）。残余リスクは「許可ドメイン配下サブドメインへの低帯域チャネル」と「許可ドメイン経由の HTTPS 本文 / SNI」に **限定**される、という到達点を SEC-15 と共有する。
+
 ---
 
 ## 4. 非機能要件（NFR）
@@ -153,7 +166,7 @@
 | --- | --- | --- |
 | SEC-1 | `cap_drop: ALL` を維持。追加 cap は `NET_ADMIN`/`NET_RAW`（ファイアウォール用）と `SETUID`/`SETGID`（entrypoint が root→agent へ降格する `gosu` 用）のみ。降格後の `agent` プロセスは capability を持たない。 | `compose.yaml` |
 | SEC-2 | `security_opt: no-new-privileges:true` を維持。 | `compose.yaml` |
-| SEC-3 | `read_only: true` を維持し、書き込み可能領域は `/workspace:rw` の明示 bind mount、必要最小限の `tmpfs`、および `claude-home` ボリュームに限定する。`/workspace:rw` は **`.git` を含むツリー全体を書き換え可能**であり、コンテナ内プロセスがコミット・履歴書換を実行しうる前提で運用する（read-only 化はサポート外）。 | `compose.yaml` |
+| SEC-3 | `read_only: true` を維持し、書き込み可能領域は `/workspace:rw` の明示 bind mount、必要最小限の `tmpfs`、および `claude-home` ボリュームに限定する。`/workspace:rw` は **`.git` を含むツリー全体を書き換え可能**であり、コンテナ内プロセスがコミット・履歴書換を実行しうる前提で運用する（read-only 化はサポート外）。**将来予告**: フライトレコーダー（エージェントの説明責任）構想では、拒否 DNS query・実行コマンド等の監査証跡を保存する **append-only な監査用ボリューム**を `read_only: true` の例外として 1 つ認める余地を残す（追記専用・改竄困難な構成に限る）。本 SEC では予告に留め、具体的なマウント設計と不変条件化は後続 PR で本書を改訂してから導入する。 | `compose.yaml` |
 | SEC-4 | `mem_limit`・`pids_limit`・`cpus` の上限を撤廃しない（既定: 4G / 1024 / 2.0）。 | `compose.yaml` |
 | SEC-5 | `iptables -P OUTPUT DROP`（既定拒否）と終端の検証プローブを維持。 | `init-firewall.sh` |
 | SEC-6 | コンテナイメージに `sudo` を含めない。firewall 初期化は entrypoint が **root で直接実行**し、setuid による昇格を一切使わない（`no-new-privileges` 下では setuid `sudo` が root 化できないため）。 | `Dockerfile` / `entrypoint.sh` |
@@ -166,7 +179,7 @@
 | SEC-12.2 | 各 octet が `0`–`255`、prefix が `0`–`32` の範囲であることを併せて検証する。**実装済み**（`init-firewall.sh` の `cidr_in_range()`。SEC-12.1 の正規表現通過後にフィールド分解し base-10（`10#`）で範囲比較。範囲外は warn ログを残してスキップし初期化は継続＝FR-4.7 best-effort）。形式的に正規表現を通る `999.999.999.999/33` 等は ipset に追加されない。 | `init-firewall.sh` |
 | SEC-13 | `AIDOCK_SKIP_FIREWALL=1` の常用を禁止する。**デバッグ用バックドア**であり、CI および共有ホストでは設定しない。一時的に使用した場合はその都度 `unset` する。 | `entrypoint.sh` |
 | SEC-14 | `bin/aidock run [args...]` の追加引数は `compose run --rm claude` に **位置引数として無変換で渡される**。コマンド置換（`$()`・バッククォート）等を含めない責任は呼び出し側が負う。ラッパー側で eval/sh -c 等の二次評価を導入してはならない。 | `bin/aidock` |
-| SEC-15 | DNS(53/udp,tcp) の egress を **全宛先許可にしない**。`/etc/resolv.conf` の `nameserver` 行から抽出した IPv4 アドレスを ipset `allowed-dns` に投入し、`-m set --match-set allowed-dns dst` で宛先を限定する。**効果と限界**: コンテナ内プロセスが**任意の攻撃者制御リゾルバへ直接** 53 番で送信する経路（不正リゾルバを使った素朴な DNS トンネル・任意 UDP/53 covert channel）を遮断する defense-in-depth。一方、`<secret>.attacker.example` のように**正規リゾルバ（`127.0.0.11`／ホスト再帰リゾルバ）の再帰解決を経由して権威 NS（攻撃者）へ到達する query 名 exfiltration は本ルールでは防げない**（再帰チェーンの先まで宛先制御できないため）。query 名ベースのフィルタは iptables/ipset では不可、allowlist 構築後の 53 全 DROP は実行時の再解決（CDN の IP ローテーション等）を壊すため、この残余リスクは**受容**する。**実装済み**（`init-firewall.sh`。`nameserver` 不検出時は warn ログを残し DNS を遮断＝fail-closed）。 | `init-firewall.sh` |
+| SEC-15 | DNS(53/udp,tcp) の egress を **全宛先許可にしない**。`/etc/resolv.conf` の `nameserver` 行から抽出した IPv4 アドレスを ipset `allowed-dns` に投入し、`-m set --match-set allowed-dns dst` で宛先を限定する。**効果**: コンテナ内プロセスが**任意の攻撃者制御リゾルバへ直接** 53 番で送信する経路（不正リゾルバを使った素朴な DNS トンネル・任意 UDP/53 covert channel）を遮断する defense-in-depth。**query 名 exfiltration の施行**: iptables/ipset 層だけでは `<secret>.attacker.example` のように**正規リゾルバ（`127.0.0.11`／ホスト再帰リゾルバ）の再帰解決を経由して権威 NS（攻撃者）へ到達する query 名 exfiltration を防げない**（再帰チェーンの先まで宛先制御できないため）。この穴は従来「受容」していたが、**コンテナ内ユーザー空間 DNS プロキシ（FR-11）で query 名 allowlist を施行し、未許可ドメインは権威ネームサーバ到達前に NXDOMAIN で遮断する**方針へ改訂する。53 番 egress は「プロキシ → 組込 DNS（`127.0.0.11`）の forward のみ許可、`agent` の直接 53 は DROP」に絞り（FR-11.2）、allowlist 構築後に 53 を全 DROP すると実行時再解決（CDN の IP ローテーション等）が壊れる問題は、プロキシが許可名を上流へ forward し続けることで回避する。**残余リスク（正直に明記）**: 施行後も**許可ドメイン配下サブドメインへの低帯域チャネル**（許可 CDN ドメイン配下に攻撃者制御サブドメインを置き query 名に少量データをエンコードする経路）と、**許可ドメイン経由の HTTPS 本文 / TLS SNI を使った exfiltration**（DNS 層外）は塞げない。残余リスクはこの 2 経路に**限定**される（FR-11.7 と共有）。**実装状況**: `nameserver` 限定（ipset `allowed-dns`）は**実装済み**（`init-firewall.sh`。`nameserver` 不検出時は warn ログを残し DNS を遮断＝fail-closed）。**query 名 allowlist の施行（FR-11）は要件先行で、実装は後続 PR**。 | `init-firewall.sh` / `entrypoint.sh` |
 
 ### NFR-2: 性能・リソース
 - 既定リソース上限（mem 4G / cpus 2.0 / pids 1024）で Claude Code が通常運用可能であること。
@@ -246,13 +259,22 @@
 ### AC-8: CI
 - `.github/workflows/ci.yml` の **type-check** と **e2e** の両ジョブがグリーンであること（PR マージの必須条件、FR-8）。
 - type-check は FR-8.1 の静的解析（`shellcheck` / `bash -n` / `hadolint` / `docker compose config`）と、`guard_workspace()` の自動テスト（`test/guard_test.sh`）・SEC-8(a) compose fail-closed の負例検証をすべて通過する。これにより AC-2 の大半（SEC-8 全機密パス・`HOME` 偽装・docker socket・passwd 解決失敗・compose fail-closed）は **Docker 不要**で type-check ジョブが検証する。
-- e2e は次を GitHub-hosted runner 上で実機検証する: AC-1（ビルド + 起動プローブ）、AC-2（実機での `$HOME` / `/` 起動を exit 2 で拒否）、AC-3（`whoami=agent` / `sudo` 不在 / capability 制限）、AC-4（run プロファイルの example.com 遮断・api.anthropic.com 到達、login プロファイルの claude.ai 到達）、AC-7（資格情報ボリューム所有権）。
+- e2e は次を GitHub-hosted runner 上で実機検証する: AC-1（ビルド + 起動プローブ）、AC-2（実機での `$HOME` / `/` 起動を exit 2 で拒否）、AC-3（`whoami=agent` / `sudo` 不在 / capability 制限）、AC-4（run プロファイルの example.com 遮断・api.anthropic.com 到達、login プロファイルの claude.ai 到達）、AC-7（資格情報ボリューム所有権）。**FR-11 実装後は AC-10（許可ドメイン解決・未許可サブドメイン NXDOMAIN）を本 e2e ジョブに追加する**（FR-11 は現時点では要件先行のため未追加）。
 - **AC-5（永続化）は対話 OAuth ログインを要するため CI 対象外**とし、ローカル手動検証に委ねる。
 
 ### AC-9: CI 後検証エージェント
 - `main` 上で `CI` が PR に対して成功すると、`.github/workflows/post-ci-verify.yml`（FR-9）が起動し、Claude が type-check / e2e の結果を検証・要約して PR に**コメント1件**を投稿する。
 - 当該ワークフローはコメントのみで、コミット・push は行わない。`CLAUDE_CODE_OAUTH_TOKEN` secret が前提。
 - `workflow_run` の仕様上、`main` にマージされるまでは発火しない（PR ブランチ単独では検証不可）。
+
+### AC-10: DNS query 名 allowlist（FR-11）
+> FR-11 は要件先行のため、本 AC は実装 PR で満たされる目標基準である（現時点では未充足を許容）。
+
+- コンテナ起動後、**許可ドメイン**は解決できること。例: `getent hosts api.anthropic.com`（または同等の解決）が成功する。
+- **未許可サブドメイン**は **NXDOMAIN** になること。例: コンテナ内で `secret.attacker.example` を解決すると NXDOMAIN（名前解決失敗）となり、上流（権威 NS）へ到達しない。
+- 上記 2 点を e2e ジョブ（FR-8.2 / AC-8）で実機検証する。許可ドメインの解決成功と未許可サブドメインの NXDOMAIN を 1 ジョブ内で確認する。
+- `agent` から `127.0.0.1`（プロキシ）以外の `nameserver` への直接 53 番送信は DROP され、プロキシ迂回での解決ができないこと（FR-11.2）。
+- プロキシ起動失敗時は DNS 全断・非ゼロ exit で fail-closed になること（FR-11.4）。終端の健全性プローブ（FR-11.5）が不一致なら `init-firewall.sh` 相当の初期化が `exit 1` する。
 
 ---
 
@@ -277,6 +299,7 @@
 | --- | --- | --- |
 | 2026-06-05 | issue #9（P2）対応: `bin/aidock` の `cmd_logout()` から固定名 `docker volume rm aidock_claude-home` を撤去し、テアダウンを `compose down -v --remove-orphans` のみに集約。当該リテラルは実プロジェクト名（既定で `ai-docker-environment_claude-home`）と一致せず無効である上、別文脈で作られた同名グローバルボリュームを誤削除する破壊的副作用を持つ既知 defect だったため除去。Compose はプロジェクトスコープの実ボリューム名を自動解決して `claude-home` を削除する。FR-1.6 / AC-5 を更新（PR #22 で延期されていた follow-up を完了）。 | Claude Code |
 | 2026-06-05 | issue #13（P2）対応: `init-firewall.sh` の GitHub meta API フェッチ curl に有界リトライ `--retry 3 --retry-delay 2 --retry-connrefused` を追加。初回 DNS 解決失敗・瞬断・レート制限 429 等の一過性失敗を再試行で吸収し、CIDR フォールバック欠落（→ GitHub IP ローテーション時の接続失敗余地）を縮小。FR-4.5/4.7 の best-effort 契約は維持（リトライ尽きた失敗・403 等のハードエラーは従来どおり warn ログで継続しホスト名解決 IP に縮退）。WARN ログに「retries 後」「firewall-refresh で再試行可」を明記。issue 起票時に併記されていた「`AIDOCK_PROFILE=login` 中の OAuth callback 破綻」懸念は検証の結果過大（OAuth ホストは meta と独立に `resolve_and_add()` で解決されるため GitHub meta 失敗の影響を受けない）と確認、残余リスクは GitHub IP ローテーションの狭い範囲に限定。**codex P2 レビュー反映**: curl は 403/429 の `Retry-After` ヘッダに従い待機し `--max-time` はリトライ毎にリセットされるため、リトライの累積実時間が無上限だとコンテナ起動が server 指定の待機で引き延ばされうる。`--retry-max-time 20` を追加し累積リトライ時間を上限化（起動時間を予測可能な範囲に維持）。**2件目の codex P2 反映**: 素の `--retry`／`--retry-connrefused` は名前解決失敗（curl exit 6）を再試行しないため、本変更が狙う「初回 DNS 解決失敗」が実際には未カバーだった。`--retry-connrefused` を `--retry-all-errors` に置換し全エラー（DNS 含む）を再試行対象に。**3件目の codex P2 反映**: `--retry-all-errors` は失敗試行の部分ボディを stdout に出力しうるため、コマンド置換だと部分バイト連結で JSON が壊れ jq が CIDR を 0 件にする恐れ。レスポンスを `-o <tmpfile>`（`/tmp` tmpfs、試行毎に truncate）で受け curl 成功後にのみ読み出すよう変更。**4件目の codex P2 反映**: `--retry-all-errors`（`-f` 併用）は 403/404 等のハード HTTP エラーまで再試行し「403 は即 warn-continue」契約に反する。curl のリトライフラグでは「transport エラー＋408/429/5xx のみ再試行、ハード 4xx は即縮退」を表現できないため、curl フラグ群を撤去し **shell の有界リトライループ**（最大 3 試行・累積 ~20s デッドライン・transient のみ再試行・`-o` 一時ファイルを 2xx 時のみ読み出し）に置換。**5件目の codex P2 反映**: 初回 CORE_HOSTS の解決失敗時は ipset に api.github.com の IP が無く ACCEPT ルールが後続解決 IP も DROP するため、curl 再試行だけでは初回 DNS 失敗から回復不能だった（=2件目の修正が実質無効）。transport 失敗での再試行前に `resolve_and_add api.github.com` を呼び新解決 IP を admit するよう修正（IP ローテーションにも追随）。FR-4.5 を更新。 | Claude Code |
+| 2026-06-06 | フライトレコーダー（エージェントの説明責任）構想の第一手として SEC-15 を「受容」から「施行」へ改訂。DNS query 名 exfiltration を **コンテナ内ユーザー空間 DNS プロキシで query 名 allowlist 施行**し、未許可ドメインを権威 NS 到達前に NXDOMAIN で遮断する方針へ転換。**FR-11**（DNS プロキシ: `127.0.0.1:53` 配置・53 番 egress を「プロキシ→`127.0.0.11` のみ許可／`agent` 直接 53 は DROP」・policy 由来の名前 allowlist 照合・拒否名は記録の上 NXDOMAIN・起動失敗時 fail-closed・健全性プローブ・二重 allowlist の policy 単一ソース化への前方参照・残余リスクの明記）と **AC-10**（許可ドメイン解決／未許可サブドメイン NXDOMAIN を e2e 検証）を新設。FR-4.2 / SEC-15 を施行表現へ更新、AC-8 に FR-11 実装後の AC-10 追加を予告。**SEC-3** に append-only 監査ボリュームを read_only 例外として認める余地を将来予告として追記。**§1.3** に「カーネルレベル全 syscall 監査は v1 スコープ外」「Sigstore 等の公開透明性ログ必須化は opt-in 拡張」を明記。残余リスクは「許可ドメイン配下サブドメインへの低帯域チャネル」「許可ドメイン経由の HTTPS 本文 / TLS SNI」に限定（誇大表現を避け正直に明記）。**本 PR は要件文書のみの変更**で、`bin/aidock` / `docker/*` の実装は未変更（FR-11 は要件先行・実装は後続 PR）。CLAUDE.md も最小限同期。 | Claude Code |
 | 2026-06-02 | issue #11（P2）対応: `compose.yaml` の `NODE_OPTIONS=--max-old-space-size` を `4096`（= `mem_limit` と同値）から `3584` に下げ、Node ヒープと cgroup 上限の間に 512 MiB のマージンを確保。ヒープ外領域（V8 C++ ヒープ・JS スタック・ネイティブモジュール・子プロセス）が積み上がった際に V8 の graceful な heap-exceeded ハンドリングより先に cgroup OOM killer が SIGKILL する経路を緩和。`mem_limit` は SEC-4 の DoS 上限として 4G を維持しヒープ側のみ調整。NFR-2 に数値根拠と不変条件「ヒープ上限 ≦ `mem_limit` − 512 MiB」を明記。 | Claude Code |
 | 2026-06-01 | issue #10（P2）対応: `bin/aidock` の `cmd_firewall_refresh()` を複数コンテナ耐性化。`compose ps -q claude` の戻り値を行ごとに配列へ取り込み（空行スキップ）、0 件→exit 1、1 件以上→**各コンテナで順に** `init-firewall.sh` を実行（DNS 再解決はどの claude コンテナにも等しく必要なため全件をループ）。従来は複数 CID を単一スカラに格納していたため、複数同時起動時に改行連結された CID が無効なコンテナ ID となり `docker exec` が失敗していた。**再レビュー反映**: ループを best-effort 化し（あるコンテナの失敗で残りをスキップせず、1 件でも失敗なら非ゼロ exit）、`usage()` の help 文言を全コンテナ対象に修正。FR-1.5 / README を全コンテナ対象の挙動に更新。 | Claude Code |
 | 2026-05-30 | issue #12（P2）対応: `init-firewall.sh` の DNS(53) egress を全宛先許可から `/etc/resolv.conf` の `nameserver` IPv4（ipset `allowed-dns`、`-m set --match-set allowed-dns dst`）限定に変更。`nameserver` 不検出時は warn ログを残し DNS を遮断（fail-closed）。SEC-15 を新設、FR-4.2 を更新。**codex レビュー反映**: 本ルールは任意の攻撃者制御リゾルバへの直接送信を断つ defense-in-depth であり、正規リゾルバの再帰解決を経由する query 名 exfiltration は防げない（query 名フィルタは iptables/ipset 不可、構築後の 53 全 DROP は実行時再解決を壊す）ため残余リスクを受容、という効果と限界を SEC-15 / FR-4.2 / README に正確化（当初の「DNSトンネル exfil を遮断」表現は過大だったため訂正）。 | Claude Code |
