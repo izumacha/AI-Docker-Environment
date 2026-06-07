@@ -66,7 +66,7 @@ cd ~/some-project
 | --- | --- |
 | ホスト FS の破壊 | bind mount は `$PWD` のみ。`read_only` rootfs + `tmpfs`。`HOST_WORKSPACE` はデフォルト値なし → `bin/aidock` 非経由の直接 `docker compose run` は fail-closed で起動失敗 |
 | ホスト資格情報の流出 | `~/.ssh` / `~/.aws` / `gcloud` / `~/.gitconfig` 等を追加 bind mount しない。`$HOME` と `/` は起動拒否。ただし機密ディレクトリ配下からの起動は禁止（機械的拒否は follow-up） |
-| 任意外部送信 | iptables 既定 DROP + ipset allowlist (api.anthropic.com, npm, GitHub等のみ)。DNS(53) も `/etc/resolv.conf` の nameserver に限定（任意リゾルバへの直接送信を遮断）。**現状実装**では再帰経由の query 名 exfil は防げない（残余リスク）。**要件（FR-11）**ではコンテナ内 DNS プロキシで query 名 allowlist を施行する方針へ移行する（要件先行・実装は後続）。詳細は下記「DNS の絞り込み」参照 |
+| 任意外部送信 | iptables 既定 DROP + ipset allowlist (api.anthropic.com, npm, GitHub等のみ)。**IPv6 も `ip6tables` で同等に default-deny**（v6 を素通しにしない、issue #32）。DNS(53) も `/etc/resolv.conf` の nameserver に限定（任意リゾルバへの直接送信を遮断）。**現状実装**では再帰経由の query 名 exfil は防げない（残余リスク）。**要件（FR-11）**ではコンテナ内 DNS プロキシで query 名 allowlist を施行する方針へ移行する（要件先行・実装は後続）。詳細は下記「DNS の絞り込み」参照 |
 | 暴走プロセス | `mem_limit=4g`, `pids_limit=1024`, `cpus=2.0`, `tini` で reap |
 | 権限昇格 | `cap_drop: ALL` → `NET_ADMIN`/`NET_RAW`（+ 降格用 `SETUID`/`SETGID`）のみ復帰、`no-new-privileges`、entrypoint は root 起動 → `gosu` で agent 降格 (sudo 不使用) |
 
@@ -76,10 +76,19 @@ cd ~/some-project
 ホストを増減できる。GitHub の CIDR ブロックは `https://api.github.com/meta`
 から動的取得して ipset に追加 (jq + 正規表現の形式検証に加え、各 octet 0-255 / prefix 0-32 の範囲検証を実施。範囲外はスキップ)。
 
+### IPv6 の default-deny（issue #32 / SEC-16）
+
+**IPv6**: 以前は `ip6tables` 未設定で IPv6 egress が素通しだった（IPv4 のみ
+default-deny）。現在は IPv6 も `ip6tables -P OUTPUT DROP` で既定拒否し、AAAA
+解決した許可ホスト (`allowed-hosts6`) と v6 nameserver (`allowed-dns6`)、meta の
+v6 CIDR のみ許可する（issue #32）。IPv6 スタックが無い環境では攻撃面が無いため
+スキップする。終端プローブで `example.com` への v6 到達が無いことも検証する。
+
 ### DNS の絞り込み（現状実装 と FR-11 計画）
 
 DNS(53/udp,tcp) は全宛先許可ではなく、`/etc/resolv.conf` の `nameserver`
-行から抽出した IPv4 アドレス (ipset `allowed-dns`) に限定する。これは
+行から抽出したアドレス (IPv4: ipset `allowed-dns` / IPv6: `allowed-dns6`) に
+限定する。これは
 コンテナ内プロセスが**任意の攻撃者制御リゾルバへ直接** DNS を送る経路を断つ
 defense-in-depth。
 
