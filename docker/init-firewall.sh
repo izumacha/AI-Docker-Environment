@@ -270,6 +270,9 @@ fi
 # /tmp is a tmpfs (compose.yaml), writable under the read-only rootfs.
 META_JSON=""
 META_TMP="$(mktemp)"
+# Ensure the temp file is removed even if set -e fires mid-loop (e.g. an
+# iptables/ipset command fails after mktemp but before the explicit rm below).
+trap 'rm -f "${META_TMP:-}"' EXIT
 meta_deadline=$(( $(date +%s) + 20 ))
 meta_attempt=0
 while :; do
