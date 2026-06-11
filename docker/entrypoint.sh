@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Helper: prefix every line with "[entrypoint]" and write to stderr.
+# Defined at the top so it is available in all branches below.
+log() { printf '[entrypoint] %s\n' "$*" >&2; }
+
 # Runs as root: initialize the egress firewall (needs root), then drop to the
 # unprivileged agent user via gosu before exec'ing the requested command.
 if [[ "${AIDOCK_SKIP_FIREWALL:-0}" == "1" ]]; then
@@ -13,7 +17,6 @@ if [[ "${AIDOCK_SKIP_FIREWALL:-0}" == "1" ]]; then
     # (issue #33). The two-key requirement makes "skip" a deliberate act, not an
     # accident of the environment.
     if [[ "${AIDOCK_INSECURE_ACK:-0}" != "1" ]]; then
-        log() { printf '[entrypoint] %s\n' "$*" >&2; }
         log "REFUSING TO START: AIDOCK_SKIP_FIREWALL=1 disables the egress"
         log "firewall (the sandbox's primary defense). This is debug-only."
         log "To proceed you MUST also set AIDOCK_INSECURE_ACK=1, acknowledging"
