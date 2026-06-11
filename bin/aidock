@@ -1,13 +1,19 @@
 #!/usr/bin/env bash
 # aidock - wrapper for the Claude Code Docker sandbox.
 
+# エラー発生時に即座に停止し、未定義変数の参照もエラーにする（安全なスクリプト実行の基本設定）
 set -euo pipefail
 
+# このスクリプト自身が置かれているディレクトリの絶対パスを取得する
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
+# リポジトリのルートディレクトリ（SCRIPT_DIR の一つ上）を絶対パスで求める
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." &>/dev/null && pwd)"
 
+# コンテナ内の agent ユーザーと同じ UID/GID をホストから取得する（ファイル所有権の一致のため）
 HOST_UID="$(id -u)"
+# 現在のユーザーのグループ ID を取得する
 HOST_GID="$(id -g)"
+# 子プロセス（docker compose）に UID/GID を環境変数として渡す
 export HOST_UID HOST_GID
 
 compose() {
@@ -17,11 +23,13 @@ compose() {
     # (build/logout/firewall-refresh) still need the variable to interpolate,
     # so supply a non-sensitive placeholder here. run/login/shell export the
     # guarded $PWD before calling compose, which takes precedence over this.
+    # HOST_WORKSPACE が未設定のときは存在しないパス /nonexistent をプレースホルダとして使う
     HOST_WORKSPACE="${HOST_WORKSPACE:-/nonexistent}" \
         docker compose -f "${REPO_ROOT}/compose.yaml" "$@"
 }
 
 guard_workspace() {
+    # $PWD の絶対パス（シンボリックリンクを解決済み）を取得する
     local pwd_abs home_abs passwd_home
     pwd_abs="$(realpath "$PWD")"
 
@@ -30,39 +38,49 @@ guard_workspace() {
     # HOME=/tmp) would relocate the comparison base and skip the SEC-8
     # sensitive-path checks. If the passwd home cannot be resolved to a real
     # directory, fail closed (exit 2) rather than trusting untrusted input.
+    # ホームディレクトリの比較基準を空文字列で初期化する
     home_abs=""
+    # /etc/passwd から現在ユーザーのホームディレクトリを取得する（$HOME は偽造できるため使わない）
     passwd_home="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6 || true)"
+    # passwd で得たパスが実在するディレクトリであれば絶対パスに解決する
     if [[ -n "$passwd_home" && -d "$passwd_home" ]]; then
         home_abs="$(realpath "$passwd_home" 2>/dev/null || true)"
     fi
+    # ホームディレクトリが解決できなかった場合は安全側に倒して終了する（fail-closed）
     if [[ -z "$home_abs" ]]; then
         echo "aidock: cannot resolve home directory from passwd database; refusing to proceed" >&2
         exit 2
     fi
 
+    # / をそのままマウントしようとした場合は拒否する（SEC-8）
     if [[ "$pwd_abs" == "/" ]]; then
         echo "aidock: refusing to mount / as /workspace" >&2
         exit 2
     fi
+    # $HOME そのものをマウントしようとした場合は拒否する（機密ファイルの流出防止）
     if [[ "$pwd_abs" == "$home_abs" ]]; then
         echo "aidock: refusing to mount \$HOME as /workspace. cd into a project subdirectory first." >&2
         exit 2
     fi
 
     # Block known sensitive locations from being mounted into /workspace.
+    # $HOME 以下の相対パスを求めて既知の機密ディレクトリ・ファイルに一致するか確認する
     local rel
     rel="${pwd_abs#"$home_abs"/}"
+    # SSH 鍵・AWS 設定・GCP 設定・Azure 設定・Kubernetes 設定・Docker 設定などの機密パスを拒否する
     case "$rel" in
         .ssh|.ssh/*|.aws|.aws/*|.gcloud|.gcloud/*|.config/gcloud|.config/gcloud/*|.azure|.azure/*|.config/azure|.config/azure/*|.config/aws|.config/aws/*|.config/git|.config/git/*|.config/gh|.config/gh/*|.kube|.kube/*|.docker|.docker/*)
             echo "aidock: refusing to mount sensitive directory under \$HOME: $pwd_abs" >&2
             exit 2
             ;;
+        # 認証情報ファイル（.gitconfig / .netrc / .npmrc 等）もマウント拒否する
         .gitconfig|.git-credentials|.netrc|.npmrc|.pypirc)
             echo "aidock: refusing to mount sensitive file under \$HOME: $pwd_abs" >&2
             exit 2
             ;;
     esac
 
+    # Docker ソケットのパスをワークスペースとしてマウントしようとした場合も拒否する
     if [[ "$pwd_abs" == "/var/run/docker.sock" || "$pwd_abs" == "/var/run/docker.sock/"* ]]; then
         echo "aidock: refusing to mount docker socket path: $pwd_abs" >&2
         exit 2
@@ -70,13 +88,18 @@ guard_workspace() {
 }
 
 cmd_build() {
+    # Docker イメージをビルドする（HOST_UID/HOST_GID は compose() 経由で渡る）
     compose build "$@"
 }
 
 cmd_login() {
+    # ワークスペースが安全かチェックしてから OAuth ログインを実行する
     guard_workspace
+    # 現在のディレクトリをコンテナの /workspace としてマウントするよう設定する
     export HOST_WORKSPACE="$PWD"
+    # ログインプロファイルを設定する（ファイアウォールが OAuth 用ホストへのアクセスを許可する）
     export AIDOCK_PROFILE="login"
+    # コンテナ内で `claude /login` を実行して OAuth 認証情報を初期化する
     compose run --rm claude claude /login
 }
 
@@ -94,18 +117,25 @@ cmd_logout() {
     # that literal never matched here -- and worse, it could delete a same-named
     # global volume created by an unrelated project/checkout, a destructive
     # side effect (issue #9 / FR-1.6).
+    # ログアウト処理の終了コードを保持する変数（0 = 成功）
     local status=0
+    # コンテナを停止しボリューム（認証情報）を削除する。失敗しても exit しないで終了コードを記録する
     compose down -v --remove-orphans || status=$?
+    # ログアウトが失敗した場合はエラーメッセージを出力して同じ終了コードで終了する
     if (( status != 0 )); then
         echo "aidock: logout failed (compose down -v exited $status); credential volume may still exist (check 'docker volume ls')" >&2
         exit "$status"
     fi
+    # 正常にログアウトできたことをユーザーに知らせる
     echo "aidock: credential volume removed"
 }
 
 cmd_run() {
+    # ワークスペースが安全かチェックしてから Claude Code を起動する
     guard_workspace
+    # 現在のディレクトリをコンテナの /workspace にマウントするよう設定する
     export HOST_WORKSPACE="$PWD"
+    # 追加引数がある場合はそれをコンテナに渡し、なければデフォルトコマンド（claude）を実行する
     if [[ $# -gt 0 ]]; then
         compose run --rm claude "$@"
     else
@@ -114,8 +144,11 @@ cmd_run() {
 }
 
 cmd_shell() {
+    # ワークスペースが安全かチェックしてからデバッグ用シェルを起動する
     guard_workspace
+    # 現在のディレクトリをコンテナの /workspace にマウントするよう設定する
     export HOST_WORKSPACE="$PWD"
+    # コンテナ内で bash シェルを起動する（デバッグ・調査用）
     compose run --rm claude bash
 }
 
@@ -127,26 +160,35 @@ cmd_firewall_refresh() {
     # an array (skipping blank lines) so each newline-separated CID stays a
     # distinct container ID instead of being concatenated into one invalid
     # argument to `docker exec`, then refresh each (FR-1.5).
+    # 実行中コンテナ ID の配列と現在処理中の ID、全体の終了ステータスを初期化する
     local cids=() cid status=0
+    # 実行中の claude コンテナの ID を 1 行ずつ読み込んで配列に格納する
     while IFS= read -r cid; do
+        # 空行はスキップして有効な CID だけを配列に追加する
         [[ -n "$cid" ]] && cids+=("$cid")
     done < <(compose ps -q claude)
+    # 実行中のコンテナが 1 つもなければエラーを出力して終了する
     if [[ "${#cids[@]}" -eq 0 ]]; then
         echo "aidock: no running claude container" >&2
         exit 1
     fi
     # Refresh every container best-effort: a failure in one must not skip the
     # rest. Record the failure and propagate a non-zero exit at the end.
+    # コンテナごとにファイアウォールを再初期化する（1 つ失敗しても残りを継続する）
     for cid in "${cids[@]}"; do
+        # root 権限でコンテナ内の init-firewall.sh を再実行して DNS 許可リストを更新する
         if ! docker exec -u root "$cid" /usr/local/bin/init-firewall.sh; then
+            # 失敗した場合はエラーメッセージを記録して終了ステータスに 1 をセットする
             echo "aidock: firewall refresh failed for container $cid" >&2
             status=1
         fi
     done
+    # 全コンテナの処理が終わったら最終的な終了ステータスで終了する
     exit "$status"
 }
 
 usage() {
+    # 使い方メッセージをヒアドキュメントで標準出力に出力する
     cat <<'USAGE'
 Usage: aidock <command> [args...]
 
@@ -163,19 +205,26 @@ USAGE
 }
 
 main() {
+    # 第一引数をコマンド名として受け取る。引数がなければ既定値 "run" を使う
     local cmd="${1:-run}"
+    # 第一引数を消費して残りの引数だけを "$@" に残す（引数がない場合は何もしない）
     [[ $# -gt 0 ]] && shift || true
 
+    # コマンド名に応じて対応する関数を呼び出す
     case "$cmd" in
         build)             cmd_build "$@";;
         login)             cmd_login "$@";;
         logout)            cmd_logout "$@";;
         run)               cmd_run "$@";;
+        # shell と bash は同じ関数にマッピングする
         shell|bash)        cmd_shell "$@";;
         firewall-refresh)  cmd_firewall_refresh "$@";;
+        # ヘルプオプションはいずれも使い方を表示する
         help|-h|--help)    usage;;
+        # 未知のコマンドはエラーを出力して終了コード 1 で終わる
         *)                 echo "aidock: unknown command '$cmd'" >&2; usage; exit 1;;
     esac
 }
 
+# スクリプトへの全引数を main 関数に渡して処理を開始する
 main "$@"
