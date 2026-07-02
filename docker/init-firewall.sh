@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Default-deny egress firewall with an ipset-based allowlist.
 # Derived from anthropics/claude-code .devcontainer/init-firewall.sh.
-# Must be invoked as root (via the scoped sudoers entry).
+# Must be invoked as root (entrypoint.sh runs this before dropping privileges via gosu).
 
 # エラー発生時に即座に停止し、未定義変数の参照もエラーにする（安全なスクリプト実行の基本設定）
 set -euo pipefail
