@@ -116,14 +116,22 @@ fi
 ipset create allowed-dns hash:ip family inet hashsize 64 maxelem 256
 # 追加した DNS サーバーの数を数えるカウンタ
 dns_count=0
+# The shape regex above (like SEC-12.1 for CIDRs) only checks digit-dot
+# formatting, not per-octet range, so a value such as 999.999.999.999 would
+# still reach here. Guard the ipset add so a single malformed nameserver
+# cannot abort the whole init under set -e -- mirror the IPv6 nameserver loop
+# below (and the AAAA/CIDR paths), which already guard for the same reason.
 # /etc/resolv.conf から nameserver 行を読み取り、IPv4 アドレスだけを抽出して ipset に追加する
 while IFS= read -r ns; do
     # 空行はスキップする
     [[ -z "$ns" ]] && continue
-    # 抽出した IPv4 アドレスを DNS 許可リストに追加する（既存なら上書きしない）
-    ipset add allowed-dns "$ns" -exist
-    # 追加カウンタをインクリメントする
-    dns_count=$((dns_count + 1))
+    # 抽出した IPv4 アドレスを DNS 許可リストに追加する（既存なら上書きしない）。
+    # 正常に追加できた場合のみカウンタを増やし、値域外などの不正な形式はスキップして警告する
+    if ipset add allowed-dns "$ns" -exist 2>/dev/null; then
+        dns_count=$((dns_count + 1))
+    else
+        log "WARN: skipping unparseable IPv4 nameserver: $ns"
+    fi
 done < <(awk '/^nameserver/ { print $2 }' /etc/resolv.conf 2>/dev/null \
     | grep -E '^[0-9]{1,3}(\.[0-9]{1,3}){3}$')
 # DNS サーバーが 1 件も見つからなかった場合は警告を出す（DNS 通信がブロックされる）
