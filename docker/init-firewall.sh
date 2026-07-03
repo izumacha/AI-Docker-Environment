@@ -130,6 +130,7 @@ while IFS= read -r ns; do
     if ipset add allowed-dns "$ns" -exist 2>/dev/null; then
         dns_count=$((dns_count + 1))
     else
+        # 不正な形式の IPv4 ネームサーバーアドレスをスキップしてログに記録する
         log "WARN: skipping unparseable IPv4 nameserver: $ns"
     fi
 done < <(awk '/^nameserver/ { print $2 }' /etc/resolv.conf 2>/dev/null \
