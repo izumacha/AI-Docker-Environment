@@ -1,30 +1,57 @@
+# サービス定義の一覧（このファイルではサンドボックス用の claude サービス 1 つだけを定義する）
 services:
+  # claude: Claude Code をサンドボックス実行するための唯一のサービス
   claude:
+    # イメージのビルド設定
     build:
+      # ビルドコンテキスト（Dockerfile 等が置かれているディレクトリ）
       context: ./docker
+      # ビルド時引数（コンテナ内 agent ユーザーの UID/GID をホストに合わせる）
       args:
+        # ホストのユーザー ID を渡す（未設定時は 1000 を既定値にする）
         HOST_UID: "${HOST_UID:-1000}"
+        # ホストのグループ ID を渡す（未設定時は 1000 を既定値にする）
         HOST_GID: "${HOST_GID:-1000}"
+    # ビルドしたイメージに付けるタグ名
     image: aidock/claude:local
+    # コンテナの PID 1 に軽量な init プロセスを使う（ゾンビプロセス回収のため）
     init: true
+    # Linux capability（特権操作の権限）をすべて剥奪してから最小限だけ足す
     cap_drop:
       - ALL
+    # 剥奪した capability のうち、動作に必須な最小限だけを個別に許可する
     cap_add:
+      # egress ファイアウォール（iptables）操作に必要
       - NET_ADMIN
+      # 同上（RAW ソケット操作に必要）
       - NET_RAW
+      # entrypoint の root→agent 降格（gosu）に必要
       - SETUID
+      # 同上（グループ ID の降格に必要）
       - SETGID
+    # セキュリティオプション
     security_opt:
+      # setuid バイナリ経由での権限昇格を禁止する（sudo 等が root 化できなくなる）
       - no-new-privileges:true
+    # ルートファイルシステムを読み取り専用にする（改竄・永続化を防ぐ）
     read_only: true
+    # 読み取り専用ロックの例外として、書き込みが必要な領域だけ tmpfs（メモリ上の一時領域）を許可する
     tmpfs:
+      # 一時ファイル置き場（GitHub meta API のレスポンス等を一時保存する）
       - /tmp:size=512m
+      # Claude Code のキャッシュ置き場（agent ユーザーの UID/GID で所有させる）
       - /home/agent/.cache:size=512m,uid=${HOST_UID:-1000},gid=${HOST_GID:-1000}
+      # npm のキャッシュ置き場
       - /home/agent/.npm:size=128m,uid=${HOST_UID:-1000},gid=${HOST_GID:-1000}
+      # 各種設定ファイルの置き場
       - /home/agent/.config:size=64m,uid=${HOST_UID:-1000},gid=${HOST_GID:-1000}
+    # メモリ使用量の上限（DoS・リソース枯渇防止、SEC-4）
     mem_limit: 4g
+    # 同時に生成できるプロセス数の上限（fork 爆弾等の防止）
     pids_limit: 1024
+    # 使用できる CPU コア数の上限
     cpus: 2.0
+    # コンテナ内に渡す環境変数
     environment:
       # Keep the Node heap a fixed margin below mem_limit (4096 MiB) so that
       # non-heap allocations (V8 C++ heap, JS stacks, native modules, and the
@@ -34,19 +61,31 @@ services:
       # own graceful "heap out of memory" handling could engage (issue #11).
       # mem_limit stays at 4g to preserve the SEC-4 DoS bound; only the heap
       # ceiling is lowered. Invariant: heap <= mem_limit - 512 MiB (NFR-2).
+      # Node.js のヒープ上限を mem_limit より 512MiB 低く設定し、OOM Killer に強制終了される前に
+      # Node 自身が正常にメモリ不足を処理できるようにする（上の英語コメントに理由の詳細を残す）
       NODE_OPTIONS: "--max-old-space-size=3584"
+      # 起動プロファイル（run が既定。login のときだけ OAuth 用ホストを許可リストに追加する）
       AIDOCK_PROFILE: "${AIDOCK_PROFILE:-run}"
+    # ホストとコンテナ間でマウントするボリューム
     volumes:
       # No default on purpose: invoking `docker compose run claude` directly
       # (bypassing bin/aidock) must fail fast rather than silently mounting the
       # current directory as /workspace. This preserves SEC-8 primary defense
       # (a). bin/aidock always sets HOST_WORKSPACE (the guarded $PWD for
       # run/login/shell, a non-sensitive placeholder for build/logout/refresh).
+      # HOST_WORKSPACE にはあえて既定値を持たせない。bin/aidock を経由しない直接実行では
+      # 変数未設定のままエラーで停止させ、意図しないディレクトリを誤ってマウントさせない（SEC-8）
       - "${HOST_WORKSPACE:?HOST_WORKSPACE is unset; run via bin/aidock or set it explicitly}:/workspace:rw"
+      # OAuth 資格情報を保持する名前付きボリューム（ホスト FS やイメージ層には書き出さない）
       - claude-home:/home/agent/.claude
+    # コンテナ内の作業ディレクトリ
     working_dir: /workspace
+    # 標準入力を開いたままにする（対話的な操作に必要）
     stdin_open: true
+    # 疑似端末を割り当てる（対話的な操作に必要）
     tty: true
 
+# 名前付きボリュームの一覧
 volumes:
+  # OAuth 資格情報を保持する名前付きボリューム本体の宣言
   claude-home:
