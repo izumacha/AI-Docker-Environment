@@ -207,8 +207,15 @@ resolve_and_add() {
     while IFS= read -r ip; do
         # 空行はスキップする
         [[ -z "$ip" ]] && continue
-        # IP アドレスを許可リストに追加する（既存なら上書きしない）
-        ipset add allowed-hosts "$ip" -exist
+        # IP アドレスを許可リストに追加する（既存なら上書きしない）。
+        # Guard the add (mirrors resolve_and_add6() below and the nameserver
+        # loops above): getent normally emits clean dotted-quad addresses, but
+        # an unexpected/malformed entry must not abort the whole init under
+        # set -e -- skip it with a warning instead of letting a single bad
+        # entry take down firewall setup for every other host (FR-4.3/4.7).
+        # 追加に失敗した場合は初期化全体を止めず、警告を出してスキップする
+        ipset add allowed-hosts "$ip" -exist 2>/dev/null \
+            || log "WARN: ipset rejected A record for $host: $ip"
     done <<< "$ips"
     # 追加した IP アドレスをログに記録する
     log "added $host (A) -> $(echo "$ips" | tr '\n' ' ')"
