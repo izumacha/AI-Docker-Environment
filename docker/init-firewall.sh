@@ -453,9 +453,18 @@ if [[ -n "$META_JSON" ]]; then
             # SEC-12.1 (regex shape) passed; now enforce SEC-12.2 (octet/prefix
             # ranges). Out-of-range values (e.g. 999.999.999.999/33) are skipped
             # with a warning per FR-4.7 best-effort; initialization continues.
-            # 値域チェック（SEC-12.2）も通過した場合のみ ipset に追加する
+            # 値域チェック（SEC-12.2）も通過した場合のみ ipset に追加する。
+            # Guard the add (mirrors the IPv6 CIDR branch below and the
+            # nameserver/A-record loops above): a value that passes both the
+            # regex shape and the octet/prefix range check can still be
+            # rejected by ipset itself (e.g. duplicate/overlap handling
+            # quirks), and that failure must not abort the whole init under
+            # set -e -- skip it with a warning instead of taking down firewall
+            # setup for every other host (FR-4.5/FR-4.7 best-effort).
+            # 追加に失敗しても初期化全体を止めず、警告を出してスキップする（IPv6 側の同種ガードと対称に保つ）
             if cidr_in_range "$cidr"; then
-                ipset add allowed-hosts "$cidr" -exist
+                ipset add allowed-hosts "$cidr" -exist 2>/dev/null \
+                    || log "WARN: ipset rejected CIDR from github meta: $cidr"
             else
                 # 値域外の CIDR は警告を出してスキップする（起動は継続する）
                 log "WARN: skipping out-of-range CIDR from github meta: $cidr"
