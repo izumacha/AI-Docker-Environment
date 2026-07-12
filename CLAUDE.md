@@ -80,7 +80,7 @@
   - 終端の検証プローブ（`example.com` ブロック v4/v6、`api.anthropic.com` 到達）を維持
   - **許可リスト依存の meta fetch より前に終端 DROP を設置**（issue #34）。デフォルトポリシーのみに拒否を依存させない
   - 許可ホスト追加は `CORE_HOSTS` / `LOGIN_EXTRA_HOSTS` に最小限で追記し、PR に理由を述べる
-  - DNS は `nameserver` 限定（ipset `allowed-dns` / SEC-15）。53 番は (a) `agent`→`127.0.0.1:53` プロキシ、(b) プロキシ→`127.0.0.11:53` forward の 2 経路のみ許可、それ以外の `agent` の 53 番は DROP。拒否名は NXDOMAIN に統一。resolv.conf を `127.0.0.1` に書き換える前に元上流 DNS を捕捉し `allowed-dns` の種にする（FR-11.1）
+  - DNS は `nameserver` 限定（ipset `allowed-dns` / SEC-15、**実装済み**）。53 番は (a) `agent`→`127.0.0.1:53` プロキシ、(b) プロキシ→`127.0.0.11:53` forward の 2 経路のみ許可、それ以外の `agent` の 53 番は DROP。拒否名は NXDOMAIN に統一。resolv.conf を `127.0.0.1` に書き換える前に元上流 DNS を捕捉し `allowed-dns` の種にする（FR-11.1）。**注意: このユーザー空間 DNS プロキシ（FR-11、query 名 allowlist 施行）自体は `docs/requirements.md` 上「要件先行、実装は後続 PR」であり、現行の `init-firewall.sh` には未実装。** 現状実装されているのは nameserver IP 限定（SEC-15）のみで、上記 2 経路制限・NXDOMAIN 統一は将来実装時に守るべき契約として記載している。`init-firewall.sh` を編集する際はこの区別を `docs/requirements.md`（正本）の FR-11 / SEC-15 の実装状況欄で必ず確認すること。
 - `bin/aidock`:
   - `guard_workspace()` の `/` および `$HOME` 拒否を維持
 
