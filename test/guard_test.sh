@@ -184,6 +184,14 @@ mkdir -p "$FAKE_HOME"
 aidock_run "$FAKE_HOME"
 assert_exit 2 "reject CWD = \$HOME (passwd home)"
 
+# $HOME の祖先ディレクトリ（例: 実運用の /home に相当する親ディレクトリ）からの実行も
+# 拒否されることを確認する。祖先を許すと $HOME 自身が /workspace 配下のサブディレクトリと
+# して現れ、機密パスチェック（$HOME からの相対パス比較）を素通りしてしまう。
+# フェイクホームの親ディレクトリ（$WORK）は $HOME の祖先そのものにあたる
+aidock_run "$WORK"
+assert_exit 2 "reject CWD = ancestor of \$HOME (parent dir)"
+assert_contains "ancestor of" "ancestor-of-\$HOME message emitted"
+
 # --- 2. SEC-8 sensitive directories (bare and nested subdir) ----------------
 # 機密ディレクトリ直下および配下のサブディレクトリを順に試験する
 for d in "${SENSITIVE_DIRS[@]}"; do
