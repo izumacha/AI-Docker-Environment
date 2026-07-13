@@ -65,7 +65,7 @@ cd ~/some-project
 | リスク | 対策 |
 | --- | --- |
 | ホスト FS の破壊 | bind mount は `$PWD` のみ。`read_only` rootfs + `tmpfs`。`HOST_WORKSPACE` はデフォルト値なし → `bin/aidock` 非経由の直接 `docker compose run` は fail-closed で起動失敗 |
-| ホスト資格情報の流出 | `~/.ssh` / `~/.aws` / `gcloud` / `~/.gitconfig` 等を追加 bind mount しない。`$HOME` と `/` は起動拒否。ただし機密ディレクトリ配下からの起動は禁止（機械的拒否は follow-up） |
+| ホスト資格情報の流出 | `~/.ssh` / `~/.aws` / `gcloud` / `~/.gitconfig` 等を追加 bind mount しない。`$HOME` と `/` は起動拒否。機密ディレクトリ（`~/.ssh`、`~/.aws`、`~/.config/gcloud` 等）配下からの起動も `guard_workspace()` が機械的に拒否する（実装済み） |
 | 任意外部送信 | iptables 既定 DROP + ipset allowlist (api.anthropic.com, npm, GitHub等のみ)。**IPv6 も `ip6tables` で同等に default-deny**（v6 を素通しにしない、issue #32）。DNS(53) も `/etc/resolv.conf` の nameserver に限定（任意リゾルバへの直接送信を遮断）。**現状実装**では再帰経由の query 名 exfil は防げない（残余リスク）。**要件（FR-11）**ではコンテナ内 DNS プロキシで query 名 allowlist を施行する方針へ移行する（要件先行・実装は後続）。詳細は下記「DNS の絞り込み」参照 |
 | 暴走プロセス | `mem_limit=4g`, `pids_limit=1024`, `cpus=2.0`, `tini` で reap |
 | 権限昇格 | `cap_drop: ALL` → `NET_ADMIN`/`NET_RAW`（+ 降格用 `SETUID`/`SETGID`）のみ復帰、`no-new-privileges`、entrypoint は root 起動 → `gosu` で agent 降格 (sudo 不使用) |
