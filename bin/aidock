@@ -62,6 +62,13 @@ guard_workspace() {
         echo "aidock: refusing to mount \$HOME as /workspace. cd into a project subdirectory first." >&2
         exit 2
     fi
+    # $HOME の祖先ディレクトリ（例: /home）をマウントしようとした場合も拒否する。
+    # 祖先を許すと $HOME 自身がサブディレクトリとして /workspace 配下に現れてしまい、
+    # 下の機密パスチェック（$HOME からの相対パス比較）を素通りして .ssh 等が露出する。
+    if [[ "$home_abs" == "$pwd_abs"/* ]]; then
+        echo "aidock: refusing to mount an ancestor of \$HOME as /workspace (would expose \$HOME as a subdirectory): $pwd_abs" >&2
+        exit 2
+    fi
 
     # Block known sensitive locations from being mounted into /workspace.
     # $HOME 以下の相対パスを求めて既知の機密ディレクトリ・ファイルに一致するか確認する
