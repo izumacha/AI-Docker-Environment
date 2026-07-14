@@ -57,15 +57,22 @@ services:
     environment:
       # Keep the Node heap a fixed margin below mem_limit (4096 MiB) so that
       # non-heap allocations (V8 C++ heap, JS stacks, native modules, and the
-      # git/jq/ripgrep child processes Claude Code spawns) have ~512 MiB of
-      # headroom before the cgroup OOM killer SIGKILLs the process. Sizing the
-      # heap == cgroup let RSS overshoot the limit and crash Node before V8's
-      # own graceful "heap out of memory" handling could engage (issue #11).
-      # mem_limit stays at 4g to preserve the SEC-4 DoS bound; only the heap
-      # ceiling is lowered. Invariant: heap <= mem_limit - 512 MiB (NFR-2).
-      # Node.js のヒープ上限を mem_limit より 512MiB 低く設定し、OOM Killer に強制終了される前に
-      # Node 自身が正常にメモリ不足を処理できるようにする（上の英語コメントに理由の詳細を残す）
-      NODE_OPTIONS: "--max-old-space-size=3584"
+      # git/jq/ripgrep child processes Claude Code spawns) have headroom
+      # before the cgroup OOM killer SIGKILLs the process. Sizing the heap ==
+      # cgroup let RSS overshoot the limit and crash Node before V8's own
+      # graceful "heap out of memory" handling could engage (issue #11).
+      # The margin must also cover the tmpfs mounts below (512+512+128+64 =
+      # 1216 MiB), since tmpfs pages are RAM-backed and charged to the same
+      # cgroup memory accounting as heap/RSS: a prior version budgeted only
+      # 512 MiB of native-process headroom and ignored the tmpfs mounts, so
+      # heap-near-max + fully-used tmpfs could still exceed mem_limit and
+      # reintroduce issue #11. mem_limit stays at 4g to preserve the SEC-4 DoS
+      # bound; only the heap ceiling is lowered. Invariant: heap <= mem_limit
+      # - 512 MiB native margin - 1216 MiB tmpfs = 2368 MiB (NFR-2).
+      # Node.js のヒープ上限を「mem_limit − ネイティブ処理用の余白512MiB − 下の tmpfs 合計1216MiB」
+      # に設定し、OOM Killer に強制終了される前に Node 自身が正常にメモリ不足を処理できるようにする
+      # （tmpfs は RAM 上に確保されるため cgroup のメモリ上限に同じく計上される。上の英語コメントに詳細）
+      NODE_OPTIONS: "--max-old-space-size=2368"
       # 起動プロファイル（run が既定。login のときだけ OAuth 用ホストを許可リストに追加する）
       AIDOCK_PROFILE: "${AIDOCK_PROFILE:-run}"
     # ホストとコンテナ間でマウントするボリューム
