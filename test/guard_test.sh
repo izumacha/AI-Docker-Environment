@@ -347,7 +347,15 @@ assert_exit 0 "allow non-sensitive project dir"
 # docker スタブがセンチネルを出力していることを確認してガード通過を検証する
 assert_contains "$GUARD_PASS_SENTINEL" "guard passed (reached docker) for project dir"
 
+# ~/.config そのもの（親ディレクトリ）は SEC-8 で拒否されることを確認する。
+# 親を丸ごとマウントすると .config/aws / .config/gcloud 等の列挙済み資格情報
+# ディレクトリが一括露出するため、完全一致で拒否する（SEC-8）。
+aidock_run "${FAKE_HOME}/.config"
+assert_exit 2 "reject ~/.config itself (parent of SEC-8 credential dirs)"
+assert_contains "sensitive directory" "SEC-8 message emitted for ~/.config"
+
 # ~/.config/htop は SEC-8 拒否リストに含まれないため通過することを確認する
+# （.config は完全一致のみの拒否であり、非機密の子は許可される契約）
 aidock_run "${FAKE_HOME}/.config/htop"
 assert_exit 0 "allow ~/.config/htop (not a SEC-8 path)"
 assert_contains "$GUARD_PASS_SENTINEL" "guard passed for ~/.config/htop"
