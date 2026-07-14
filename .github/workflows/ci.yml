@@ -150,6 +150,23 @@ jobs:
             echo "AC-1 git config ok"
           '
 
+      - name: AC-1 ~/.claude.json is writable inside the sandbox (SEC-3)
+        run: |
+          # Exercises the same write path claude-code 1.0.40 itself uses for
+          # ~/.claude.json (a direct fs.writeFileSync, not a temp-file+rename):
+          # writing straight through the symlink into the writable .config
+          # tmpfs. This does not prove every possible write strategy a future
+          # claude-code version might use would also succeed (see SEC-3's
+          # residual-risk note in docs/requirements.md) -- only that the
+          # symlink target itself is writable, which is what this fix adds.
+          docker compose -f compose.yaml run --rm -T claude bash -lc '
+            set -e
+            node -e "require(\"fs\").writeFileSync(process.env.HOME + \"/.claude.json\", JSON.stringify({ci: true}))"
+            value="$(node -e "console.log(JSON.parse(require(\"fs\").readFileSync(process.env.HOME + \"/.claude.json\", \"utf8\")).ci)")"
+            [ "$value" = "true" ] || { echo "FAIL: ~/.claude.json write did not persist"; exit 1; }
+            echo "AC-1 claude.json ok"
+          '
+
       - name: AC-3 user / no privilege escalation / capability set
         run: |
           docker compose -f compose.yaml run --rm -T claude bash -lc '
