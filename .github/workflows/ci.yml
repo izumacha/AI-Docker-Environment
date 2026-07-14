@@ -126,6 +126,47 @@ jobs:
           docker compose -f compose.yaml run --rm -T claude bash -lc \
             'curl -sS --max-time 8 -o /dev/null -w "%{http_code}\n" https://claude.ai | grep -qE "^[1-9][0-9]{2}$"'
 
+      - name: AC-4 SEC-17 non-443 port to an allowed host is blocked
+        run: |
+          # github.com is in CORE_HOSTS (admitted to allowed-hosts for HTTPS), but
+          # also serves git-over-SSH on 22. The ACCEPT rule must be scoped to
+          # tcp/443 only, so a raw TCP connect to :22 on the same allowed IP must
+          # still be dropped by the terminal DROP rule.
+          if docker compose -f compose.yaml run --rm -T claude bash -lc \
+            'timeout 5 bash -c "echo >/dev/tcp/github.com/22" 2>/dev/null'; then
+            echo "FAIL: github.com:22 was reachable despite SEC-17 (port-restricted allowlist)"
+            exit 1
+          fi
+          echo "SEC-17 ok: github.com:22 is blocked as expected"
+
+      - name: AC-1 git config is writable inside the sandbox (SEC-3)
+        run: |
+          docker compose -f compose.yaml run --rm -T claude bash -lc '
+            set -e
+            git config --global user.email test@example.com
+            git config --global user.name "Test User"
+            email="$(git config --global --get user.email)"
+            [ "$email" = "test@example.com" ] || { echo "FAIL: ~/.gitconfig write did not persist"; exit 1; }
+            echo "AC-1 git config ok"
+          '
+
+      - name: AC-1 ~/.claude.json is writable inside the sandbox (SEC-3)
+        run: |
+          # Exercises the same write path claude-code 1.0.40 itself uses for
+          # ~/.claude.json (a direct fs.writeFileSync, not a temp-file+rename):
+          # writing straight through the symlink into the writable .config
+          # tmpfs. This does not prove every possible write strategy a future
+          # claude-code version might use would also succeed (see SEC-3's
+          # residual-risk note in docs/requirements.md) -- only that the
+          # symlink target itself is writable, which is what this fix adds.
+          docker compose -f compose.yaml run --rm -T claude bash -lc '
+            set -e
+            node -e "require(\"fs\").writeFileSync(process.env.HOME + \"/.claude.json\", JSON.stringify({ci: true}))"
+            value="$(node -e "console.log(JSON.parse(require(\"fs\").readFileSync(process.env.HOME + \"/.claude.json\", \"utf8\")).ci)")"
+            [ "$value" = "true" ] || { echo "FAIL: ~/.claude.json write did not persist"; exit 1; }
+            echo "AC-1 claude.json ok"
+          '
+
       - name: AC-3 user / no privilege escalation / capability set
         run: |
           docker compose -f compose.yaml run --rm -T claude bash -lc '

@@ -338,14 +338,22 @@ fi
 # pinned IP to a different tenant. The GitHub /meta import below widens this
 # further (large netblocks). This is an accepted limitation of IP allowlisting;
 # an SNI/Host-aware egress proxy would be required to constrain it precisely.
-# 許可リストに含まれる IPv4 アドレスへの通信を ACCEPT するルールを追加する
-iptables -A OUTPUT -m set --match-set allowed-hosts dst -j ACCEPT
+# 許可ホストへの通信は HTTPS(443/tcp)のみを ACCEPT する（-p tcp --dport 443 を明示）。
+# CORE_HOSTS/LOGIN_EXTRA_HOSTS と GitHub meta 由来の CIDR はすべて HTTPS API/Git-over-HTTPS
+# 用途のみで、他ポートを必要とする用途は存在しない。ポート指定なしで IP だけを許可すると、
+# 同じ IP が提供する他ポート（例: github.com の場合 git 用 SSH の 22 番）まで素通しになり、
+# コンテナ内に侵入したプロセスが許可 IP への任意ポートを C2/持ち出しの汎用トンネルとして
+# 悪用できてしまう（イメージに git（SSH 経由の git@host:22 をサポート）が入っているため
+# 現実的な経路）。ポートを 443 に絞ることで「許可ホストへの HTTPS のみ」という意図を
+# ACCEPT ルール自体でも強制する。
+# 許可リストに含まれる IPv4 アドレスへの HTTPS(443/tcp)通信のみを ACCEPT するルールを追加する
+iptables -A OUTPUT -p tcp --dport 443 -m set --match-set allowed-hosts dst -j ACCEPT
 # 上記以外の全 OUTPUT をここで DROP する（終端 DROP で明示的に拒否する）
 iptables -A OUTPUT -j DROP
 # IPv6 スタックが有効な場合は v6 の許可ルールと終端 DROP も設置する
 if (( IPV6 )); then
-    # 許可リストに含まれる IPv6 アドレスへの通信を ACCEPT するルールを追加する
-    ip6tables -A OUTPUT -m set --match-set allowed-hosts6 dst -j ACCEPT
+    # 許可リストに含まれる IPv6 アドレスへの HTTPS(443/tcp)通信のみを ACCEPT するルールを追加する
+    ip6tables -A OUTPUT -p tcp --dport 443 -m set --match-set allowed-hosts6 dst -j ACCEPT
     # 上記以外の全 IPv6 OUTPUT を終端 DROP する
     ip6tables -A OUTPUT -j DROP
 fi
