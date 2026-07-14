@@ -192,7 +192,8 @@ reject_from() {  # reject_from <relpath-under-fake-home> <desc>
 # bin/aidock の case 文で拒否される機密ディレクトリの一覧
 SENSITIVE_DIRS=(
     .ssh .aws .gcloud .config/gcloud .azure .config/azure
-    .config/aws .config/git .config/gh .kube .docker .gnupg
+    .config/aws .config/git .config/gh .config/op .config/doctl
+    .config/rclone .config/hub .kube .docker .gnupg
 )
 # SEC-8 sensitive file names (matched exactly, no trailing /*).
 # bin/aidock の case 文で拒否される機密ファイル名の一覧（ディレクトリとして作成して試験する）
