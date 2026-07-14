@@ -192,7 +192,8 @@ reject_from() {  # reject_from <relpath-under-fake-home> <desc>
 # bin/aidock の case 文で拒否される機密ディレクトリの一覧
 SENSITIVE_DIRS=(
     .ssh .aws .gcloud .config/gcloud .azure .config/azure
-    .config/aws .config/git .config/gh .kube .docker .gnupg
+    .config/aws .config/git .config/gh .config/op .config/doctl
+    .config/rclone .config/hub .kube .docker .gnupg
 )
 # SEC-8 sensitive file names (matched exactly, no trailing /*).
 # bin/aidock の case 文で拒否される機密ファイル名の一覧（ディレクトリとして作成して試験する）
@@ -347,10 +348,54 @@ assert_exit 0 "allow non-sensitive project dir"
 # docker スタブがセンチネルを出力していることを確認してガード通過を検証する
 assert_contains "$GUARD_PASS_SENTINEL" "guard passed (reached docker) for project dir"
 
+# ~/.config そのもの（親ディレクトリ）は SEC-8 で拒否されることを確認する。
+# 親を丸ごとマウントすると .config/aws / .config/gcloud 等の列挙済み資格情報
+# ディレクトリが一括露出するため、完全一致で拒否する（SEC-8）。
+# reject_from ヘルパーが対象ディレクトリの作成まで行うため、他テストの mkdir 順序に依存しない
+reject_from ".config" "reject ~/.config itself (parent of SEC-8 credential dirs)"
+assert_contains "sensitive directory" "SEC-8 message emitted for ~/.config"
+
 # ~/.config/htop は SEC-8 拒否リストに含まれないため通過することを確認する
+# （.config は完全一致のみの拒否であり、非機密の子は許可される契約）
 aidock_run "${FAKE_HOME}/.config/htop"
 assert_exit 0 "allow ~/.config/htop (not a SEC-8 path)"
 assert_contains "$GUARD_PASS_SENTINEL" "guard passed for ~/.config/htop"
+
+# --- 8. FR-1.5: firewall-refresh discovers one-off containers ----------------
+# `aidock` がコンテナを作る経路はすべて `compose run --rm`（one-off）であり、
+# 素の `compose ps` は one-off を一覧から除外するため、`--all --filter status=running`
+# が無いと refresh は常に「no running claude container」で失敗する。ここでは
+# docker スタブを「必須フラグが揃った ps 呼び出しにだけ CID を返す」ものに
+# 差し替え、フラグの回帰（--all の削除等）を exit 1 として検出できるようにする。
+# docker スタブを firewall-refresh 試験用に上書きする
+cat >"${STUB_DIR}/docker" <<'EOF'
+#!/usr/bin/env bash
+# 全引数を 1 つの文字列に連結して呼び出し内容を判定する
+args="$*"
+# compose ps 呼び出しの場合: 必須フラグ（--all と --filter status=running と claude）が
+# すべて揃っているときだけ偽の CID を 1 件返す（揃っていなければ 0 件 = 回帰を模擬）
+if [[ "$args" == *" ps "* ]]; then
+    if [[ "$args" == *"--all"* && "$args" == *"--filter status=running"* && "$args" == *"claude"* ]]; then
+        printf 'stub-cid-1\n'
+    fi
+    exit 0
+fi
+# docker exec 呼び出しの場合: 到達を示すセンチネルを出力して成功を返す
+if [[ "$args" == exec* ]]; then
+    printf '__AIDOCK_REFRESH_EXEC__ %s\n' "$args"
+    exit 0
+fi
+# それ以外の docker 呼び出しは何もせず成功を返す
+exit 0
+EOF
+# 上書きしたスタブに実行権限を付与する
+chmod +x "${STUB_DIR}/docker"
+
+# firewall-refresh を実行し、one-off コンテナが発見されて exec まで到達することを確認する
+RC=0
+OUT="$(bash "$AIDOCK" firewall-refresh </dev/null 2>&1)" || RC=$?
+assert_exit 0 "firewall-refresh finds one-off containers (--all --filter status=running)"
+assert_contains "__AIDOCK_REFRESH_EXEC__" "refresh reached docker exec for the discovered CID"
 
 # --- summary ----------------------------------------------------------------
 # パス数とフェイル数を集計してテスト結果の概要を出力する

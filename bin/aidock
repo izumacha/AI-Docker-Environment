@@ -99,8 +99,11 @@ guard_workspace() {
     local rel
     rel="${pwd_abs#"$home_abs"/}"
     # SSH 鍵・AWS 設定・GCP 設定・Azure 設定・Kubernetes 設定・Docker 設定・GPG 鍵などの機密パスを拒否する
+    # 注: `.config` は「完全一致のみ」拒否する（`.config/*` は付けない）。親を丸ごとマウントすると
+    #     配下の .config/aws / .config/gcloud / .config/azure / .config/git / .config/gh が一括露出
+    #     するため親自体は拒否しつつ、.config/htop 等の非機密サブディレクトリからの起動は許可を維持する（SEC-8）
     case "$rel" in
-        .ssh|.ssh/*|.aws|.aws/*|.gcloud|.gcloud/*|.config/gcloud|.config/gcloud/*|.azure|.azure/*|.config/azure|.config/azure/*|.config/aws|.config/aws/*|.config/git|.config/git/*|.config/gh|.config/gh/*|.kube|.kube/*|.docker|.docker/*|.gnupg|.gnupg/*)
+        .ssh|.ssh/*|.aws|.aws/*|.gcloud|.gcloud/*|.config|.config/gcloud|.config/gcloud/*|.azure|.azure/*|.config/azure|.config/azure/*|.config/aws|.config/aws/*|.config/git|.config/git/*|.config/gh|.config/gh/*|.config/op|.config/op/*|.config/doctl|.config/doctl/*|.config/rclone|.config/rclone/*|.config/hub|.config/hub/*|.kube|.kube/*|.docker|.docker/*|.gnupg|.gnupg/*)
             echo "aidock: refusing to mount sensitive directory under \$HOME: $pwd_abs" >&2
             exit 2
             ;;
@@ -193,19 +196,24 @@ cmd_shell() {
 
 cmd_firewall_refresh() {
     # firewall-refresh re-resolves the DNS allowlist (e.g. after CDN IPs
-    # rotate). `compose ps -q claude` can list more than one CID when several
-    # claude containers run concurrently (e.g. `run` + `shell` in parallel);
-    # every one of them needs the refresh. Collect the CIDs line-by-line into
-    # an array (skipping blank lines) so each newline-separated CID stays a
-    # distinct container ID instead of being concatenated into one invalid
-    # argument to `docker exec`, then refresh each (FR-1.5).
+    # rotate). aidock only ever creates containers via `compose run --rm`
+    # (run/login/shell), and plain `compose ps` excludes those one-off
+    # containers by default -- without `--all` the refresh would never find
+    # any container. `--filter status=running` then narrows the list back to
+    # live containers only. Several claude containers can run concurrently
+    # (e.g. `run` + `shell` in parallel); every one of them needs the refresh.
+    # Collect the CIDs line-by-line into an array (skipping blank lines) so
+    # each newline-separated CID stays a distinct container ID instead of
+    # being concatenated into one invalid argument to `docker exec`, then
+    # refresh each (FR-1.5).
     # 実行中コンテナ ID の配列と現在処理中の ID、全体の終了ステータスを初期化する
     local cids=() cid status=0
     # 実行中の claude コンテナの ID を 1 行ずつ読み込んで配列に格納する
+    # （--all: compose run 由来の one-off コンテナも含める / --filter: 稼働中のみに絞る）
     while IFS= read -r cid; do
         # 空行はスキップして有効な CID だけを配列に追加する
         [[ -n "$cid" ]] && cids+=("$cid")
-    done < <(compose ps -q claude)
+    done < <(compose ps -q --all --filter status=running claude)
     # 実行中のコンテナが 1 つもなければエラーを出力して終了する
     if [[ "${#cids[@]}" -eq 0 ]]; then
         echo "aidock: no running claude container" >&2
