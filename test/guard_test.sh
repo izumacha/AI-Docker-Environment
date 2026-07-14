@@ -361,6 +361,42 @@ aidock_run "${FAKE_HOME}/.config/htop"
 assert_exit 0 "allow ~/.config/htop (not a SEC-8 path)"
 assert_contains "$GUARD_PASS_SENTINEL" "guard passed for ~/.config/htop"
 
+# --- 8. FR-1.5: firewall-refresh discovers one-off containers ----------------
+# `aidock` がコンテナを作る経路はすべて `compose run --rm`（one-off）であり、
+# 素の `compose ps` は one-off を一覧から除外するため、`--all --filter status=running`
+# が無いと refresh は常に「no running claude container」で失敗する。ここでは
+# docker スタブを「必須フラグが揃った ps 呼び出しにだけ CID を返す」ものに
+# 差し替え、フラグの回帰（--all の削除等）を exit 1 として検出できるようにする。
+# docker スタブを firewall-refresh 試験用に上書きする
+cat >"${STUB_DIR}/docker" <<'EOF'
+#!/usr/bin/env bash
+# 全引数を 1 つの文字列に連結して呼び出し内容を判定する
+args="$*"
+# compose ps 呼び出しの場合: 必須フラグ（--all と --filter status=running と claude）が
+# すべて揃っているときだけ偽の CID を 1 件返す（揃っていなければ 0 件 = 回帰を模擬）
+if [[ "$args" == *" ps "* ]]; then
+    if [[ "$args" == *"--all"* && "$args" == *"--filter status=running"* && "$args" == *"claude"* ]]; then
+        printf 'stub-cid-1\n'
+    fi
+    exit 0
+fi
+# docker exec 呼び出しの場合: 到達を示すセンチネルを出力して成功を返す
+if [[ "$args" == exec* ]]; then
+    printf '__AIDOCK_REFRESH_EXEC__ %s\n' "$args"
+    exit 0
+fi
+# それ以外の docker 呼び出しは何もせず成功を返す
+exit 0
+EOF
+# 上書きしたスタブに実行権限を付与する
+chmod +x "${STUB_DIR}/docker"
+
+# firewall-refresh を実行し、one-off コンテナが発見されて exec まで到達することを確認する
+RC=0
+OUT="$(bash "$AIDOCK" firewall-refresh </dev/null 2>&1)" || RC=$?
+assert_exit 0 "firewall-refresh finds one-off containers (--all --filter status=running)"
+assert_contains "__AIDOCK_REFRESH_EXEC__" "refresh reached docker exec for the discovered CID"
+
 # --- summary ----------------------------------------------------------------
 # パス数とフェイル数を集計してテスト結果の概要を出力する
 printf '\n# %d passed, %d failed\n' "$PASS" "$FAIL"
