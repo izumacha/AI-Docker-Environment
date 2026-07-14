@@ -70,7 +70,8 @@ RUN if id -u node >/dev/null 2>&1; then userdel -r node 2>/dev/null || true; fi 
         echo "docker build: refusing HOST_GID=0 (root); agent's primary group must not be root (SEC-18)" >&2; \
         exit 1; \
     elif getent group "${HOST_GID}" >/dev/null; then \
-        AGENT_GROUP="$(getent group "${HOST_GID}" | cut -d: -f1)"; \
+        AGENT_GROUP="$(getent group "${HOST_GID}")"; \
+        AGENT_GROUP="${AGENT_GROUP%%:*}"; \
     else \
         groupadd -g "${HOST_GID}" agent && AGENT_GROUP="agent"; \
     fi \
