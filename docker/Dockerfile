@@ -43,10 +43,20 @@ RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
 # そのためコメントはこの直前にまとめて記載する。処理順序は次の通り:
 #   1. ベースイメージ由来の node ユーザーが存在すればホームディレクトリごと削除する（失敗しても続行）
 #   2. node グループが存在すれば削除する（agent 用の GID を衝突なく使うため）
-#   3. ホストと同じ GID で agent グループを作成する
-#   4. ホストと同じ UID でホームディレクトリ付きの agent ユーザーを作成する（シェルは bash）
+#   3. HOST_GID が 0（root）なら明示的にビルドを失敗させる（SEC-18）。agent のプライマリ
+#      グループが root になると、group-root で読める既存ファイルへのアクセスが意図せず
+#      広がる。bin/aidock の require_non_root_host() が通常経路では先に拒否するが、
+#      bin/aidock を経由しない直接の `docker build --build-arg HOST_GID=0` 等に対する
+#      二次防御として Dockerfile 側にも同じ拒否を置く。0 でなければ、ホストと同じ GID を
+#      持つグループが（node:22-slim の dialout/sudo/staff/users 等、既に）存在すればそれを
+#      再利用し、無ければホストと同じ GID で agent グループを新規作成する。存在チェックを
+#      せず常に `groupadd -g "${HOST_GID}" agent` すると、ホストの GID がベースイメージの
+#      既存グループと衝突するユーザー環境で `groupadd: GID '...' already exists` により
+#      docker build が失敗する。
+#   4. ホストと同じ UID・（3 で決まった）GID でホームディレクトリ付きの agent ユーザーを作成する
+#      （シェルは bash）
 #   5. claude-code の設定ディレクトリと作業ディレクトリを作成する
-#   6. 作成したディレクトリの所有者を agent に変更する（root 所有のままにしない）
+#   6. 作成したディレクトリの所有者を agent:（3 で決まったグループ）に変更する（root 所有のままにしない）
 #   7. `~/.gitconfig` と `~/.claude.json`（Claude Code 本体の設定ファイル。`~/.claude/` 配下の
 #      OAuth 資格情報ボリュームとは別物）を、書き込み可能な tmpfs（`/home/agent/.config`）配下へ
 #      向けたシンボリックリンクとして作る。`/home/agent` 自体は read_only rootfs 上にあり
@@ -56,12 +66,20 @@ RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
 #      ビルド時に焼き込む読み取り専用の実体だが、リンク先は既存の tmpfs 内なので実行時に書き込める。
 RUN if id -u node >/dev/null 2>&1; then userdel -r node 2>/dev/null || true; fi \
  && if getent group node >/dev/null; then groupdel node 2>/dev/null || true; fi \
- && groupadd -g "${HOST_GID}" agent \
- && useradd -l -m -u "${HOST_UID}" -g "${HOST_GID}" -s /bin/bash agent \
+ && if [ "${HOST_GID}" = "0" ]; then \
+        echo "docker build: refusing HOST_GID=0 (root); agent's primary group must not be root (SEC-18)" >&2; \
+        exit 1; \
+    elif getent group "${HOST_GID}" >/dev/null; then \
+        AGENT_GROUP="$(getent group "${HOST_GID}")"; \
+        AGENT_GROUP="${AGENT_GROUP%%:*}"; \
+    else \
+        groupadd -g "${HOST_GID}" agent && AGENT_GROUP="agent"; \
+    fi \
+ && useradd -l -m -u "${HOST_UID}" -g "${AGENT_GROUP}" -s /bin/bash agent \
  && mkdir -p /home/agent/.claude /workspace \
  && ln -s .config/gitconfig /home/agent/.gitconfig \
  && ln -s .config/claude.json /home/agent/.claude.json \
- && chown -R agent:agent /home/agent /workspace
+ && chown -R agent:"${AGENT_GROUP}" /home/agent /workspace
 
 # ホスト側のファイアウォール初期化スクリプトをイメージにコピーする
 COPY init-firewall.sh /usr/local/bin/init-firewall.sh
