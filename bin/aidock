@@ -98,9 +98,9 @@ guard_workspace() {
     # $HOME 以下の相対パスを求めて既知の機密ディレクトリ・ファイルに一致するか確認する
     local rel
     rel="${pwd_abs#"$home_abs"/}"
-    # SSH 鍵・AWS 設定・GCP 設定・Azure 設定・Kubernetes 設定・Docker 設定などの機密パスを拒否する
+    # SSH 鍵・AWS 設定・GCP 設定・Azure 設定・Kubernetes 設定・Docker 設定・GPG 鍵などの機密パスを拒否する
     case "$rel" in
-        .ssh|.ssh/*|.aws|.aws/*|.gcloud|.gcloud/*|.config/gcloud|.config/gcloud/*|.azure|.azure/*|.config/azure|.config/azure/*|.config/aws|.config/aws/*|.config/git|.config/git/*|.config/gh|.config/gh/*|.kube|.kube/*|.docker|.docker/*)
+        .ssh|.ssh/*|.aws|.aws/*|.gcloud|.gcloud/*|.config/gcloud|.config/gcloud/*|.azure|.azure/*|.config/azure|.config/azure/*|.config/aws|.config/aws/*|.config/git|.config/git/*|.config/gh|.config/gh/*|.kube|.kube/*|.docker|.docker/*|.gnupg|.gnupg/*)
             echo "aidock: refusing to mount sensitive directory under \$HOME: $pwd_abs" >&2
             exit 2
             ;;

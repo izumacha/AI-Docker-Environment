@@ -11,7 +11,7 @@ allowlist を組み合わせている。
 ユーザー自身の Claude アカウントで OAuth ログインし、その認証情報は
 コンテナ内の名前付きボリュームに閉じる。ホストの `~/.ssh` や クラウド SDK の
 資格情報は明示的に追加 bind mount しない。ただし `$PWD` は `/workspace:rw` として
-渡されるため、`~/.ssh`、`~/.aws`、`~/.config/aws`、`~/.config/gcloud`、`~/.config/gh`、`~/.kube` 等の機密ディレクトリ
+渡されるため、`~/.ssh`、`~/.aws`、`~/.config/aws`、`~/.config/gcloud`、`~/.config/gh`、`~/.kube`、`~/.gnupg` 等の機密ディレクトリ
 配下では `aidock` の起動を機械的に拒否する。
 
 ## なぜ作ったか
@@ -65,7 +65,7 @@ cd ~/some-project
 | リスク | 対策 |
 | --- | --- |
 | ホスト FS の破壊 | bind mount は `$PWD` のみ。`read_only` rootfs + `tmpfs`。`HOST_WORKSPACE` はデフォルト値なし → `bin/aidock` 非経由の直接 `docker compose run` は fail-closed で起動失敗 |
-| ホスト資格情報の流出 | `~/.ssh` / `~/.aws` / `gcloud` / `~/.gitconfig` 等を追加 bind mount しない。`$HOME` と `/` は起動拒否。機密ディレクトリ（`~/.ssh`、`~/.aws`、`~/.config/gcloud` 等）配下からの起動も `guard_workspace()` が機械的に拒否する（実装済み） |
+| ホスト資格情報の流出 | `~/.ssh` / `~/.aws` / `gcloud` / `~/.gitconfig` / `~/.gnupg` 等を追加 bind mount しない。`$HOME` と `/` は起動拒否。機密ディレクトリ（`~/.ssh`、`~/.aws`、`~/.config/gcloud`、`~/.gnupg` 等）配下からの起動も `guard_workspace()` が機械的に拒否する（実装済み） |
 | 任意外部送信 | iptables 既定 DROP + ipset allowlist (api.anthropic.com, npm, GitHub等のみ)。**IPv6 も `ip6tables` で同等に default-deny**（v6 を素通しにしない、issue #32）。DNS(53) も `/etc/resolv.conf` の nameserver に限定（任意リゾルバへの直接送信を遮断）。**現状実装**では再帰経由の query 名 exfil は防げない（残余リスク）。**要件（FR-11）**ではコンテナ内 DNS プロキシで query 名 allowlist を施行する方針へ移行する（要件先行・実装は後続）。詳細は下記「DNS の絞り込み」参照 |
 | 暴走プロセス | `mem_limit=4g`, `pids_limit=1024`, `cpus=2.0`, `tini` で reap |
 | 権限昇格 | `cap_drop: ALL` → `NET_ADMIN`/`NET_RAW`（+ 降格用 `SETUID`/`SETGID`）のみ復帰、`no-new-privileges`、entrypoint は root 起動 → `gosu` で agent 降格 (sudo 不使用)。ホストが UID 0（root）だと `gosu` 降格が capability を落とし切れず、GID 0 だと agent のプライマリグループが root になるため、`bin/aidock build`/`login`/`run`/`shell` はホスト root での実行を起動時に拒否する（SEC-18） |
