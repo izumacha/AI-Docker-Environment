@@ -43,7 +43,9 @@ services:
       - /home/agent/.cache:size=512m,uid=${HOST_UID:-1000},gid=${HOST_GID:-1000}
       # npm のキャッシュ置き場
       - /home/agent/.npm:size=128m,uid=${HOST_UID:-1000},gid=${HOST_GID:-1000}
-      # 各種設定ファイルの置き場
+      # 各種設定ファイルの置き場。`~/.gitconfig`（git config --global 用）と `~/.claude.json`
+      # （claude-code 本体の設定。`~/.claude/` の OAuth ボリュームとは別物）は、read_only な
+      # $HOME 直下に置けないため、Dockerfile でこの tmpfs 配下へのシンボリックリンクとして作成する
       - /home/agent/.config:size=64m,uid=${HOST_UID:-1000},gid=${HOST_GID:-1000}
     # メモリ使用量の上限（DoS・リソース枯渇防止、SEC-4）
     mem_limit: 4g

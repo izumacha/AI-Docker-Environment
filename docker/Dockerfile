@@ -47,11 +47,20 @@ RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
 #   4. ホストと同じ UID でホームディレクトリ付きの agent ユーザーを作成する（シェルは bash）
 #   5. claude-code の設定ディレクトリと作業ディレクトリを作成する
 #   6. 作成したディレクトリの所有者を agent に変更する（root 所有のままにしない）
+#   7. `~/.gitconfig` と `~/.claude.json`（Claude Code 本体の設定ファイル。`~/.claude/` 配下の
+#      OAuth 資格情報ボリュームとは別物）を、書き込み可能な tmpfs（`/home/agent/.config`）配下へ
+#      向けたシンボリックリンクとして作る。`/home/agent` 自体は read_only rootfs 上にあり
+#      `.cache`/`.npm`/`.config`/`.claude` の tmpfs/named volume 以外は書き込めないため、
+#      これらのファイルへ `git config --global` や claude-code 自身の初回起動時保存が
+#      素のままでは失敗する（issue: HOME 直下の設定ファイル書き込み不可）。シンボリックリンク自体は
+#      ビルド時に焼き込む読み取り専用の実体だが、リンク先は既存の tmpfs 内なので実行時に書き込める。
 RUN if id -u node >/dev/null 2>&1; then userdel -r node 2>/dev/null || true; fi \
  && if getent group node >/dev/null; then groupdel node 2>/dev/null || true; fi \
  && groupadd -g "${HOST_GID}" agent \
  && useradd -l -m -u "${HOST_UID}" -g "${HOST_GID}" -s /bin/bash agent \
  && mkdir -p /home/agent/.claude /workspace \
+ && ln -s .config/gitconfig /home/agent/.gitconfig \
+ && ln -s .config/claude.json /home/agent/.claude.json \
  && chown -R agent:agent /home/agent /workspace
 
 # ホスト側のファイアウォール初期化スクリプトをイメージにコピーする
