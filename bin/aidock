@@ -13,21 +13,32 @@ REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." &>/dev/null && pwd)"
 HOST_UID="$(id -u)"
 # 現在のユーザーのグループ ID を取得する
 HOST_GID="$(id -g)"
-
-# ホストが UID/GID 0（root）だと、docker/Dockerfile が作る agent ユーザーも UID/GID 0 になる。
-# Linux の capability クリア規則は「実効 UID が 0 から非 0 へ変わったとき」だけ有効
-# capability を消去するため、0→0 の遷移では entrypoint.sh の `gosu agent` 降格を経ても
-# NET_ADMIN/NET_RAW（cap_add 済み）が実効 capability として残り続け、コンテナ内の
-# ワークロードが iptables/ip6tables を直接操作して egress ファイアウォール（SEC-1/SEC-7 が
-# 前提とする「降格後の agent は capability を持たない」という不変条件）を無効化できてしまう。
-# ホストで root として aidock を使う運用を fail-closed で拒否する（SEC-18）。
-if [[ "$HOST_UID" -eq 0 || "$HOST_GID" -eq 0 ]]; then
-    echo "aidock: refusing to run as host UID/GID 0 (root). The container's agent user would also become UID/GID 0, and gosu's privilege drop does not clear inherited capabilities on a 0->0 transition, defeating the egress firewall's security model (SEC-18). Re-run as a non-root host user." >&2
-    exit 2
-fi
-
 # 子プロセス（docker compose）に UID/GID を環境変数として渡す
 export HOST_UID HOST_GID
+
+require_non_root_host() {
+    # ホストが UID 0（root）だと、docker/Dockerfile が焼き込む agent ユーザーも UID 0 になる。
+    # Linux の capability クリア規則は「実効 UID が 0 から非 0 へ変わったとき」だけ有効
+    # capability を消去するため（capabilities(7)）、UID 0→0 の遷移では entrypoint.sh の
+    # `gosu agent` 降格を経ても NET_ADMIN/NET_RAW（cap_add 済み）が実効 capability として
+    # 残り続け、コンテナ内のワークロードが iptables/ip6tables を直接操作して egress
+    # ファイアウォール（SEC-1/SEC-7 が前提とする「降格後の agent は capability を持たない」
+    # という不変条件）を無効化できてしまう。
+    if [[ "$HOST_UID" -eq 0 ]]; then
+        echo "aidock: refusing to build/run as host UID 0 (root). The container's agent user would also become UID 0, and gosu's privilege drop does not clear inherited capabilities on a 0->0 transition, defeating the egress firewall's security model (SEC-18). Re-run as a non-root host user." >&2
+        exit 2
+    fi
+    # ホストの GID が 0（root グループ）の場合も拒否する。こちらは capability クリアには
+    # 影響しない（クリア規則は実効 UID のみを見る）が、agent のプライマリグループが
+    # コンテナ内の root グループになり、group-root で読める既存ファイルへのアクセスが
+    # 意図せず広がる余地が残るための多層防御。docker/Dockerfile 側でも HOST_GID=0 を
+    # 明示的に拒否しており（bin/aidock を経由しない直接 docker build に対する二重の防御）、
+    # ここでの拒否はそれと一致させて早期にわかりやすいエラーを出すためのもの。
+    if [[ "$HOST_GID" -eq 0 ]]; then
+        echo "aidock: refusing to build/run as host GID 0 (root group). The container's agent user would inherit a root primary group, widening its file-access surface inside the sandbox (SEC-18). Re-run as a non-root host user." >&2
+        exit 2
+    fi
+}
 
 compose() {
     # compose.yaml requires HOST_WORKSPACE (no default) so that bypassing this
@@ -108,11 +119,15 @@ guard_workspace() {
 }
 
 cmd_build() {
+    # ホストが root だとイメージに焼き込まれる agent の UID/GID も root になるため先に拒否する
+    require_non_root_host
     # Docker イメージをビルドする（HOST_UID/HOST_GID は compose() 経由で渡る）
     compose build "$@"
 }
 
 cmd_login() {
+    # ホストが root だと gosu 降格後も capability が残りうるため先に拒否する（SEC-18）
+    require_non_root_host
     # ワークスペースが安全かチェックしてから OAuth ログインを実行する
     guard_workspace
     # 現在のディレクトリをコンテナの /workspace としてマウントするよう設定する
@@ -151,6 +166,8 @@ cmd_logout() {
 }
 
 cmd_run() {
+    # ホストが root だと gosu 降格後も capability が残りうるため先に拒否する（SEC-18）
+    require_non_root_host
     # ワークスペースが安全かチェックしてから Claude Code を起動する
     guard_workspace
     # 現在のディレクトリをコンテナの /workspace にマウントするよう設定する
@@ -164,6 +181,8 @@ cmd_run() {
 }
 
 cmd_shell() {
+    # ホストが root だと gosu 降格後も capability が残りうるため先に拒否する（SEC-18）
+    require_non_root_host
     # ワークスペースが安全かチェックしてからデバッグ用シェルを起動する
     guard_workspace
     # 現在のディレクトリをコンテナの /workspace にマウントするよう設定する

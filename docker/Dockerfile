@@ -43,11 +43,16 @@ RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
 # そのためコメントはこの直前にまとめて記載する。処理順序は次の通り:
 #   1. ベースイメージ由来の node ユーザーが存在すればホームディレクトリごと削除する（失敗しても続行）
 #   2. node グループが存在すれば削除する（agent 用の GID を衝突なく使うため）
-#   3. ホストと同じ GID を持つグループが（node:22-slim の dialout/sudo/staff/users 等、既に）
-#      存在すればそれを再利用し、無ければホストと同じ GID で agent グループを新規作成する。
-#      存在チェックをせず常に `groupadd -g "${HOST_GID}" agent` すると、ホストの GID が
-#      ベースイメージの既存グループと衝突するユーザー環境で `groupadd: GID '...' already
-#      exists` により docker build が失敗する。
+#   3. HOST_GID が 0（root）なら明示的にビルドを失敗させる（SEC-18）。agent のプライマリ
+#      グループが root になると、group-root で読める既存ファイルへのアクセスが意図せず
+#      広がる。bin/aidock の require_non_root_host() が通常経路では先に拒否するが、
+#      bin/aidock を経由しない直接の `docker build --build-arg HOST_GID=0` 等に対する
+#      二次防御として Dockerfile 側にも同じ拒否を置く。0 でなければ、ホストと同じ GID を
+#      持つグループが（node:22-slim の dialout/sudo/staff/users 等、既に）存在すればそれを
+#      再利用し、無ければホストと同じ GID で agent グループを新規作成する。存在チェックを
+#      せず常に `groupadd -g "${HOST_GID}" agent` すると、ホストの GID がベースイメージの
+#      既存グループと衝突するユーザー環境で `groupadd: GID '...' already exists` により
+#      docker build が失敗する。
 #   4. ホストと同じ UID・（3 で決まった）GID でホームディレクトリ付きの agent ユーザーを作成する
 #      （シェルは bash）
 #   5. claude-code の設定ディレクトリと作業ディレクトリを作成する
@@ -61,7 +66,10 @@ RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
 #      ビルド時に焼き込む読み取り専用の実体だが、リンク先は既存の tmpfs 内なので実行時に書き込める。
 RUN if id -u node >/dev/null 2>&1; then userdel -r node 2>/dev/null || true; fi \
  && if getent group node >/dev/null; then groupdel node 2>/dev/null || true; fi \
- && if getent group "${HOST_GID}" >/dev/null; then \
+ && if [ "${HOST_GID}" = "0" ]; then \
+        echo "docker build: refusing HOST_GID=0 (root); agent's primary group must not be root (SEC-18)" >&2; \
+        exit 1; \
+    elif getent group "${HOST_GID}" >/dev/null; then \
         AGENT_GROUP="$(getent group "${HOST_GID}" | cut -d: -f1)"; \
     else \
         groupadd -g "${HOST_GID}" agent && AGENT_GROUP="agent"; \

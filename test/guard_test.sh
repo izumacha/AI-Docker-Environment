@@ -204,23 +204,46 @@ SENSITIVE_FILES=(
 echo "# guard_workspace() unit tests (SEC-8 / AC-2)"
 
 # --- 0. SEC-18: reject host UID/GID 0 (root) --------------------------------
-# This guard runs at the very top of bin/aidock, before guard_workspace() is
-# ever called, so a safe non-sensitive directory is used here deliberately: a
-# rejection must come from the UID/GID=0 check itself, not from SEC-8.
+# require_non_root_host() is called from the top of cmd_build/login/run/shell
+# (the commands that actually build an image or create a container), so a
+# safe non-sensitive directory is used here deliberately: a rejection from
+# `run`/`login`/`build`/`shell` must come from the UID/GID=0 check itself, not
+# from SEC-8's guard_workspace().
 # フェイクホーム配下に安全なプロジェクトディレクトリを用意する（SEC-8 とは無関係な場所で試験するため）
 mkdir -p "${FAKE_HOME}/project/root-guard"
 
-# ホスト UID が 0（root）の場合は SEC-18 により拒否されることを確認する
+# ホスト UID が 0（root）の場合は SEC-18 により拒否されることを確認する（run 経由）
 RC=0
 OUT="$(cd "${FAKE_HOME}/project/root-guard" && AIDOCK_TEST_FAKE_UID=0 bash "$AIDOCK" run </dev/null 2>&1)" || RC=$?
-assert_exit 2 "reject host UID 0 (root)"
-assert_contains "refusing to run as host UID/GID 0" "SEC-18 message emitted for UID 0"
+assert_exit 2 "reject host UID 0 (root) via run"
+assert_contains "refusing to build/run as host UID 0" "SEC-18 message emitted for UID 0"
 
-# ホスト GID が 0（root グループ）の場合も SEC-18 により拒否されることを確認する
+# ホスト GID が 0（root グループ）の場合も SEC-18 により拒否されることを確認する（run 経由）
 RC=0
 OUT="$(cd "${FAKE_HOME}/project/root-guard" && AIDOCK_TEST_FAKE_GID=0 bash "$AIDOCK" run </dev/null 2>&1)" || RC=$?
-assert_exit 2 "reject host GID 0 (root group)"
-assert_contains "refusing to run as host UID/GID 0" "SEC-18 message emitted for GID 0"
+assert_exit 2 "reject host GID 0 (root group) via run"
+assert_contains "refusing to build/run as host GID 0" "SEC-18 message emitted for GID 0"
+
+# build / login / shell も同じガードを通ることを確認する（コンテナを作る 4 コマンドすべてが対象）
+RC=0
+OUT="$(cd "${FAKE_HOME}/project/root-guard" && AIDOCK_TEST_FAKE_UID=0 bash "$AIDOCK" build </dev/null 2>&1)" || RC=$?
+assert_exit 2 "reject host UID 0 (root) via build"
+RC=0
+OUT="$(cd "${FAKE_HOME}/project/root-guard" && AIDOCK_TEST_FAKE_UID=0 bash "$AIDOCK" shell </dev/null 2>&1)" || RC=$?
+assert_exit 2 "reject host UID 0 (root) via shell"
+RC=0
+OUT="$(cd "${FAKE_HOME}/project/root-guard" && AIDOCK_TEST_FAKE_UID=0 bash "$AIDOCK" login </dev/null 2>&1)" || RC=$?
+assert_exit 2 "reject host UID 0 (root) via login"
+
+# logout と firewall-refresh は gosu 降格を経由しない（コンテナの UID/GID は作成時点で
+# 既に確定済み）ため、SEC-18 の対象外であることを確認する。ホスト root でもこれらの
+# コマンドはブロックされず、docker スタブ（常に exit 0 でセンチネルを出す）まで到達する。
+RC=0
+OUT="$(cd "${FAKE_HOME}/project/root-guard" && AIDOCK_TEST_FAKE_UID=0 bash "$AIDOCK" logout </dev/null 2>&1)" || RC=$?
+assert_exit 0 "SEC-18 does not block logout for host UID 0"
+RC=0
+OUT="$(cd "${FAKE_HOME}/project/root-guard" && AIDOCK_TEST_FAKE_UID=0 bash "$AIDOCK" firewall-refresh </dev/null 2>&1)" || RC=$?
+assert_exit 0 "SEC-18 does not block firewall-refresh for host UID 0"
 
 # 通常の非 root UID/GID（実際のテスト実行ユーザー）ではガードを通過することを回帰確認する
 aidock_run "${FAKE_HOME}/project/root-guard"
