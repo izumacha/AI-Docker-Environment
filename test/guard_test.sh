@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# guard_test.sh - unit tests for guard_workspace() in bin/aidock (SEC-8 / AC-2).
+# guard_test.sh - unit tests for guard_workspace() (SEC-8 / AC-2) and the
+# host-root rejection guard (SEC-18) in bin/aidock.
 #
 # Black-box: invokes `bin/aidock run` as a subprocess from controlled working
 # directories and asserts the SEC-8 fail-closed exit code (2). The host home is
@@ -8,8 +9,8 @@
 # path is observable without Docker -- the rejection paths exit 2 before Docker
 # is ever reached. Runs in CI's type-check job (no Docker daemon required).
 #
-# bin/aidock is invoked unmodified; the stubs only shadow getent/docker/realpath
-# on PATH, exactly the seams guard_workspace() reads through.
+# bin/aidock is invoked unmodified; the stubs only shadow getent/docker/realpath/id
+# on PATH, exactly the seams guard_workspace() and the SEC-18 guard read through.
 
 # エラー発生時に即座に停止し、未定義変数の参照もエラーにする（安全なスクリプト実行の基本設定）
 set -euo pipefail
@@ -28,6 +29,10 @@ GUARD_PASS_SENTINEL="__AIDOCK_GUARD_PASSED__"
 AIDOCK_TEST_REAL_REALPATH="$(command -v realpath)"
 # 本物の realpath パスを環境変数として子プロセスに継承させる
 export AIDOCK_TEST_REAL_REALPATH
+# スタブが PATH を上書きする前に、本物の id コマンドのパスを取得しておく（SEC-18 試験用）
+AIDOCK_TEST_REAL_ID="$(command -v id)"
+# 本物の id パスを環境変数として子プロセスに継承させる
+export AIDOCK_TEST_REAL_ID
 
 # テスト用の一時ディレクトリを作成する
 WORK="$(mktemp -d)"
@@ -82,8 +87,33 @@ fi
 # それ以外は本物の realpath コマンドに処理を委譲する
 exec "$AIDOCK_TEST_REAL_REALPATH" "$@"
 EOF
-# 3 つのスタブファイルに実行権限を付与する
-chmod +x "${STUB_DIR}/getent" "${STUB_DIR}/docker" "${STUB_DIR}/realpath"
+# id: always report a fixed non-root UID/GID (1000) for `-u`/`-g` unless
+# AIDOCK_TEST_FAKE_UID/GID overrides it, so the suite is hermetic regardless of
+# the *actual* UID the test runner happens to execute as (some CI/sandbox
+# environments run tests as root, which would otherwise make every SEC-18
+# guard fire unconditionally and mask the "guard passes" assertions below).
+# bin/aidock's own `HOST_UID="$(id -u)"` / `HOST_GID="$(id -g)"` calls (and the
+# getent stub's internal `$(id -u)` call) all resolve through this same stub.
+# id スタブを書き出す（既定では固定の非 root UID/GID 1000 を返し、AIDOCK_TEST_FAKE_UID/GID
+# が設定されている場合のみ SEC-18 試験用の偽の値を返す。実行ユーザーの実際の UID には依存しない）
+cat >"${STUB_DIR}/id" <<'EOF'
+#!/usr/bin/env bash
+# -u が指定された場合、AIDOCK_TEST_FAKE_UID があればそれを、無ければ既定の非 root UID を返す
+if [[ "${1:-}" == "-u" ]]; then
+    printf '%s\n' "${AIDOCK_TEST_FAKE_UID:-1000}"
+    exit 0
+fi
+# -g が指定された場合、AIDOCK_TEST_FAKE_GID があればそれを、無ければ既定の非 root GID を返す
+if [[ "${1:-}" == "-g" ]]; then
+    printf '%s\n' "${AIDOCK_TEST_FAKE_GID:-1000}"
+    exit 0
+fi
+# それ以外（-u/-g 以外の引数）の呼び出しは本物の id コマンドに処理を委譲する
+exec "$AIDOCK_TEST_REAL_ID" "$@"
+EOF
+
+# 4 つのスタブファイルに実行権限を付与する
+chmod +x "${STUB_DIR}/getent" "${STUB_DIR}/docker" "${STUB_DIR}/realpath" "${STUB_DIR}/id"
 
 # フェイクホームのパスを環境変数としてエクスポートし getent スタブから参照できるようにする
 export AIDOCK_TEST_FAKE_HOME="$FAKE_HOME"
@@ -172,6 +202,30 @@ SENSITIVE_FILES=(
 
 # テスト開始を示すヘッダーを出力する
 echo "# guard_workspace() unit tests (SEC-8 / AC-2)"
+
+# --- 0. SEC-18: reject host UID/GID 0 (root) --------------------------------
+# This guard runs at the very top of bin/aidock, before guard_workspace() is
+# ever called, so a safe non-sensitive directory is used here deliberately: a
+# rejection must come from the UID/GID=0 check itself, not from SEC-8.
+# フェイクホーム配下に安全なプロジェクトディレクトリを用意する（SEC-8 とは無関係な場所で試験するため）
+mkdir -p "${FAKE_HOME}/project/root-guard"
+
+# ホスト UID が 0（root）の場合は SEC-18 により拒否されることを確認する
+RC=0
+OUT="$(cd "${FAKE_HOME}/project/root-guard" && AIDOCK_TEST_FAKE_UID=0 bash "$AIDOCK" run </dev/null 2>&1)" || RC=$?
+assert_exit 2 "reject host UID 0 (root)"
+assert_contains "refusing to run as host UID/GID 0" "SEC-18 message emitted for UID 0"
+
+# ホスト GID が 0（root グループ）の場合も SEC-18 により拒否されることを確認する
+RC=0
+OUT="$(cd "${FAKE_HOME}/project/root-guard" && AIDOCK_TEST_FAKE_GID=0 bash "$AIDOCK" run </dev/null 2>&1)" || RC=$?
+assert_exit 2 "reject host GID 0 (root group)"
+assert_contains "refusing to run as host UID/GID 0" "SEC-18 message emitted for GID 0"
+
+# 通常の非 root UID/GID（実際のテスト実行ユーザー）ではガードを通過することを回帰確認する
+aidock_run "${FAKE_HOME}/project/root-guard"
+assert_exit 0 "allow non-root host UID/GID"
+assert_contains "$GUARD_PASS_SENTINEL" "guard passed (reached docker) for non-root UID/GID"
 
 # --- 1. Hard-coded path rejections -----------------------------------------
 # ルートディレクトリ（/）からの実行を拒否することを確認する
