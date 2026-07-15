@@ -361,6 +361,34 @@ aidock_run "${FAKE_HOME}/.config/htop"
 assert_exit 0 "allow ~/.config/htop (not a SEC-8 path)"
 assert_contains "$GUARD_PASS_SENTINEL" "guard passed for ~/.config/htop"
 
+# --- 7b. HOST_WORKSPACE must be the resolved path, not the raw symlinked cwd -
+# Regression guard for the TOCTOU fix: guard_workspace() validates the
+# realpath-resolved cwd, but cmd_run() used to re-read the raw (unresolved)
+# $PWD for HOST_WORKSPACE. If $PWD were a symlink, the path Docker actually
+# bind-mounts could diverge from the path that was validated, leaving a
+# window (between the guard check and the `docker compose run` invocation)
+# where retargeting the symlink would mount a different directory than the
+# one the guard approved. Assert that the mounted path is the canonicalized
+# target, identical to what guard_workspace() validated.
+# 非機密プロジェクトディレクトリの実体と、そこへのシンボリックリンクを用意する
+mkdir -p "${FAKE_HOME}/project/target"
+ln -s "${FAKE_HOME}/project/target" "${FAKE_HOME}/project/via-symlink"
+# シンボリックリンク先の実パス（realpath 解決済み）を期待値として求めておく
+REAL_TARGET="$("$AIDOCK_TEST_REAL_REALPATH" "${FAKE_HOME}/project/target")"
+# docker スタブを HOST_WORKSPACE の値を出力するものに一時的に差し替える
+cat >"${STUB_DIR}/docker" <<'EOF'
+#!/usr/bin/env bash
+# ガード通過時に実際に export された HOST_WORKSPACE の値を出力する
+printf 'HOST_WORKSPACE=%s\n' "${HOST_WORKSPACE:-}"
+exit 0
+EOF
+chmod +x "${STUB_DIR}/docker"
+# シンボリックリンク経由のディレクトリから aidock run を実行する
+aidock_run "${FAKE_HOME}/project/via-symlink"
+assert_exit 0 "allow project dir reached via symlink"
+# docker に渡された HOST_WORKSPACE がシンボリックリンクの解決先と一致することを確認する
+assert_contains "HOST_WORKSPACE=${REAL_TARGET}" "HOST_WORKSPACE is the resolved realpath, not the raw symlinked cwd"
+
 # --- 8. FR-1.5: firewall-refresh discovers one-off containers ----------------
 # `aidock` がコンテナを作る経路はすべて `compose run --rm`（one-off）であり、
 # 素の `compose ps` は one-off を一覧から除外するため、`--all --filter status=running`
