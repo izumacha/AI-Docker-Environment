@@ -49,6 +49,21 @@ services:
       - /home/agent/.config:size=64m,uid=${HOST_UID:-1000},gid=${HOST_GID:-1000}
     # メモリ使用量の上限（DoS・リソース枯渇防止、SEC-4）
     mem_limit: 4g
+    # Without an explicit memswap_limit, Docker defaults memswap_limit to
+    # 2x mem_limit when the host has swap enabled with cgroup swap accounting
+    # (common on many Linux distros), letting a runaway/compromised process
+    # consume up to ~8G (4G RSS + 4G swap) before being OOM-killed instead of
+    # the documented 4G ceiling. Pin memswap_limit == mem_limit so swap adds
+    # no extra headroom and the SEC-4/NFR-2 DoS bound stays exactly 4G
+    # regardless of host swap configuration.
+    # memswap_limit を明示しないと、ホストに swap があり cgroup の swap
+    # accounting が有効な場合、Docker は既定で memswap_limit を
+    # mem_limit の2倍として扱ってしまい、暴走/侵害されたプロセスが
+    # 文書化された 4G 上限ではなく最大 ~8G（RSS 4G + swap 4G）まで
+    # 消費してから初めて OOM Killer に落とされる恐れがある。
+    # memswap_limit を mem_limit と同値に固定し、swap による上限の
+    # 実質的な倍化を防いで SEC-4/NFR-2 の DoS 境界を常に 4G に保つ。
+    memswap_limit: 4g
     # 同時に生成できるプロセス数の上限（fork 爆弾等の防止）
     pids_limit: 1024
     # 使用できる CPU コア数の上限
