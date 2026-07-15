@@ -45,8 +45,9 @@ compose() {
     # wrapper with a bare `docker compose run claude` fails closed instead of
     # mounting the repo. Subcommands that do not mount a user workspace
     # (build/logout/firewall-refresh) still need the variable to interpolate,
-    # so supply a non-sensitive placeholder here. run/login/shell export the
-    # guarded $PWD before calling compose, which takes precedence over this.
+    # so supply a non-sensitive placeholder here. run/login/shell export
+    # guard_workspace()'s validated, resolved realpath before calling compose,
+    # which takes precedence over this.
     # HOST_WORKSPACE が未設定のときは存在しないパス /nonexistent をプレースホルダとして使う
     HOST_WORKSPACE="${HOST_WORKSPACE:-/nonexistent}" \
         docker compose -f "${REPO_ROOT}/compose.yaml" "$@"
