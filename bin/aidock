@@ -45,8 +45,9 @@ compose() {
     # wrapper with a bare `docker compose run claude` fails closed instead of
     # mounting the repo. Subcommands that do not mount a user workspace
     # (build/logout/firewall-refresh) still need the variable to interpolate,
-    # so supply a non-sensitive placeholder here. run/login/shell export the
-    # guarded $PWD before calling compose, which takes precedence over this.
+    # so supply a non-sensitive placeholder here. run/login/shell export
+    # guard_workspace()'s validated, resolved realpath before calling compose,
+    # which takes precedence over this.
     # HOST_WORKSPACE が未設定のときは存在しないパス /nonexistent をプレースホルダとして使う
     HOST_WORKSPACE="${HOST_WORKSPACE:-/nonexistent}" \
         docker compose -f "${REPO_ROOT}/compose.yaml" "$@"
@@ -119,6 +120,14 @@ guard_workspace() {
         echo "aidock: refusing to mount docker socket path: $pwd_abs" >&2
         exit 2
     fi
+
+    # 検証済みの実パス（シンボリックリンク解決済み）を呼び出し元へ返す。
+    # 呼び出し元はこの値をそのまま HOST_WORKSPACE に使うこと。生の $PWD を
+    # 再利用すると、ここでの検証後・docker compose run 実行までの間に
+    # symlink の向き先が差し替えられた場合、検証したパスとは別の場所が
+    # bind mount されてしまう（TOCTOU）。検証済みの実パスをそのまま使うことで、
+    # symlink の以降の付け替えが mount 先に影響しなくなる。
+    printf '%s\n' "$pwd_abs"
 }
 
 cmd_build() {
@@ -131,10 +140,11 @@ cmd_build() {
 cmd_login() {
     # ホストが root だと gosu 降格後も capability が残りうるため先に拒否する（SEC-18）
     require_non_root_host
-    # ワークスペースが安全かチェックしてから OAuth ログインを実行する
-    guard_workspace
-    # 現在のディレクトリをコンテナの /workspace としてマウントするよう設定する
-    export HOST_WORKSPACE="$PWD"
+    # ワークスペースが安全かチェックし、検証済みの実パス（symlink 解決済み）を受け取る
+    local resolved_workspace
+    resolved_workspace="$(guard_workspace)"
+    # 検証したのと同じ実パスをコンテナの /workspace としてマウントするよう設定する（TOCTOU 回避）
+    export HOST_WORKSPACE="$resolved_workspace"
     # ログインプロファイルを設定する（ファイアウォールが OAuth 用ホストへのアクセスを許可する）
     export AIDOCK_PROFILE="login"
     # コンテナ内で `claude /login` を実行して OAuth 認証情報を初期化する
@@ -171,10 +181,11 @@ cmd_logout() {
 cmd_run() {
     # ホストが root だと gosu 降格後も capability が残りうるため先に拒否する（SEC-18）
     require_non_root_host
-    # ワークスペースが安全かチェックしてから Claude Code を起動する
-    guard_workspace
-    # 現在のディレクトリをコンテナの /workspace にマウントするよう設定する
-    export HOST_WORKSPACE="$PWD"
+    # ワークスペースが安全かチェックし、検証済みの実パス（symlink 解決済み）を受け取る
+    local resolved_workspace
+    resolved_workspace="$(guard_workspace)"
+    # 検証したのと同じ実パスをコンテナの /workspace にマウントするよう設定する（TOCTOU 回避）
+    export HOST_WORKSPACE="$resolved_workspace"
     # 追加引数がある場合はそれをコンテナに渡し、なければデフォルトコマンド（claude）を実行する
     if [[ $# -gt 0 ]]; then
         compose run --rm claude "$@"
@@ -186,10 +197,11 @@ cmd_run() {
 cmd_shell() {
     # ホストが root だと gosu 降格後も capability が残りうるため先に拒否する（SEC-18）
     require_non_root_host
-    # ワークスペースが安全かチェックしてからデバッグ用シェルを起動する
-    guard_workspace
-    # 現在のディレクトリをコンテナの /workspace にマウントするよう設定する
-    export HOST_WORKSPACE="$PWD"
+    # ワークスペースが安全かチェックし、検証済みの実パス（symlink 解決済み）を受け取る
+    local resolved_workspace
+    resolved_workspace="$(guard_workspace)"
+    # 検証したのと同じ実パスをコンテナの /workspace にマウントするよう設定する（TOCTOU 回避）
+    export HOST_WORKSPACE="$resolved_workspace"
     # コンテナ内で bash シェルを起動する（デバッグ・調査用）
     compose run --rm claude bash
 }
