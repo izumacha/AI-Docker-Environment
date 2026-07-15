@@ -207,13 +207,23 @@ cmd_firewall_refresh() {
     # being concatenated into one invalid argument to `docker exec`, then
     # refresh each (FR-1.5).
     # 実行中コンテナ ID の配列と現在処理中の ID、全体の終了ステータスを初期化する
-    local cids=() cid status=0
+    local cids=() cid status=0 ps_output
+    # compose ps の出力を一旦変数へ読み込み、コマンド自体の終了コードを確認する。
+    # プロセス置換 `< <(...)` に直接つなぐと終了コードを調べられず、compose ps 自体の
+    # 失敗（例: Docker デーモン停止、compose プロジェクト解決失敗）が黙って
+    # 空のコンテナ一覧として扱われ、後段の「no running claude container」という
+    # 実際の原因とは無関係な一次診断メッセージになってしまう（アンダーコメント参照）。
+    if ! ps_output=$(compose ps -q --all --filter status=running claude); then
+        # compose ps 自体が失敗した場合は原因の切り分けを促すメッセージを出して終了する
+        echo "aidock: failed to list containers (is the Docker daemon running?)" >&2
+        exit 1
+    fi
     # 実行中の claude コンテナの ID を 1 行ずつ読み込んで配列に格納する
     # （--all: compose run 由来の one-off コンテナも含める / --filter: 稼働中のみに絞る）
     while IFS= read -r cid; do
         # 空行はスキップして有効な CID だけを配列に追加する
         [[ -n "$cid" ]] && cids+=("$cid")
-    done < <(compose ps -q --all --filter status=running claude)
+    done <<< "$ps_output"
     # 実行中のコンテナが 1 つもなければエラーを出力して終了する
     if [[ "${#cids[@]}" -eq 0 ]]; then
         echo "aidock: no running claude container" >&2
