@@ -397,6 +397,32 @@ OUT="$(bash "$AIDOCK" firewall-refresh </dev/null 2>&1)" || RC=$?
 assert_exit 0 "firewall-refresh finds one-off containers (--all --filter status=running)"
 assert_contains "__AIDOCK_REFRESH_EXEC__" "refresh reached docker exec for the discovered CID"
 
+# --- 9. firewall-refresh: compose ps 自体の失敗を「no running claude container」と
+#        取り違えず、実際の原因（Docker デーモン停止等）を示す診断メッセージにする ---
+# docker スタブを「compose ps 呼び出しを常に失敗させる」ものに差し替え、
+# compose ps 自体の失敗（例: Docker デーモン停止）が「コンテナが1つも無い」という
+# 誤った一次診断メッセージに落ちてしまわないことを確認する。
+cat >"${STUB_DIR}/docker" <<'EOF'
+#!/usr/bin/env bash
+# 全引数を1つの文字列に連結して呼び出し内容を判定する
+args="$*"
+# compose ps 呼び出しの場合: Docker デーモン停止等を模擬し、常に非ゼロで失敗させる
+if [[ "$args" == *" ps "* ]]; then
+    echo "Cannot connect to the Docker daemon" >&2
+    exit 1
+fi
+# それ以外の docker 呼び出しは何もせず成功を返す
+exit 0
+EOF
+# 上書きしたスタブに実行権限を付与する
+chmod +x "${STUB_DIR}/docker"
+
+# firewall-refresh を実行し、compose ps 失敗時に専用の診断メッセージで exit 1 することを確認する
+RC=0
+OUT="$(bash "$AIDOCK" firewall-refresh </dev/null 2>&1)" || RC=$?
+assert_exit 1 "firewall-refresh reports failure when compose ps itself fails"
+assert_contains "failed to list containers" "diagnostic message distinguishes compose ps failure from an empty container list"
+
 # --- summary ----------------------------------------------------------------
 # パス数とフェイル数を集計してテスト結果の概要を出力する
 printf '\n# %d passed, %d failed\n' "$PASS" "$FAIL"
