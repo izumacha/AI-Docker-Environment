@@ -198,7 +198,7 @@ SENSITIVE_DIRS=(
 # SEC-8 sensitive file names (matched exactly, no trailing /*).
 # bin/aidock の case 文で拒否される機密ファイル名の一覧（ディレクトリとして作成して試験する）
 SENSITIVE_FILES=(
-    .gitconfig .git-credentials .netrc .npmrc .pypirc
+    .gitconfig .git-credentials .netrc .npmrc .pypirc .pgpass
 )
 
 # テスト開始を示すヘッダーを出力する
