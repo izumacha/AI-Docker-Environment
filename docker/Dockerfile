@@ -53,8 +53,17 @@ RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
 #      せず常に `groupadd -g "${HOST_GID}" agent` すると、ホストの GID がベースイメージの
 #      既存グループと衝突するユーザー環境で `groupadd: GID '...' already exists` により
 #      docker build が失敗する。
-#   4. ホストと同じ UID・（3 で決まった）GID でホームディレクトリ付きの agent ユーザーを作成する
-#      （シェルは bash）
+#   4. HOST_UID がベースイメージの既存ユーザー（node:22-slim の _apt/messagebus/systemd-network
+#      等、UID_MIN=1000 未満の予約 UID を持つシステムアカウント）と衝突する場合は、docker build を
+#      明示的に失敗させ、原因と対処（別の HOST_UID を使う等）が分かるエラーメッセージを出す。
+#      3 の GID 衝突とは異なり、既存アカウントを黙って再乗っ取り（ホームディレクトリやシェルを
+#      書き換え）すると、そのシステムアカウントの用途を破壊しうるうえ、entrypoint.sh の
+#      `gosu agent` はユーザー名 "agent" を前提にしているため単純な再利用では動作しない。
+#      衝突が無ければ、ホストと同じ UID・（3 で決まった）GID でホームディレクトリ付きの
+#      agent ユーザーを新規作成する（シェルは bash）
+#      （実際には desktop/laptop Linux の UID_MIN は通常 1000 のため、この衝突は稀な
+#      エッジケースだが、無条件の `useradd` に任せると `useradd: UID '...' is not unique`
+#      という汎用的なエラーで終わり、原因が分かりにくい）
 #   5. claude-code の設定ディレクトリと作業ディレクトリを作成する
 #   6. 作成したディレクトリの所有者を agent:（3 で決まったグループ）に変更する（root 所有のままにしない）
 #   7. `~/.gitconfig` と `~/.claude.json`（Claude Code 本体の設定ファイル。`~/.claude/` 配下の
@@ -74,6 +83,12 @@ RUN if id -u node >/dev/null 2>&1; then userdel -r node 2>/dev/null || true; fi 
         AGENT_GROUP="${AGENT_GROUP%%:*}"; \
     else \
         groupadd -g "${HOST_GID}" agent && AGENT_GROUP="agent"; \
+    fi \
+ && if getent passwd "${HOST_UID}" >/dev/null; then \
+        EXISTING_USER="$(getent passwd "${HOST_UID}")"; \
+        EXISTING_USER="${EXISTING_USER%%:*}"; \
+        echo "docker build: HOST_UID=${HOST_UID} collides with existing user '${EXISTING_USER}' in the base image; refusing to reuse it (would break entrypoint.sh's \"gosu agent\") -- pass a different --build-arg HOST_UID" >&2; \
+        exit 1; \
     fi \
  && useradd -l -m -u "${HOST_UID}" -g "${AGENT_GROUP}" -s /bin/bash agent \
  && mkdir -p /home/agent/.claude /workspace \
