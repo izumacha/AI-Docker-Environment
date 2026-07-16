@@ -108,8 +108,8 @@ guard_workspace() {
             echo "aidock: refusing to mount sensitive directory under \$HOME: $pwd_abs" >&2
             exit 2
             ;;
-        # 認証情報ファイル（.gitconfig / .netrc / .npmrc 等）もマウント拒否する
-        .gitconfig|.git-credentials|.netrc|.npmrc|.pypirc)
+        # 認証情報ファイル（.gitconfig / .netrc / .npmrc / .pgpass 等）もマウント拒否する
+        .gitconfig|.git-credentials|.netrc|.npmrc|.pypirc|.pgpass)
             echo "aidock: refusing to mount sensitive file under \$HOME: $pwd_abs" >&2
             exit 2
             ;;
