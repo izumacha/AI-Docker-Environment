@@ -186,6 +186,12 @@ cmd_run() {
     resolved_workspace="$(guard_workspace)"
     # 検証したのと同じ実パスをコンテナの /workspace にマウントするよう設定する（TOCTOU 回避）
     export HOST_WORKSPACE="$resolved_workspace"
+    # 通常起動用の「run」プロファイルを明示的に固定する（SEC-19）。ここで固定しないと、
+    # 呼び出し元シェルにたまたま AIDOCK_PROFILE=login が残っていた場合（例: 直前の
+    # `aidock login` 用に手動 export したまま unset し忘れた等）、compose.yaml の
+    # `${AIDOCK_PROFILE:-run}` 補間がホストの環境変数をそのまま引き継ぎ、通常セッション
+    # なのに OAuth 用ホスト（claude.ai 等）への許可リストが無言で広がってしまう。
+    export AIDOCK_PROFILE="run"
     # 追加引数がある場合はそれをコンテナに渡し、なければデフォルトコマンド（claude）を実行する
     if [[ $# -gt 0 ]]; then
         compose run --rm claude "$@"
@@ -202,6 +208,8 @@ cmd_shell() {
     resolved_workspace="$(guard_workspace)"
     # 検証したのと同じ実パスをコンテナの /workspace にマウントするよう設定する（TOCTOU 回避）
     export HOST_WORKSPACE="$resolved_workspace"
+    # 通常起動用の「run」プロファイルを明示的に固定する（SEC-19、cmd_run() と同じ理由）
+    export AIDOCK_PROFILE="run"
     # コンテナ内で bash シェルを起動する（デバッグ・調査用）
     compose run --rm claude bash
 }
