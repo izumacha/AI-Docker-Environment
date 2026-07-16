@@ -451,6 +451,39 @@ OUT="$(bash "$AIDOCK" firewall-refresh </dev/null 2>&1)" || RC=$?
 assert_exit 1 "firewall-refresh reports failure when compose ps itself fails"
 assert_contains "failed to list containers" "diagnostic message distinguishes compose ps failure from an empty container list"
 
+# --- 10. SEC-19: AIDOCK_PROFILE must not leak from the ambient environment ---
+# `cmd_login()` explicitly sets AIDOCK_PROFILE=login, but `cmd_run()`/`cmd_shell()`
+# used to leave the variable untouched and rely on compose.yaml's own
+# `${AIDOCK_PROFILE:-run}` default. If the calling shell happened to still have
+# AIDOCK_PROFILE=login exported (e.g. left over from a prior `aidock login`
+# session in the same terminal that was never `unset`), that ambient value was
+# inherited unchanged all the way into the container, silently widening the
+# egress allowlist to include OAuth hosts (claude.ai, console.anthropic.com,
+# ...) even for an ordinary `run`/`shell` session -- defeating the
+# profile-based least-privilege design. Assert that `run` and `shell` always
+# pin AIDOCK_PROFILE=run regardless of what the ambient shell exports.
+# docker スタブを、実際にコンテナへ渡る AIDOCK_PROFILE の値を出力するものに差し替える
+cat >"${STUB_DIR}/docker" <<'EOF'
+#!/usr/bin/env bash
+# 呼び出し時点で見えている AIDOCK_PROFILE の値（未設定なら "unset"）を出力する
+printf 'AIDOCK_PROFILE=%s\n' "${AIDOCK_PROFILE:-unset}"
+exit 0
+EOF
+# 上書きしたスタブに実行権限を付与する
+chmod +x "${STUB_DIR}/docker"
+
+# アンビエントに AIDOCK_PROFILE=login を残したまま `run` を実行しても run プロファイルに固定されることを確認する
+RC=0
+OUT="$(cd "${FAKE_HOME}/project/app" && AIDOCK_PROFILE=login bash "$AIDOCK" run </dev/null 2>&1)" || RC=$?
+assert_exit 0 "run succeeds even with ambient AIDOCK_PROFILE=login"
+assert_contains "AIDOCK_PROFILE=run" "run pins AIDOCK_PROFILE=run despite ambient login value (SEC-19)"
+
+# アンビエントに AIDOCK_PROFILE=login を残したまま `shell` を実行しても run プロファイルに固定されることを確認する
+RC=0
+OUT="$(cd "${FAKE_HOME}/project/app" && AIDOCK_PROFILE=login bash "$AIDOCK" shell </dev/null 2>&1)" || RC=$?
+assert_exit 0 "shell succeeds even with ambient AIDOCK_PROFILE=login"
+assert_contains "AIDOCK_PROFILE=run" "shell pins AIDOCK_PROFILE=run despite ambient login value (SEC-19)"
+
 # --- summary ----------------------------------------------------------------
 # パス数とフェイル数を集計してテスト結果の概要を出力する
 printf '\n# %d passed, %d failed\n' "$PASS" "$FAIL"
