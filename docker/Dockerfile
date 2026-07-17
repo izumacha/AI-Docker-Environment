@@ -64,6 +64,13 @@ RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
 #      （実際には desktop/laptop Linux の UID_MIN は通常 1000 のため、この衝突は稀な
 #      エッジケースだが、無条件の `useradd` に任せると `useradd: UID '...' is not unique`
 #      という汎用的なエラーで終わり、原因が分かりにくい）
+#   3a. (3 の追加防御) 再利用しようとした既存グループ名が、node:22-slim にあらかじめ存在する
+#      「読み取り範囲の広いシステムグループ」（shadow=/etc/shadow 読み取り、sudo/adm=ログ・特権関連、
+#      disk=生ブロックデバイス、systemd-journal=ジャーナルログ）のいずれかと一致する場合はビルドを
+#      拒否する。HOST_GID=0 だけを弾く 3 のチェックのみだと、ホストの GID がこれらシステムグループの
+#      GID と偶然一致する環境（複数ユーザー・LDAP 管理の Linux 等で GID が低番号に割り当てられる場合）で、
+#      agent の実質的な読み取り権限が意図せず広がってしまう（このブロック冒頭のコメントが述べる
+#      least-privilege の意図に反する）ため。
 #   5. claude-code の設定ディレクトリと作業ディレクトリを作成する
 #   6. 作成したディレクトリの所有者を agent:（3 で決まったグループ）に変更する（root 所有のままにしない）
 #   7. `~/.gitconfig` と `~/.claude.json`（Claude Code 本体の設定ファイル。`~/.claude/` 配下の
@@ -73,7 +80,12 @@ RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
 #      これらのファイルへ `git config --global` や claude-code 自身の初回起動時保存が
 #      素のままでは失敗する（issue: HOME 直下の設定ファイル書き込み不可）。シンボリックリンク自体は
 #      ビルド時に焼き込む読み取り専用の実体だが、リンク先は既存の tmpfs 内なので実行時に書き込める。
-RUN if id -u node >/dev/null 2>&1; then userdel -r node 2>/dev/null || true; fi \
+# 再利用を拒否するシステムグループ名の一覧（このファイル内で唯一の定義箇所、直下の 3a で使用）。
+# node:22-slim (Debian系) にデフォルトで存在し、そのグループに属するだけで読み取り範囲が
+# 広がる代表的なグループを列挙している。ARG/ENV にせず RUN 内のローカル変数にしているのは、
+# `docker build --build-arg` から上書きしてこの拒否リスト自体を無効化できないようにするため。
+RUN SENSITIVE_GID_REUSE_DENYLIST="shadow,sudo,adm,disk,systemd-journal" \
+ && if id -u node >/dev/null 2>&1; then userdel -r node 2>/dev/null || true; fi \
  && if getent group node >/dev/null; then groupdel node 2>/dev/null || true; fi \
  && if [ "${HOST_GID}" = "0" ]; then \
         echo "docker build: refusing HOST_GID=0 (root); agent's primary group must not be root (SEC-18)" >&2; \
@@ -81,6 +93,12 @@ RUN if id -u node >/dev/null 2>&1; then userdel -r node 2>/dev/null || true; fi 
     elif getent group "${HOST_GID}" >/dev/null; then \
         AGENT_GROUP="$(getent group "${HOST_GID}")"; \
         AGENT_GROUP="${AGENT_GROUP%%:*}"; \
+        case ",${SENSITIVE_GID_REUSE_DENYLIST}," in \
+            *",${AGENT_GROUP},"*) \
+                echo "docker build: HOST_GID=${HOST_GID} collides with the base image's sensitive system group '${AGENT_GROUP}'; refusing to make it agent's primary group (SEC-18 widening) -- pass a different --build-arg HOST_GID" >&2; \
+                exit 1; \
+                ;; \
+        esac; \
     else \
         groupadd -g "${HOST_GID}" agent && AGENT_GROUP="agent"; \
     fi \

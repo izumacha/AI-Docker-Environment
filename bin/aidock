@@ -104,12 +104,12 @@ guard_workspace() {
     #     配下の .config/aws / .config/gcloud / .config/azure / .config/git / .config/gh が一括露出
     #     するため親自体は拒否しつつ、.config/htop 等の非機密サブディレクトリからの起動は許可を維持する（SEC-8）
     case "$rel" in
-        .ssh|.ssh/*|.aws|.aws/*|.gcloud|.gcloud/*|.config|.config/gcloud|.config/gcloud/*|.azure|.azure/*|.config/azure|.config/azure/*|.config/aws|.config/aws/*|.config/git|.config/git/*|.config/gh|.config/gh/*|.config/op|.config/op/*|.config/doctl|.config/doctl/*|.config/rclone|.config/rclone/*|.config/hub|.config/hub/*|.kube|.kube/*|.docker|.docker/*|.gnupg|.gnupg/*)
+        .ssh|.ssh/*|.aws|.aws/*|.gcloud|.gcloud/*|.config|.config/gcloud|.config/gcloud/*|.azure|.azure/*|.config/azure|.config/azure/*|.config/aws|.config/aws/*|.config/git|.config/git/*|.config/gh|.config/gh/*|.config/op|.config/op/*|.config/doctl|.config/doctl/*|.config/rclone|.config/rclone/*|.config/hub|.config/hub/*|.kube|.kube/*|.docker|.docker/*|.gnupg|.gnupg/*|.terraform.d|.terraform.d/*|.cargo|.cargo/*|.m2|.m2/*|.gem|.gem/*)
             echo "aidock: refusing to mount sensitive directory under \$HOME: $pwd_abs" >&2
             exit 2
             ;;
-        # 認証情報ファイル（.gitconfig / .netrc / .npmrc / .pgpass 等）もマウント拒否する
-        .gitconfig|.git-credentials|.netrc|.npmrc|.pypirc|.pgpass)
+        # 認証情報ファイル（.gitconfig / .netrc / .npmrc / .pgpass / .vault-token 等）もマウント拒否する
+        .gitconfig|.git-credentials|.netrc|.npmrc|.pypirc|.pgpass|.vault-token)
             echo "aidock: refusing to mount sensitive file under \$HOME: $pwd_abs" >&2
             exit 2
             ;;

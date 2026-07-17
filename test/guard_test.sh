@@ -194,11 +194,12 @@ SENSITIVE_DIRS=(
     .ssh .aws .gcloud .config/gcloud .azure .config/azure
     .config/aws .config/git .config/gh .config/op .config/doctl
     .config/rclone .config/hub .kube .docker .gnupg
+    .terraform.d .cargo .m2 .gem
 )
 # SEC-8 sensitive file names (matched exactly, no trailing /*).
 # bin/aidock の case 文で拒否される機密ファイル名の一覧（ディレクトリとして作成して試験する）
 SENSITIVE_FILES=(
-    .gitconfig .git-credentials .netrc .npmrc .pypirc .pgpass
+    .gitconfig .git-credentials .netrc .npmrc .pypirc .pgpass .vault-token
 )
 
 # テスト開始を示すヘッダーを出力する

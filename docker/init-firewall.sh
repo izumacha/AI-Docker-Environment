@@ -12,6 +12,23 @@ PROFILE="${AIDOCK_PROFILE:-run}"
 # ログ出力ヘルパー関数: "[firewall]" プレフィックス付きで標準エラー出力に書く
 log() { printf '[firewall] %s\n' "$*" >&2; }
 
+# ipset add を試み、失敗時のみ警告ログを出す共通ヘルパー（DRY: DNS/A レコード/AAAA レコード/CIDR の
+# 6 箇所で「追加を試みて、失敗しても set -e で初期化全体を止めず警告してスキップする」という
+# 同一パターンが重複していたのを一本化した）。呼び出し側で成功件数を数える必要がある箇所（DNS の
+# 2 ループ）向けに、成功時 0・失敗時 1 を終了コードとして返す。
+ipset_add_or_warn() {
+    # 第1引数: 追加先の ipset 名、第2引数: 追加する値（IP または CIDR）、第3引数: 失敗時に出す警告メッセージ
+    local set_name="$1" value="$2" warn_msg="$3"
+    # ipset への追加を試みる（既存なら上書きしない）。成功したら 0 を返す
+    if ipset add "$set_name" "$value" -exist 2>/dev/null; then
+        return 0
+    else
+        # 失敗した場合は警告をログに出し、1 を返す（呼び出し側は set -e で落ちない）
+        log "WARN: $warn_msg"
+        return 1
+    fi
+}
+
 # root ユーザーでなければ iptables を操作できないためエラーで終了する
 if [[ "$(id -u)" -ne 0 ]]; then
     log "must run as root"
@@ -127,11 +144,8 @@ while IFS= read -r ns; do
     [[ -z "$ns" ]] && continue
     # 抽出した IPv4 アドレスを DNS 許可リストに追加する（既存なら上書きしない）。
     # 正常に追加できた場合のみカウンタを増やし、値域外などの不正な形式はスキップして警告する
-    if ipset add allowed-dns "$ns" -exist 2>/dev/null; then
+    if ipset_add_or_warn allowed-dns "$ns" "skipping unparseable IPv4 nameserver: $ns"; then
         dns_count=$((dns_count + 1))
-    else
-        # 不正な形式の IPv4 ネームサーバーアドレスをスキップしてログに記録する
-        log "WARN: skipping unparseable IPv4 nameserver: $ns"
     fi
 done < <(awk '/^nameserver/ { print $2 }' /etc/resolv.conf 2>/dev/null \
     | grep -E '^[0-9]{1,3}(\.[0-9]{1,3}){3}$')
@@ -166,11 +180,8 @@ if (( IPV6 )); then
         # can reach here. Guard the add: an unparseable entry must NOT abort the
         # whole init under set -e -- skip it with a warning instead.
         # 正常に ipset に追加できた場合はカウンタを増やす（不正な形式はスキップして警告する）
-        if ipset add allowed-dns6 "$ns" -exist 2>/dev/null; then
+        if ipset_add_or_warn allowed-dns6 "$ns" "skipping unparseable IPv6 nameserver: $ns"; then
             dns6_count=$((dns6_count + 1))
-        else
-            # 不正な形式の IPv6 ネームサーバーアドレスをスキップしてログに記録する
-            log "WARN: skipping unparseable IPv6 nameserver: $ns"
         fi
     done < <(awk '/^nameserver/ { print $2 }' /etc/resolv.conf 2>/dev/null \
         | grep -E ':')
@@ -214,8 +225,7 @@ resolve_and_add() {
         # set -e -- skip it with a warning instead of letting a single bad
         # entry take down firewall setup for every other host (FR-4.3/4.7).
         # 追加に失敗した場合は初期化全体を止めず、警告を出してスキップする
-        ipset add allowed-hosts "$ip" -exist 2>/dev/null \
-            || log "WARN: ipset rejected A record for $host: $ip"
+        ipset_add_or_warn allowed-hosts "$ip" "ipset rejected A record for $host: $ip" || true
     done <<< "$ips"
     # 追加した IP アドレスをログに記録する
     log "added $host (A) -> $(echo "$ips" | tr '\n' ' ')"
@@ -242,8 +252,7 @@ resolve_and_add6() {
         # Guard the add (mirrors the github-meta v6 path): a scoped/malformed
         # address from getent must not abort init under set -e.
         # ipset への追加を試みる（スコープ付き等の不正形式は警告してスキップする）
-        ipset add allowed-hosts6 "$ip" -exist 2>/dev/null \
-            || log "WARN: ipset rejected AAAA for $host: $ip"
+        ipset_add_or_warn allowed-hosts6 "$ip" "ipset rejected AAAA for $host: $ip" || true
     done <<< "$ips"
     # 追加した IPv6 アドレスをログに記録する
     log "added $host (AAAA) -> $(echo "$ips" | tr '\n' ' ')"
@@ -471,8 +480,7 @@ if [[ -n "$META_JSON" ]]; then
             # setup for every other host (FR-4.5/FR-4.7 best-effort).
             # 追加に失敗しても初期化全体を止めず、警告を出してスキップする（IPv6 側の同種ガードと対称に保つ）
             if cidr_in_range "$cidr"; then
-                ipset add allowed-hosts "$cidr" -exist 2>/dev/null \
-                    || log "WARN: ipset rejected CIDR from github meta: $cidr"
+                ipset_add_or_warn allowed-hosts "$cidr" "ipset rejected CIDR from github meta: $cidr" || true
             else
                 # 値域外の CIDR は警告を出してスキップする（起動は継続する）
                 log "WARN: skipping out-of-range CIDR from github meta: $cidr"
@@ -484,8 +492,7 @@ if [[ -n "$META_JSON" ]]; then
             # プレフィックス長の値域チェックも通過した場合のみ IPv6 許可リストに追加する
             if cidr6_in_range "$cidr"; then
                 # ipset への追加を試みる（不正な形式は警告してスキップする）
-                ipset add allowed-hosts6 "$cidr" -exist 2>/dev/null \
-                    || log "WARN: ipset rejected v6 CIDR from github meta: $cidr"
+                ipset_add_or_warn allowed-hosts6 "$cidr" "ipset rejected v6 CIDR from github meta: $cidr" || true
             else
                 # 値域外の IPv6 CIDR は警告を出してスキップする
                 log "WARN: skipping out-of-range v6 CIDR from github meta: $cidr"
