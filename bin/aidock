@@ -174,8 +174,9 @@ cmd_logout() {
         echo "aidock: logout failed (compose down -v exited $status); credential volume may still exist (check 'docker volume ls')" >&2
         exit "$status"
     fi
-    # 正常にログアウトできたことをユーザーに知らせる
-    echo "aidock: credential volume removed"
+    # 正常にログアウトできたことをユーザーに知らせる（他の aidock: メッセージと同様に stderr へ出力し、
+    # CLAUDE.md §6 の Bash 規約「ログは stderr」との一貫性を保つ）
+    echo "aidock: credential volume removed" >&2
 }
 
 cmd_run() {
