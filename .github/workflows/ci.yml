@@ -37,11 +37,11 @@ jobs:
           hadolint --version
 
       - name: shellcheck
-        run: shellcheck bin/aidock docker/init-firewall.sh docker/entrypoint.sh test/guard_test.sh
+        run: shellcheck bin/aidock docker/init-firewall.sh docker/entrypoint.sh test/guard_test.sh test/entrypoint_test.sh
 
       - name: bash syntax check
         run: |
-          for f in bin/aidock docker/init-firewall.sh docker/entrypoint.sh test/guard_test.sh; do
+          for f in bin/aidock docker/init-firewall.sh docker/entrypoint.sh test/guard_test.sh test/entrypoint_test.sh; do
               bash -n "$f"
           done
 
@@ -50,6 +50,13 @@ jobs:
         # the host home is faked via a getent stub and the container via a docker
         # stub, so this runs in type-check without building the image.
         run: bash test/guard_test.sh
+
+      - name: entrypoint.sh SEC-13 unit tests (AIDOCK_SKIP_FIREWALL / AIDOCK_INSECURE_ACK)
+        # Hermetic, Docker-free: the fail-closed refusal path exits before
+        # reaching init-firewall.sh or gosu; the acknowledged-skip path
+        # explicitly skips init-firewall.sh and only needs a PATH-stubbed
+        # gosu to observe that `exec gosu agent "$@"` was reached.
+        run: bash test/entrypoint_test.sh
 
       - name: hadolint (Dockerfile)
         run: hadolint docker/Dockerfile
