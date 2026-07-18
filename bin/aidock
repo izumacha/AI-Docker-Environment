@@ -108,8 +108,11 @@ guard_workspace() {
             echo "aidock: refusing to mount sensitive directory under \$HOME: $pwd_abs" >&2
             exit 2
             ;;
-        # 認証情報ファイル（.gitconfig / .netrc / .npmrc / .pgpass / .vault-token 等）もマウント拒否する
-        .gitconfig|.git-credentials|.netrc|.npmrc|.pypirc|.pgpass|.vault-token)
+        # 認証情報ファイル（.gitconfig / .netrc / .npmrc / .pgpass / .vault-token / .terraformrc 等）もマウント拒否する
+        # .terraformrc は .terraform.d/credentials.tfrc.json と同じ Terraform Cloud/Enterprise API
+        # トークンを保持しうる CLI 設定ファイル（$HOME 直下に置かれる旧来形式）で、
+        # 既存の .terraform.d ディレクトリ拒否だけではこのファイル単体は防げないため追加する
+        .gitconfig|.git-credentials|.netrc|.npmrc|.pypirc|.pgpass|.vault-token|.terraformrc)
             echo "aidock: refusing to mount sensitive file under \$HOME: $pwd_abs" >&2
             exit 2
             ;;
