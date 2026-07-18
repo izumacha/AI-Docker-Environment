@@ -258,11 +258,28 @@ resolve_and_add6() {
     log "added $host (AAAA) -> $(echo "$ips" | tr '\n' ' ')"
 }
 
+# SEC-12.3: floor on how broad a github-meta-sourced CIDR may be. SEC-12.1/
+# 12.2 only bound the *shape* of a CIDR (regex + per-field numeric range), so
+# a corrupted or maliciously-tampered `/meta` response containing something
+# like `0.0.0.0/0` would pass both checks and get admitted to `allowed-hosts`,
+# defeating the default-deny posture on port 443 for the rest of the session.
+# These floors only ever REJECT entries that SEC-12.1/12.2 would otherwise
+# accept -- they cannot widen the allowlist beyond what those checks already
+# allow. No legitimate GitHub-published range is anywhere near this broad; a
+# /8 is already 16.7M IPv4 addresses.
+# IPv4 CIDR のプレフィックス下限（これより広い netblock は拒否する。SEC-12.3）
+MIN_CIDR_PREFIX_V4=8
+# IPv6 版の下限。RIR の IPv6 割当ポリシー上、単一組織への割当は現実的に /29
+# 前後が上限（それすら極めて大規模な ISP のみ）であり、GitHub の公開レンジが
+# これに近づくことは考えにくい。誤検出を避けるため十分な余裕を持たせて /19
+# を下限とする（SEC-12.3）
+MIN_CIDR6_PREFIX=19
+
 # Range-validate a dotted-quad CIDR beyond its regex shape (SEC-12.2): every
 # octet must be 0-255 and the prefix length 0-32. The caller guarantees the
 # string already matched CIDR_RE, so all five fields are present and numeric.
-# `10#` forces base-10 so values like `010` are not read as octal. Returns 0
-# when valid, 1 otherwise.
+# `10#` forces base-10 so values like `010` are not read as octal. Also
+# enforces the SEC-12.3 minimum-prefix floor. Returns 0 when valid, 1 otherwise.
 cidr_in_range() {
     # 引数で受け取った IPv4 CIDR 文字列が有効な範囲内かを検証する（各オクテット 0-255、プレフィックス 0-32）
     local cidr="$1" o1 o2 o3 o4 plen octet
@@ -274,13 +291,16 @@ cidr_in_range() {
     done
     # プレフィックス長が 32 以下であるか確認する
     (( 10#$plen <= 32 )) || return 1
+    # プレフィックス長が下限（MIN_CIDR_PREFIX_V4）以上であるか確認する（広すぎる netblock を拒否。SEC-12.3）
+    (( 10#$plen >= MIN_CIDR_PREFIX_V4 )) || return 1
     # 全チェックが通ったので有効な CIDR として 0（成功）を返す
     return 0
 }
 
 # Validate an IPv6 CIDR's prefix length (0-128). The caller has already matched
 # the v6 shape regex (hex groups + optional ::, then /prefix), so we only need
-# to bound the prefix here; ipset itself rejects any residual malformed address.
+# to bound the prefix here; ipset itself rejects any residual malformed
+# address. Also enforces the SEC-12.3 minimum-prefix floor.
 cidr6_in_range() {
     # 引数で受け取った IPv6 CIDR のプレフィックス長が 0-128 の範囲内かを検証する
     local cidr="$1" plen="${1##*/}"
@@ -288,6 +308,8 @@ cidr6_in_range() {
     [[ "$cidr" == */* ]] || return 1
     # プレフィックス長が 128 以下であるか確認する（10# で 8 進数読み取りを防ぐ）
     (( 10#$plen <= 128 )) || return 1
+    # プレフィックス長が下限（MIN_CIDR6_PREFIX）以上であるか確認する（広すぎる netblock を拒否。SEC-12.3）
+    (( 10#$plen >= MIN_CIDR6_PREFIX )) || return 1
     # 有効な IPv6 CIDR として 0（成功）を返す
     return 0
 }
