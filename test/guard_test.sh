@@ -174,6 +174,24 @@ assert_contains() {
     fi
 }
 
+# 出力に特定の文字列が含まれ「ない」ことを確認し、結果を PASS/FAIL カウントに反映する関数
+assert_not_contains() {
+    # 出力に含まれてはいけない文字列（針）
+    local needle="$1"
+    # テストの説明文
+    local desc="$2"
+    # OUT に needle が含まれていなければ合格とする
+    if [[ "$OUT" != *"$needle"* ]]; then
+        printf 'ok   - %s\n' "$desc"
+        PASS=$((PASS + 1))
+    else
+        # 含まれてしまっている場合は FAIL を記録し、詳細を出力する
+        printf 'FAIL - %s (output unexpectedly contained %q)\n' "$desc" "$needle"
+        printf '       output: %s\n' "$OUT"
+        FAIL=$((FAIL + 1))
+    fi
+}
+
 # フェイクホーム配下の相対パスから絶対パスを作り、そこから aidock を実行して exit 2 を期待する補助関数
 reject_from() {  # reject_from <relpath-under-fake-home> <desc>
     # フェイクホーム配下の相対パスを受け取る
@@ -532,6 +550,38 @@ RC=0
 OUT="$(cd "${FAKE_HOME}/project/app" && AIDOCK_PROFILE=login bash "$AIDOCK" shell </dev/null 2>&1)" || RC=$?
 assert_exit 0 "shell succeeds even with ambient AIDOCK_PROFILE=login"
 assert_contains "AIDOCK_PROFILE=run" "shell pins AIDOCK_PROFILE=run despite ambient login value (SEC-19)"
+
+# --- 11. FR-1.6: logout must not claim success when compose down -v fails -----
+# `cmd_logout()` は `compose down -v` の終了コードを伝播し、失敗時は
+# (a) success メッセージ（credential volume removed）を出さない、
+# (b) stderr に警告（logout failed ...）を出す、(c) 非ゼロで exit する、
+# ことを契約している（AC-5 / SEC-10 / FR-1.6）。失敗が握りつぶされると、
+# 共有ホスト上で資格情報ボリュームが残ったまま「削除済み」と誤報告されてしまう。
+# docker スタブを「compose down 呼び出しを常に失敗させる」ものに差し替える
+cat >"${STUB_DIR}/docker" <<'EOF'
+#!/usr/bin/env bash
+# 全引数を 1 つの文字列に連結して呼び出し内容を判定する
+args="$*"
+# compose down 呼び出しの場合: Docker デーモン側の失敗を模擬し、常に非ゼロで失敗させる
+if [[ "$args" == *" down "* ]]; then
+    echo "Error response from daemon" >&2
+    exit 1
+fi
+# それ以外の docker 呼び出しは何もせず成功を返す
+exit 0
+EOF
+# 上書きしたスタブに実行権限を付与する
+chmod +x "${STUB_DIR}/docker"
+
+# logout を実行し、compose down -v の失敗が握りつぶされないことを確認する
+RC=0
+OUT="$(bash "$AIDOCK" logout </dev/null 2>&1)" || RC=$?
+# (c) compose down -v の終了コード（1）がそのまま伝播することを確認する
+assert_exit 1 "logout propagates compose down -v failure as non-zero exit (FR-1.6)"
+# (b) stderr に失敗の警告メッセージが出力されることを確認する
+assert_contains "logout failed" "logout warns on stderr when compose down -v fails"
+# (a) 失敗時に success メッセージが出力されないことを確認する
+assert_not_contains "credential volume removed" "logout does not claim success when compose down -v fails"
 
 # --- summary ----------------------------------------------------------------
 # パス数とフェイル数を集計してテスト結果の概要を出力する
