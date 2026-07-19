@@ -426,6 +426,54 @@ OUT="$(bash "$AIDOCK" firewall-refresh </dev/null 2>&1)" || RC=$?
 assert_exit 0 "firewall-refresh finds one-off containers (--all --filter status=running)"
 assert_contains "__AIDOCK_REFRESH_EXEC__" "refresh reached docker exec for the discovered CID"
 
+# --- 8b. FR-1.5: firewall-refresh is best-effort across multiple containers ---
+# FR-1.5 は複数 claude コンテナの並行稼働（例: `run` と `shell`）を想定し、
+# (a) CID を改行連結の単一引数ではなく必ず 1 件ずつ `docker exec` へ渡すこと、
+# (b) あるコンテナの失敗で残りのコンテナの再実行を中断しないこと（best-effort）、
+# (c) 1 件でも失敗があれば最終的に非ゼロ exit すること、を契約している。
+# ここでは docker スタブを「ps は 3 件の CID を返し、exec は 2 件目だけ失敗する」
+# ものに差し替え、3 契約すべてを 1 回の実行で回帰検証する。
+# docker スタブを複数 CID ＋ 途中 1 件失敗の firewall-refresh 試験用に上書きする
+cat >"${STUB_DIR}/docker" <<'EOF'
+#!/usr/bin/env bash
+# 全引数を 1 つの文字列に連結して呼び出し内容を判定する
+args="$*"
+# compose ps 呼び出しの場合: 必須フラグが揃っていれば偽の CID を 3 件（改行区切り）返す
+if [[ "$args" == *" ps "* ]]; then
+    if [[ "$args" == *"--all"* && "$args" == *"--filter status=running"* && "$args" == *"claude"* ]]; then
+        printf 'stub-cid-1\nstub-cid-2\nstub-cid-3\n'
+    fi
+    exit 0
+fi
+# docker exec 呼び出しの場合: 到達を示すセンチネルと引数全体を出力する
+if [[ "$args" == exec* ]]; then
+    printf '__AIDOCK_REFRESH_EXEC__ %s\n' "$args"
+    # 2 件目のコンテナ（stub-cid-2）だけ init-firewall.sh の失敗を模擬して非ゼロで終了する
+    if [[ "$args" == *"stub-cid-2"* ]]; then
+        exit 1
+    fi
+    exit 0
+fi
+# それ以外の docker 呼び出しは何もせず成功を返す
+exit 0
+EOF
+# 上書きしたスタブに実行権限を付与する
+chmod +x "${STUB_DIR}/docker"
+
+# firewall-refresh を実行し、途中 1 件の失敗が best-effort として扱われることを確認する
+RC=0
+OUT="$(bash "$AIDOCK" firewall-refresh </dev/null 2>&1)" || RC=$?
+# (c) 1 件でも失敗があれば最終的に exit 1 になることを確認する
+assert_exit 1 "firewall-refresh exits non-zero when one container's refresh fails"
+# (a) 各 CID が単独の引数として exec に渡ることを、CID ごとの完全な exec 呼び出し文字列で確認する
+#     （改行連結の単一引数だと "exec -u root stub-cid-1 /usr/local/bin/..." という形にはならない）
+assert_contains "__AIDOCK_REFRESH_EXEC__ exec -u root stub-cid-1 /usr/local/bin/init-firewall.sh" "CID 1 passed to docker exec as a single distinct argument"
+assert_contains "__AIDOCK_REFRESH_EXEC__ exec -u root stub-cid-2 /usr/local/bin/init-firewall.sh" "CID 2 (the failing one) still exec'd individually"
+# (b) 2 件目の失敗後も 3 件目のコンテナが exec されること（中断しないこと）を確認する
+assert_contains "__AIDOCK_REFRESH_EXEC__ exec -u root stub-cid-3 /usr/local/bin/init-firewall.sh" "refresh continues to CID 3 after CID 2 fails (best-effort)"
+# 失敗したコンテナについて stderr の診断メッセージが記録されることを確認する
+assert_contains "firewall refresh failed for container stub-cid-2" "failure for CID 2 is reported on stderr"
+
 # --- 9. firewall-refresh: compose ps 自体の失敗を「no running claude container」と
 #        取り違えず、実際の原因（Docker デーモン停止等）を示す診断メッセージにする ---
 # docker スタブを「compose ps 呼び出しを常に失敗させる」ものに差し替え、
