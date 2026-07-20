@@ -140,14 +140,22 @@ cmd_build() {
     compose build "$@"
 }
 
-cmd_login() {
+# cmd_login/cmd_run/cmd_shell 共通の前処理: ホストが root でないことを確認し、
+# ワークスペースを検証してから HOST_WORKSPACE に検証済みの実パスをエクスポートする
+# （3 箇所で同じ 4 行が重複していたのを共通化。§6 DRY）
+prepare_workspace() {
     # ホストが root だと gosu 降格後も capability が残りうるため先に拒否する（SEC-18）
     require_non_root_host
     # ワークスペースが安全かチェックし、検証済みの実パス（symlink 解決済み）を受け取る
     local resolved_workspace
     resolved_workspace="$(guard_workspace)"
-    # 検証したのと同じ実パスをコンテナの /workspace としてマウントするよう設定する（TOCTOU 回避）
+    # 検証したのと同じ実パスをコンテナの /workspace にマウントするよう設定する（TOCTOU 回避）
     export HOST_WORKSPACE="$resolved_workspace"
+}
+
+cmd_login() {
+    # ワークスペースを検証し、検証済みの実パスを HOST_WORKSPACE にエクスポートする（SEC-18・TOCTOU 回避）
+    prepare_workspace
     # ログインプロファイルを設定する（ファイアウォールが OAuth 用ホストへのアクセスを許可する）
     export AIDOCK_PROFILE="login"
     # コンテナ内で `claude /login` を実行して OAuth 認証情報を初期化する
@@ -183,13 +191,8 @@ cmd_logout() {
 }
 
 cmd_run() {
-    # ホストが root だと gosu 降格後も capability が残りうるため先に拒否する（SEC-18）
-    require_non_root_host
-    # ワークスペースが安全かチェックし、検証済みの実パス（symlink 解決済み）を受け取る
-    local resolved_workspace
-    resolved_workspace="$(guard_workspace)"
-    # 検証したのと同じ実パスをコンテナの /workspace にマウントするよう設定する（TOCTOU 回避）
-    export HOST_WORKSPACE="$resolved_workspace"
+    # ワークスペースを検証し、検証済みの実パスを HOST_WORKSPACE にエクスポートする（SEC-18・TOCTOU 回避）
+    prepare_workspace
     # 通常起動用の「run」プロファイルを明示的に固定する（SEC-19）。ここで固定しないと、
     # 呼び出し元シェルにたまたま AIDOCK_PROFILE=login が残っていた場合（例: 直前の
     # `aidock login` 用に手動 export したまま unset し忘れた等）、compose.yaml の
@@ -205,13 +208,8 @@ cmd_run() {
 }
 
 cmd_shell() {
-    # ホストが root だと gosu 降格後も capability が残りうるため先に拒否する（SEC-18）
-    require_non_root_host
-    # ワークスペースが安全かチェックし、検証済みの実パス（symlink 解決済み）を受け取る
-    local resolved_workspace
-    resolved_workspace="$(guard_workspace)"
-    # 検証したのと同じ実パスをコンテナの /workspace にマウントするよう設定する（TOCTOU 回避）
-    export HOST_WORKSPACE="$resolved_workspace"
+    # ワークスペースを検証し、検証済みの実パスを HOST_WORKSPACE にエクスポートする（SEC-18・TOCTOU 回避）
+    prepare_workspace
     # 通常起動用の「run」プロファイルを明示的に固定する（SEC-19、cmd_run() と同じ理由）
     export AIDOCK_PROFILE="run"
     # コンテナ内で bash シェルを起動する（デバッグ・調査用）
