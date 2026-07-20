@@ -119,7 +119,7 @@
 - **発火タイミング**: PR を ready 化して open にした直後、および PR ブランチへ push するたび（初回 PR 作成時を含む）に両スキルを実行する。質問への返信やレビューを要しない状況報告では実行しない。
 - 指摘は対応可否を判断して反映し、対応・見送りの理由をチャット上で報告する。
 - **CI の成否（グリーン）は GitHub MCP（check-runs / status）で取得しチャット上で報告する**（PR コメントでの検証・要約は引き続き FR-9 の Claude Code Action が担う。codex とは別物）。CI（`ci.yml`）から codex へのコメント投稿は元より行わない。
-- **廃止の経緯（記録）**: `chatgpt-codex-connector[bot]` 名義以外（`github-actions[bot]` 等の bot 名義）からの `@codex review` コメントは Codex 側に拒否されるため、ワークフローによる自動投稿は採用しなかった（`.github/workflows/codex-review.yml` を試みたが Codex 側が「create a Codex account」と返却するため撤去済み）。Claude Code の GitHub 操作が izumacha 名義（OWNER）で記録される実行環境では Claude が投稿する `@codex review` も受理されたが、実行環境に依存する不安定な発火条件だったため、組織共通規約の改訂で Claude Code 自身のレビュースキルへ移行した。
+- **旧運用の記録（参考）**: `chatgpt-codex-connector[bot]` 名義以外（`github-actions[bot]` 等の bot 名義）からの `@codex review` コメントは Codex 側に拒否されるため、ワークフローによる自動投稿は採用しなかった（`.github/workflows/codex-review.yml` を試みたが Codex 側が「create a Codex account」と返却するため撤去済み）。Claude Code の GitHub 操作が izumacha 名義（OWNER）で記録される実行環境では Claude が投稿する `@codex review` も受理されたが、実行環境に依存する発火条件だった。組織共通規約（`CLAUDE.md` §13）の改訂により、現在はレビュー主体が Claude Code 自身のレビュースキルへ一本化されている（改訂の内部的な経緯・理由は本書の関知するところではなく、原本テンプレート `izumacha/claude-code-rules` 側の変更履歴を参照）。
 
 ### FR-8: CI ワークフロー
 `.github/workflows/ci.yml`（GitHub Actions）で**型チェック**と **e2e** を実行する。push（全ブランチ）および `main` への pull_request で発火し、`permissions: contents: read` のみを付与する（FR-7 に従い codex へのコメント投稿は行わない）。
