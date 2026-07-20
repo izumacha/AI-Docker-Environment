@@ -14,8 +14,9 @@ services:
         HOST_GID: "${HOST_GID:-1000}"
     # ビルドしたイメージに付けるタグ名
     image: aidock/claude:local
-    # コンテナの PID 1 に軽量な init プロセスを使う（ゾンビプロセス回収のため）
-    init: true
+    # コンテナの PID 1 に軽量な init プロセス（ゾンビプロセス回収用）を使う設定は、
+    # Dockerfile の ENTRYPOINT で明示的に tini をラップしているため、ここでは重複させない
+    # （Docker の init: true を併用すると docker-init → tini の二重ネストになりDRY違反になる）
     # Linux capability（特権操作の権限）をすべて剥奪してから最小限だけ足す
     cap_drop:
       - ALL
