@@ -147,14 +147,13 @@ GitHub Actions で次を実行する。
 
 ## コードレビュー / PR 運用
 
-codex 自動レビュー（`chatgpt-codex-connector[bot]`）をリポジトリレベルで利用する。運用ルールは次のとおり。
+コードレビューは Claude Code のレビュースキル `/code-review ultra` と `/security-review ultra` で行う（`chatgpt-codex-connector[bot]` による codex 自動レビューは廃止済み）。運用ルールは次のとおり。
 
 - **PR は open で作成する**（draft ではない）。
-- **`@codex review` コメントの投稿でレビューが発火**する（Codex 接続済みアカウント名義のみ受理。`github-actions[bot]` 等の bot 名義は拒否されるため、ワークフローによる自動投稿は使わない）。
-- AI アシスタント（Claude Code）が作業する場合は、**差分を push するたびに（初回 PR 作成時を含む）`@codex review` を投稿**して初回・再レビューを発火させる。
+- PR を ready 化して open にした直後、および PR ブランチへ push するたび（初回 PR 作成時を含む）に **`/code-review ultra` と `/security-review ultra` を差分に対して実行**する。指摘は対応可否を判断して反映し、対応・見送りの理由をチャットで報告する。
 - **CI の成否（グリーン）は AI アシスタントが GitHub MCP（check-runs / status）で取得して報告する**。PR コメントでの検証・要約は `post-ci-verify.yml`（FR-9）が引き続き担う。
 
-詳細は `docs/requirements.md` の FR-7、AI アシスタント向けの運用は `CLAUDE.md`「Git ワークフロー」を参照。
+詳細は `docs/requirements.md` の FR-7、AI アシスタント向けの運用は `CLAUDE.md` §13 を参照。
 
 ## ファイル構成
 
