@@ -10,8 +10,13 @@ FROM node:22-slim@sha256:7af03b14a13c8cdd38e45058fd957bf00a72bbe17feac43b1c15a68
 ARG HOST_UID=1000
 # ビルド時引数: コンテナ内 agent ユーザーの GID（ホストのグループと合わせる、既定値 1000）
 ARG HOST_GID=1000
-# ビルド時引数: インストールする claude-code のバージョン（既定値 1.0.40）
-ARG CLAUDE_CODE_VERSION=1.0.40
+# ビルド時引数: インストールする claude-code のバージョン（既定値 2.1.216、npm の latest dist-tag。
+# NFR-5.2 の月次見直しで検出した陳腐化を解消。当初は保守的な stable dist-tag（2.1.206）を検討したが、
+# stable→latest 間の CHANGELOG に permission-check バイパス・fail-open・symlink リダイレクト・
+# プロンプトインジェクション対策等の複数のセキュリティ修正（例: v2.1.210/211/212/214/216）が
+# 含まれることを確認したため、NFR-5.2「CVE 該当時は即時更新」の趣旨に照らし latest を採用する。
+# 更新時は本行と docs/requirements.md §8 改訂履歴を同一 PR で同期する）
+ARG CLAUDE_CODE_VERSION=2.1.216
 
 # 環境変数: apt-get 実行中に対話的な質問プロンプトを出さないようにする（自動ビルドを止めないため）
 ENV DEBIAN_FRONTEND=noninteractive
