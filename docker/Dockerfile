@@ -10,8 +10,9 @@ FROM node:22-slim@sha256:7af03b14a13c8cdd38e45058fd957bf00a72bbe17feac43b1c15a68
 ARG HOST_UID=1000
 # ビルド時引数: コンテナ内 agent ユーザーの GID（ホストのグループと合わせる、既定値 1000）
 ARG HOST_GID=1000
-# ビルド時引数: インストールする claude-code のバージョン（既定値 1.0.40）
-ARG CLAUDE_CODE_VERSION=1.0.40
+# ビルド時引数: インストールする claude-code のバージョン（既定値 2.1.206、npm の stable dist-tag。
+# NFR-5.2 の月次見直しで検出した陳腐化を解消。更新時は本行と docs/requirements.md §8 改訂履歴を同一 PR で同期する）
+ARG CLAUDE_CODE_VERSION=2.1.206
 
 # 環境変数: apt-get 実行中に対話的な質問プロンプトを出さないようにする（自動ビルドを止めないため）
 ENV DEBIAN_FRONTEND=noninteractive
