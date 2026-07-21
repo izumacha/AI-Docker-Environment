@@ -106,6 +106,32 @@ jobs:
       - name: AC-1 build
         run: ./bin/aidock build --progress=plain
 
+      - name: SEC-18 GID-denylist regression (build fails on sensitive group collision)
+        # No automated test previously covered the sensitive-GID-reuse denylist
+        # added to docker/Dockerfile on 2026-07-17 (shadow/sudo/adm/disk/
+        # systemd-journal), so a future regression in that logic (e.g. the
+        # denylist itself being trimmed, or the comparison being loosened)
+        # could ship with CI green (found in a routine code review, see
+        # docs/requirements.md SEC-18). Resolve the "shadow" group's GID
+        # straight from the pinned base image referenced by the Dockerfile's
+        # own FROM line, rather than hardcoding a GID that could drift on a
+        # future node:22-slim rebuild, then assert that building with
+        # HOST_GID set to that GID is refused. Placed right after AC-1 build
+        # so Docker's layer cache reuses the unaffected earlier layers
+        # (base image / apt-get / npm install) and only re-executes the
+        # denylist-check RUN step itself.
+        run: |
+          set +e
+          base_image="$(awk '/^FROM /{print $2; exit}' docker/Dockerfile)"
+          shadow_gid="$(docker run --rm "$base_image" getent group shadow | cut -d: -f3)"
+          echo "shadow GID in base image ($base_image): $shadow_gid"
+          HOST_GID="$shadow_gid" docker compose -f compose.yaml build
+          code=$?
+          set -e
+          echo "docker compose build exit (HOST_GID=shadow's GID): $code"
+          [ "$code" -ne 0 ] || { echo "FAIL: build succeeded despite HOST_GID colliding with the sensitive group 'shadow' (SEC-18 denylist should have rejected it)"; exit 1; }
+          echo "SEC-18 ok: HOST_GID colliding with a sensitive system group is rejected as documented"
+
       - name: AC-2 guard rejects $HOME and /
         run: |
           set +e
