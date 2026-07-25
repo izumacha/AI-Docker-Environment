@@ -103,8 +103,11 @@ guard_workspace() {
     # 注: `.config` は「完全一致のみ」拒否する（`.config/*` は付けない）。親を丸ごとマウントすると
     #     配下の .config/aws / .config/gcloud / .config/azure / .config/git / .config/gh が一括露出
     #     するため親自体は拒否しつつ、.config/htop 等の非機密サブディレクトリからの起動は許可を維持する（SEC-8）
+    # 注: `.claude` は Claude Code の OAuth トークン（`.credentials.json`）を平文で保持するホスト側の
+    #     資格情報ディレクトリ。api.anthropic.com は egress 許可リストに含まれるため、マウントされると
+    #     持ち出しをファイアウォールでも遮断できない（SEC-8）
     case "$rel" in
-        .ssh|.ssh/*|.aws|.aws/*|.gcloud|.gcloud/*|.config|.config/gcloud|.config/gcloud/*|.azure|.azure/*|.config/azure|.config/azure/*|.config/aws|.config/aws/*|.config/git|.config/git/*|.config/gh|.config/gh/*|.config/op|.config/op/*|.config/doctl|.config/doctl/*|.config/rclone|.config/rclone/*|.config/hub|.config/hub/*|.config/github-copilot|.config/github-copilot/*|.kube|.kube/*|.docker|.docker/*|.gnupg|.gnupg/*|.terraform.d|.terraform.d/*|.cargo|.cargo/*|.m2|.m2/*|.gem|.gem/*|.oci|.oci/*|.gradle|.gradle/*)
+        .ssh|.ssh/*|.aws|.aws/*|.gcloud|.gcloud/*|.config|.config/gcloud|.config/gcloud/*|.azure|.azure/*|.config/azure|.config/azure/*|.config/aws|.config/aws/*|.config/git|.config/git/*|.config/gh|.config/gh/*|.config/op|.config/op/*|.config/doctl|.config/doctl/*|.config/rclone|.config/rclone/*|.config/hub|.config/hub/*|.config/github-copilot|.config/github-copilot/*|.claude|.claude/*|.kube|.kube/*|.docker|.docker/*|.gnupg|.gnupg/*|.terraform.d|.terraform.d/*|.cargo|.cargo/*|.m2|.m2/*|.gem|.gem/*|.oci|.oci/*|.gradle|.gradle/*)
             echo "aidock: refusing to mount sensitive directory under \$HOME: $pwd_abs" >&2
             exit 2
             ;;
@@ -112,7 +115,9 @@ guard_workspace() {
         # .terraformrc は .terraform.d/credentials.tfrc.json と同じ Terraform Cloud/Enterprise API
         # トークンを保持しうる CLI 設定ファイル（$HOME 直下に置かれる旧来形式）で、
         # 既存の .terraform.d ディレクトリ拒否だけではこのファイル単体は防げないため追加する
-        .gitconfig|.git-credentials|.netrc|.npmrc|.pypirc|.pgpass|.vault-token|.terraformrc)
+        # .claude.json は Claude Code の設定ファイルで primaryApiKey 等の API キーを保持しうる。
+        # .claude ディレクトリの拒否だけでは $HOME 直下のこのファイル単体は防げないため追加する（SEC-8）
+        .gitconfig|.git-credentials|.netrc|.npmrc|.pypirc|.pgpass|.vault-token|.terraformrc|.claude.json)
             echo "aidock: refusing to mount sensitive file under \$HOME: $pwd_abs" >&2
             exit 2
             ;;
