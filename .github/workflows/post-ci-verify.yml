@@ -78,7 +78,7 @@ jobs:
         # supply-chain risk in this privileged job. SHA resolved authoritatively
         # via `git ls-remote` (the v1 annotated tag peels to this commit) for
         # release v1.0.135. Bump deliberately when upgrading.
-        uses: anthropics/claude-code-action@70a6e5256e9e2366a1ed5c041904a982ba3a328f # v1.0.135
+        uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1.0.183
         env:
           GH_TOKEN: ${{ github.token }}
         with:
