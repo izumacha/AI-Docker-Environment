@@ -1,0 +1,20 @@
+# Dependabot configuration: weekly update PRs for the dependency surfaces of
+# this repo. Keeping GitHub Actions (SHA-pinned per FR-9.6(b)) and the Docker
+# base image current is part of the supply-chain requirements (CLAUDE.md §9).
+version: 2
+updates:
+  # GitHub Actions used by ci.yml / post-ci-verify.yml (updates SHA pins too)
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      # Collapse minor/patch bumps into a single PR to reduce review noise
+      actions-minor-and-patch:
+        update-types: ["minor", "patch"]
+
+  # Base image of docker/Dockerfile (node:22-slim)
+  - package-ecosystem: "docker"
+    directory: "/docker"
+    schedule:
+      interval: "weekly"
