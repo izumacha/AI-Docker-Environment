@@ -22,7 +22,7 @@ jobs:
       SHELLCHECK_VERSION: "0.11.0"
       HADOLINT_VERSION: "2.14.0"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install pinned lint tools
         run: |
@@ -86,7 +86,7 @@ jobs:
     needs: type-check
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Pin build/runtime UID/GID and workspace
         run: |
