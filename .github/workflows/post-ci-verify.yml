@@ -26,9 +26,25 @@ jobs:
     if: >-
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'pull_request'
+    env:
+      # The secrets context cannot be used in the job-level `if:`, so surface
+      # the presence of CLAUDE_CODE_OAUTH_TOKEN once as a job env var and gate
+      # every step on it consistently. Without the secret the Claude step
+      # cannot authenticate (FR-9.3) and used to fail the whole run; skipping
+      # instead keeps the workflow green until the secret is registered
+      # (FR-9.3.1).
+      CLAUDE_OAUTH_TOKEN_AVAILABLE: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
     steps:
+      - name: Notice when CLAUDE_CODE_OAUTH_TOKEN is missing
+        if: env.CLAUDE_OAUTH_TOKEN_AVAILABLE != 'true'
+        run: >-
+          echo "::notice::CLAUDE_CODE_OAUTH_TOKEN secret is not configured;
+          skipping Claude verification (FR-9.3). Register the secret to enable
+          the PR summary comment."
+
       - name: Resolve PR number
         id: pr
+        if: env.CLAUDE_OAUTH_TOKEN_AVAILABLE == 'true'
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         with:
           script: |
@@ -57,7 +73,7 @@ jobs:
       # untrusted PR content must not enter the workspace. The agent only reads
       # CI results and comments, both via gh.
       - name: Claude verifies and comments
-        if: steps.pr.outputs.number != ''
+        if: env.CLAUDE_OAUTH_TOKEN_AVAILABLE == 'true' && steps.pr.outputs.number != ''
         # Pinned to a full commit SHA (not the mutable v1 tag) to avoid a
         # supply-chain risk in this privileged job. SHA resolved authoritatively
         # via `git ls-remote` (the v1 annotated tag peels to this commit) for

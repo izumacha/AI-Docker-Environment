@@ -140,6 +140,7 @@
 - FR-9.1: トリガは `workflow_run`（`workflows: ["CI"]`, `types: [completed]`）。`github.event.workflow_run.conclusion == 'success'` かつ `event == 'pull_request'` のときのみ実行する。
 - FR-9.2: PR 番号は `workflow_run.pull_requests[0].number` で解決する。空の場合のフォールバックは **同一リポジトリ実行（`head_repository.full_name == owner/repo`）に限定**し、`head_branch` の open PR のうち **`head.sha == workflow_run.head_sha` に一致する PR** を選ぶ（同名 head ブランチの複数 PR で誤った相手にコメントしないため）。fork PR は `pull_requests[]` が空かつ同一リポジトリ判定で弾かれ実質スキップ（セキュリティ上も望ましい）。
 - FR-9.3: 認証は **Claude GitHub App + OAuth**。リポジトリ secret `CLAUDE_CODE_OAUTH_TOKEN` を `claude_code_oauth_token` 入力で渡す（代替として `ANTHROPIC_API_KEY` + `anthropic_api_key` も可）。当該 secret は **GitHub Actions secret** でありイメージ層・コンテナには持ち込まない（SEC-10 と整合）。`permissions` は `contents: read` / `pull-requests: write` / `actions: read` / `id-token: write`（最後は Claude GitHub App の OIDC 用。FR-9.6(d) 参照）。
+- FR-9.3.1: **secret 未登録時は graceful skip**。`CLAUDE_CODE_OAUTH_TOKEN` が未登録の環境では、検証 step を実行せず `::notice::` を出力してジョブを**成功のままスキップ**する（登録すれば自動で有効化）。secrets コンテキストは job レベルの `if:` では参照できないため、job の `env` で存在フラグ（`CLAUDE_OAUTH_TOKEN_AVAILABLE`）へ一度だけ変換し、全 step を同じフラグで一貫して gate する。**経緯**: 従来は secret 未登録のまま検証 step が実行され、action の環境変数検証（`Either ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN, ... is required`）で**ジョブが失敗（赤）**し続けていた（2026-07 の定例棚卸しで検出）。本ワークフローは PR への要約コメントという付加機能であり、認証情報が無い環境で CI 全体の健全性表示を汚さないことを優先する（機能縮退で継続する fail-safe。egress ファイアウォール等のセキュリティ境界の fail-closed 原則とは対象が異なる）。
 - FR-9.4: エージェントは type-check / e2e（AC-1〜AC-4 / AC-7）の結果を検証・要約し、PR に**コメント1件**を投稿する。**コミット・ファイル変更・push は行わない**（CI は push/PR でのみ発火し、コメントでは再発火しないため無限ループしない）。
 - FR-9.5: `workflow_run` は**デフォルトブランチ（`main`）上のワークフローのみ発火**する。本ワークフローは `main` マージ後の PR から有効になる。
 - FR-9.6: 特権ワークフロー（`pull-requests: write` ＋ secret）の堅牢化として、(a) PR head を **checkout しない**（非信頼コードをワークスペースに展開しない）、(b) action は **可変タグではなくフル commit SHA へピン**する（供給網リスク回避）。`claude-code-action` は `git ls-remote` で v1 annotated タグから解決した v1.0.135 = `70a6e525…`、`actions/github-script` は v7.1.0 = `f28e40c7…` にピン済み（#17 で確定）、(c) Claude のツールを **`gh run view` / `gh pr comment` に限定**する（`--allowedTools`）。なお action は `GH_TOKEN` を Claude App トークンへ上書きし、その既定スコープに Actions read が含まれないため、`gh run view`（private repo で必須）向けに **`additional_permissions: actions: read`** を明示付与する、(d) `github_token` 入力を省略し **Claude GitHub App 認証**を用いるため、**`permissions: id-token: write`** を付与済み（OIDC トークン交換に必須。未付与だと検証 step が認証失敗）。secret `CLAUDE_CODE_OAUTH_TOKEN` 登録後に有効化（#17）。
@@ -286,6 +287,7 @@ SEC-15 が iptables/ipset 層で残していた **query 名 exfiltration** の�
 
 ### AC-9: CI 後検証エージェント
 - `main` 上で `CI` が PR に対して成功すると、`.github/workflows/post-ci-verify.yml`（FR-9）が起動し、Claude が type-check / e2e の結果を検証・要約して PR に**コメント1件**を投稿する。
+- secret `CLAUDE_CODE_OAUTH_TOKEN` が未登録の場合、verify ジョブは検証 step をスキップして**成功（グリーン）のまま完了**し、`::notice::` で未登録を告知する（FR-9.3.1。ジョブを失敗にしない）。
 - 当該ワークフローはコメントのみで、コミット・push は行わない。`CLAUDE_CODE_OAUTH_TOKEN` secret が前提。
 - `workflow_run` の仕様上、`main` にマージされるまでは発火しない（PR ブランチ単独では検証不可）。
 
