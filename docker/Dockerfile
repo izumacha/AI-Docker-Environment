@@ -4,7 +4,7 @@
 # the digest is authoritative. Refresh both together when bumping Node
 # (NFR-5.2) by re-resolving `docker buildx imagetools inspect node:22-slim`.
 # ベースイメージを取得する（タグではなく digest 固定で、後日 node:22-slim の中身が変わっても同じイメージを使い続ける）
-FROM node:22-slim@sha256:7af03b14a13c8cdd38e45058fd957bf00a72bbe17feac43b1c15a689c029c732
+FROM node:25-slim@sha256:81db02c4b671288a03915da9534dbd54f96d0e7c24d80ccc54f5b36b2e684370
 
 # ビルド時引数: コンテナ内 agent ユーザーの UID（ホストのユーザーと合わせてファイル所有権のズレを防ぐ、既定値 1000）
 ARG HOST_UID=1000
