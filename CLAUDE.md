@@ -262,8 +262,9 @@ OAuth トークンは必ず名前付きボリューム `claude-home` に置き�
 
 ### A. profile-portfolio（静的 HTML/CSS/JS, GitHub Pages）
 
-- ビルドツール・パッケージマネージャを使わない。確認は `open index.html` または `python -m http.server 8000`。
-- ファイル構成: `index.html`（ダークテーマ）/ `resume.html`（ライトテーマ・印刷対応）。
+- **サイト本体にページ生成のビルドステップは無い**（`index.html` / `resume.html` をそのまま配信する）。表示確認は `open index.html` または `python -m http.server 8000`。
+- 一方で検証・撮影用に npm ベースの開発ツール（html-validate / Playwright ビジュアルリグレッション / Lighthouse CI / スクショ自動撮影）を持つ。`package.json` ・ `package-lock.json` はコミットし、検証は `npm ci` の後に CI と同じコマンド（`npx html-validate` / `npm run test:e2e` / `npm run test:lighthouse`）で流す。
+- ファイル構成: `index.html`（ダークテーマ）/ `resume.html`（ライトテーマ・印刷対応）/ `data/portfolio.json`（表示データ）/ `e2e/`（ビジュアルリグレッション）/ `scripts/`（スクショ・デモ GIF の自動撮影）。
 - 色の変更は `:root` の CSS 変数（`--primary`, `--accent`, `--bg-dark` 等）経由。個別要素にカラーコードを直書きしない。
 - レスポンシブ: ブレークポイント 968px（タブレット）・768px（モバイル）。グリッドは `auto-fit, minmax()` でメディアクエリを最小化。フォントは `clamp()` で流体タイポグラフィを適用。
 - CSS は BEM 風命名（`.section-header` 等）、JS は Vanilla のみ（外部ライブラリを追加しない）。a11y の基本（セマンティック HTML・`alt`・外部リンクの `rel`・`lang`）は §7 に従う（この repo は日本語 UI なので `lang="ja"`）。
@@ -275,7 +276,7 @@ OAuth トークンは必ず名前付きボリューム `claude-home` に置き�
 - デザイントークン（配色・フォント・余白・カレンダー寸法）は `theme.py` に一元化。見た目の値をコードに直書きしない。
 - 繰り返しタスクは「完了した時点」を起点に日/週/月/年で再スケジュール（月末日・うるう年はクランプ）。
 - 言語・プラットフォーム非依存の繰り返し契約は `contract/recurrence_cases.json` を真実の源とし、契約駆動テスト（`test_recurrence_contract.py`）で検証。Web/スマホ版も同一契約に従う。
-- tkinter の `StringVar` / `IntVar` はテスト用 `_DummyVar` で代替し、`_create_app()` ファクトリでモック済みインスタンスを生成（Tk 無しでテスト可能）。
+- tkinter の `StringVar` / `IntVar` はテスト用 `_DummyVar` で代替し、`AppTestCase._app()` ファクトリ（`tests/test_planner.py`）でモック済みインスタンスを生成（Tk 無しでテスト可能）。
 - 入力検証は `_coerce_int()` パターン（範囲外→クランプ、非数値→デフォルト）。
 - 今日のタスクは Treeview でなく `tk.Canvas` の「デイビュー」で描画し、位置・高さは分→px 換算（`HOUR_HEIGHT`）で Canvas 実サイズに依存させない。
 - クロスプラットフォーム: 音/通知は macOS(`afplay`)・Windows(`winsound`)・Linux(`notify-send`+`tk.bell()`)を `platform.system()` で分岐。`cairosvg` はオプション依存で `ImportError` 時 graceful degradation。
@@ -286,7 +287,7 @@ OAuth トークンは必ず名前付きボリューム `claude-home` に置き�
 - モデル名（`claude-sonnet-4-6` 等）は環境変数または定数で管理しハードコードしない。`max_tokens` 既定 1024、長文が必要なカテゴリは `prompts.ts` で個別設定。
 - `POST /api/chat` が唯一の API。Claude へのストリーミングプロキシで、`ANTHROPIC_API_KEY` はサーバ側環境変数から取得しフロントに露出させない。
 - API ルートに簡易レート制限（IP ベース、1 分あたり 20 リクエスト目安）。
-- API ルートのエラーは HTTP ステータスを使い分け: 401（キー未設定/無効）/ 429（レート制限超過）/ 500（その他）。フロントはユーザーフレンドリーな日本語メッセージを表示。
+- API ルートのエラーは HTTP ステータスを使い分け: 400（JSON 破損・入力検証エラー・上流 Claude API の 400）/ 401（キー未設定/無効）/ 413（本文サイズ上限超過）/ 415（`Content-Type` が `application/json` でない。**レート制限より前に**検証し、第三者サイトの simple request で被害者 IP のレート枠が枯渇するのを防ぐ）/ 429（レート制限超過。`Retry-After` ヘッダ付き）/ 499（接続確立前のクライアント切断）/ 500（その他）。文言は `route.ts` の `ERROR_MESSAGES` に一元管理し、フロントはユーザーフレンドリーな日本語メッセージを表示。
 
 ### D. helpdesk-hub（Next.js 15 / Prisma / Auth.js v5）
 
@@ -331,9 +332,10 @@ OAuth トークンは必ず名前付きボリューム `claude-home` に置き�
 - MVP 非目標（non-goals）: スケジューリング・並列実行・分散。
 - テストは `src/test/java/...` の各クラス対応（`BatchConfigLoaderTest` / `BatchExecutorTest` / `DependencyGraphTest` 等）。CI は `mvn -B verify`（Java 21 / Temurin）。
 
-### H. Expense-Management-Rest-API（Java 21 / Spring Boot + C# .NET 10, REST API）
+### H. Expense-Management-Rest-API（Java 21 / Spring Boot, REST API）
 
-- **主軸 `expense-tracker/`**: Java 21 / Spring Boot 3.3.5 / PostgreSQL 16 / Maven / Docker の REST API。金額は `BigDecimal` を使い浮動小数誤差を避ける。レスポンスは JSON、エラー形式は `{ "status": int, "message": string }`、入力検証は Jakarta Bean Validation。
-- **副 `src/` / `tests/`**: C# .NET 10 / Clean Architecture スキャフォールド（AgentForge）。現状は雛形段階。実装より先に `docs/DESIGN.md` の設計に従う。
+- Java 21 / Spring Boot 3.3.5 / PostgreSQL 16 / Maven / Docker の REST API 単一プロジェクト。アプリ一式（`pom.xml` ・ `src/` ・ `Dockerfile` ・ `docker-compose.yml`）をリポジトリ直下に置く。金額は `BigDecimal` を使い浮動小数誤差を避ける。レスポンスは JSON、エラー形式は `{ "status": int, "message": string }`、入力検証は Jakarta Bean Validation。
+- 課題の棚卸しは `docs/issue-analysis.md`（機能面・セキュリティ面の分析）。
 - 層構成: `controller/` → `service/` → `repository/`（Spring Data JPA）→ `domain/`（JPA エンティティ）。`dto/request/` と `dto/response/` を分離し内部エンティティを API 契約から切り離す。`GlobalExceptionHandler` がカスタム例外を HTTP ステータスへマップ。
-- CI は `.github/workflows/ci.yml` で Java 側（lint + build-test）と .NET 側（build-test）を実行。
+- 横断的関心事は `web/`（エラー応答の共通整形・ページング入力の無害化・リクエスト本文サイズ上限）・`security/`（IP ベースのレート制限フィルタ）・`validation/`（コードポイント単位の文字数検証・カテゴリ名の NFC 正規化）に分ける。
+- CI は `.github/workflows/ci.yml` の `build-test` ジョブ 1 本で `./mvnw -B verify`（Temurin JDK 21）を実行する。`repository/` 配下のテストは Testcontainers で PostgreSQL を起動するため Docker デーモンが必要。
