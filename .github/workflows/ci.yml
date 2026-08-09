@@ -37,11 +37,11 @@ jobs:
           hadolint --version
 
       - name: shellcheck
-        run: shellcheck bin/aidock docker/init-firewall.sh docker/entrypoint.sh test/guard_test.sh test/entrypoint_test.sh
+        run: shellcheck bin/aidock docker/init-firewall.sh docker/entrypoint.sh test/guard_test.sh test/entrypoint_test.sh test/action_pin_test.sh
 
       - name: bash syntax check
         run: |
-          for f in bin/aidock docker/init-firewall.sh docker/entrypoint.sh test/guard_test.sh test/entrypoint_test.sh; do
+          for f in bin/aidock docker/init-firewall.sh docker/entrypoint.sh test/guard_test.sh test/entrypoint_test.sh test/action_pin_test.sh; do
               bash -n "$f"
           done
 
@@ -50,6 +50,14 @@ jobs:
         # the host home is faked via a getent stub and the container via a docker
         # stub, so this runs in type-check without building the image.
         run: bash test/guard_test.sh
+
+      - name: action pin / marker agreement (FR-9.6b)
+        # Not hermetic: resolves each pinned action's release tag upstream, so
+        # this needs network (as does the lint-tool install step above). Kept
+        # in type-check rather than e2e because it needs no Docker build and
+        # gives the fastest signal on a bad pin. Fails closed -- an
+        # unresolvable tag is a failure, never a silent skip.
+        run: bash test/action_pin_test.sh
 
       - name: entrypoint.sh SEC-13 unit tests (AIDOCK_SKIP_FIREWALL / AIDOCK_INSECURE_ACK)
         # Hermetic, Docker-free: the fail-closed refusal path exits before

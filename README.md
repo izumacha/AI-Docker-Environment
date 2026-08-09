@@ -141,7 +141,7 @@ GitHub Actions で次を実行する。
 - **`ci.yml`**
   - **type-check**: `shellcheck`（全シェルスクリプト）/ `hadolint`（`docker/Dockerfile`）/ `docker compose config`（`compose.yaml` 妥当性検証）。
   - **e2e**: イメージをビルドし、GitHub-hosted runner 上で受け入れ基準を実機検証する（`$HOME` / `/` 起動拒否、firewall プローブ、`agent` 権限・`sudo` 不在・capability 制限、資格情報ボリューム所有権）。
-- **`post-ci-verify.yml`**: CI 成功後に Claude Code Action（`anthropics/claude-code-action@v1`）が起動し、結果を検証・要約して PR にコメントする。認証は Claude GitHub App + `CLAUDE_CODE_OAUTH_TOKEN` secret。`workflow_run` の仕様上 `main` マージ後に有効。
+- **`post-ci-verify.yml`**: CI 成功後に Claude Code Action（`anthropics/claude-code-action`、SHA ピン）が起動し、結果を検証・要約して PR にコメントする。認証は Claude GitHub App + `CLAUDE_CODE_OAUTH_TOKEN` secret。`workflow_run` の仕様上 `main` マージ後に有効。
 
 詳細・受け入れ基準は `docs/requirements.md` の FR-8 / FR-9 / AC-8 / AC-9 を参照。
 
