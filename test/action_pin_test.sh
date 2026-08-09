@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # action_pin_test.sh - enforces FR-9.6(b): every action used by a privileged
-# workflow is pinned to a full commit SHA, and every SHA pin anywhere under
+# workflow is pinned immutably, and every SHA pin anywhere under
 # .github/workflows/ still resolves to the release named by its `# vX.Y.Z`
 # marker.
 #
@@ -16,14 +16,22 @@
 # against a perfectly good SHA, and is pushed toward the exact failure FR-9.6
 # exists to prevent: "correcting" a sound pin, or distrusting it.
 #
-# The rule is scoped to the *workflow*, not to a list of action names. Two
-# earlier drafts of this script failed here, both because absence read as
-# compliance: matching only lines that already carry a 40-hex SHA meant an
-# action reverted to `@v1` stopped matching and passed, and naming the two
-# known actions meant a newly added third one could use a moving tag and pass.
-# Requiring that *every* `uses:` in a privileged workflow be SHA-pinned closes
-# both: adding an unpinned action is a failure, and so is de-pinning an
-# existing one.
+# Everything here is shaped by one recurring failure: absence reading as
+# compliance. Successive drafts of this script each passed something they
+# should have caught, because the thing to catch had dropped out of the set
+# being looked at -- an action reverted to `@v1` stopped matching a "find the
+# SHA pins" pattern; a newly added action was not on a list of known action
+# names; a `docker://` step has no `@` to match; a brand-new privileged
+# workflow was not on a list of known filenames. So the checks here are
+# written to enumerate obligations, not sightings:
+#
+#   - privilege is DERIVED from each workflow's own permissions/secrets, not
+#     from a filename list, and a workflow with no explicit `permissions:` is
+#     treated as privileged (the repository default may grant write);
+#   - EVERY `uses:` in a privileged workflow must be immutably pinned, whatever
+#     its form, so a new unpinned entry is a failure rather than a non-match;
+#   - a privileged workflow that goes missing, or yields no `uses:` at all, is
+#     a failure rather than a quiet zero.
 #
 # Non-privileged workflows (ci.yml) are outside FR-9.6(b), which scopes the
 # pinning duty to the privileged job -- ci.yml legitimately uses mutable tags
@@ -51,10 +59,9 @@ REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." &>/dev/null && pwd)"
 # 検査対象となるワークフロー定義の置き場所を決める
 WORKFLOW_DIR="${REPO_ROOT}/.github/workflows"
 
-# FR-9.6(b) が SHA ピンを義務づける特権ワークフロー（`pull-requests: write` ＋ secret を持つもの）。
-# ここに挙げたファイルでは「すべての `uses:`」がピン済みであることを求めるため、
-# action を新しく足して可変タグのままにした場合も失敗として検出できる
-PRIVILEGED_WORKFLOWS=(
+# 必ず特権として扱うワークフローの下限リスト（自動判定が取りこぼしても検査を緩めないための保険）。
+# 通常はファイル内容からの判定で足りるが、FR-9.6(b) が名指しする本体だけは明示的に固定する
+ALWAYS_PRIVILEGED=(
     "post-ci-verify.yml"
 )
 
@@ -86,18 +93,59 @@ fail() {
     FAIL=$((FAIL + 1))
 }
 
+# 渡されたワークフローが「特権」かどうかをファイルの内容から判定する関数
+# 第 1 引数: ワークフローファイルのパス
+# 特権と判定したら 0 を返す（ファイル名の一覧に頼らないことで、新設された特権ジョブも拾える）
+is_privileged_workflow() {
+    # 判定対象のファイルパスを変数に入れる
+    local path="$1"
+    # 表示・比較に使う短いファイル名を求める
+    local name
+    name="$(basename "$path")"
+
+    # 下限リストに載っているファイルは、内容にかかわらず必ず特権として扱う
+    local always
+    for always in "${ALWAYS_PRIVILEGED[@]}"; do
+        if [[ "$name" == "$always" ]]; then
+            return 0
+        fi
+    done
+
+    # secret を参照するワークフローは、漏洩すれば影響が出るため特権として扱う
+    if grep -qE 'secrets\.[A-Za-z_]' "$path"; then
+        return 0
+    fi
+
+    # 書き込み権限（`... : write`）を明示的に与えているワークフローは特権として扱う
+    if grep -qE '^[[:space:]]*[a-z-]+:[[:space:]]*write[[:space:]]*$' "$path"; then
+        return 0
+    fi
+
+    # `permissions:` の宣言自体が無い場合、既定値がリポジトリ設定次第で書き込み可能になりうるため、
+    # 安全側に倒して特権として扱う（不明なら拒否＝fail-closed の方針に合わせる）
+    if ! grep -qE '^[[:space:]]*permissions:' "$path"; then
+        return 0
+    fi
+
+    # 上記のいずれにも当たらなければ、明示的に読み取り専用の非特権ワークフローと判断する
+    return 1
+}
+
 # 指定したリポジトリのタグが指しているコミット SHA を求める関数
 # 第 1 引数: リポジトリの URL / 第 2 引数: タグ名（例 v1.0.186）
 # 解決できたら SHA を出力して 0 を返す。
 # 戻り値 2 = 上流に到達できたがタグが存在しない（マーカーの綴り誤り等。再試行しても無駄）
 # 戻り値 3 = 上流に到達できない（通信断・時間切れ。再試行済み）
+# 戻り値 4 = リポジトリ自体に到達できない（改名・削除・非公開。再試行しても無駄）
 resolve_tag_commit() {
     # 引数で受け取ったリポジトリ URL を変数に入れる
     local url="$1"
     # 引数で受け取ったタグ名を変数に入れる
     local tag="$2"
-    # ls-remote の出力と終了コードを受け取る変数をあらかじめ用意する
-    local out rc attempt
+    # ls-remote の出力・エラー出力・終了コードを受け取る変数をあらかじめ用意する
+    local out err rc attempt
+    # エラー出力を一時的に受け取るファイルを作る（原因の切り分けに使う）
+    err="$(mktemp)"
 
     # 到達できない場合に備えて、指定回数まで間隔を空けて問い合わせをやり直す
     for ((attempt = 1; attempt <= LS_REMOTE_ATTEMPTS; attempt++)); do
@@ -107,12 +155,20 @@ resolve_tag_commit() {
         # 一方の種類でだけ 0 行になる（上流は両方の種類を混在させている）。
         # 応答が返らない場合に備えて timeout で頭打ちにする
         rc=0
-        out="$(timeout "${LS_REMOTE_TIMEOUT_SECONDS}" \
-            git ls-remote "$url" "refs/tags/${tag}" "refs/tags/${tag}^{}" 2>/dev/null)" || rc=$?
+        out="$(GIT_TERMINAL_PROMPT=0 timeout "${LS_REMOTE_TIMEOUT_SECONDS}" \
+            git ls-remote "$url" "refs/tags/${tag}" "refs/tags/${tag}^{}" 2>"$err")" || rc=$?
 
         # 問い合わせが成功した（＝上流に到達できた）ならループを抜けて結果を解釈する
         if [[ "$rc" -eq 0 ]]; then
             break
+        fi
+
+        # リポジトリが見つからない／権限が無い場合は、待って試し直しても結果は変わらないので即座に打ち切る。
+        # GitHub は存在しないリポジトリの有無を伏せるため 404 ではなく認証要求を返す。
+        # そのため「認証情報を求められた」を、改名・削除・非公開の合図として扱う
+        if grep -qiE 'could not read Username|Authentication failed|repository not found|not found' "$err"; then
+            rm -f "$err"
+            return 4
         fi
 
         # まだ試行回数が残っていれば、少し待ってからやり直す（一時的な通信断の吸収）
@@ -120,6 +176,9 @@ resolve_tag_commit() {
             sleep $((attempt * 2))
         fi
     done
+
+    # 一時ファイルはここまでで役目を終えるので削除する
+    rm -f "$err"
 
     # 規定回数試しても到達できなかった場合は「到達不能」として呼び出し側に知らせる
     if [[ "$rc" -ne 0 ]]; then
@@ -143,38 +202,12 @@ resolve_tag_commit() {
     printf '%s' "$resolved"
 }
 
-# 1 行の `uses:` を検査する関数
-# 第 1 引数: ワークフローのファイル名 / 第 2 引数: 行番号 / 第 3 引数: 行の内容
-# 第 4 引数: その行が特権ワークフローのものなら "privileged"、それ以外は "plain"
-check_uses_line() {
+# SHA ピンされた action 参照について、マーカーとの整合を検証する関数
+# 第 1 引数: 表示用ラベル / 第 2 引数: owner/repo[/path] / 第 3 引数: ピンされた SHA / 第 4 引数: マーカー
+verify_marker_against_pin() {
     # 引数をそれぞれ意味の分かる名前の変数に取り出す
-    local wf_name="$1" lineno="$2" content="$3" scope="$4"
-    local ref action pinned marker label repo_slug actual rc
-
-    # `uses:` の値（`@` より後ろの参照部分を含む全体）を取り出す
-    ref="$(printf '%s' "$content" | sed -E 's/^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*([^[:space:]]+).*/\2/')"
-    # YAML では値を引用符で囲めるため、URL に混入しないよう `'` と `"` を取り除く
-    ref="${ref//\'/}"
-    ref="${ref//\"/}"
-    # `@` の前の部分（owner/repo あるいは owner/repo/path）を取り出す
-    action="${ref%%@*}"
-    # `@` の後ろの部分（コミット SHA か、v1 のような可変タグ）を取り出す
-    pinned="${ref##*@}"
-    # 行末のコメントに書かれたバージョンマーカー（例 v1.0.186）を取り出す
-    marker="$(printf '%s' "$content" | sed -nE 's/.*#[[:space:]]*(v[0-9][^[:space:]]*).*/\1/p')"
-    # 表示用に「ファイル名:行番号 の action 名」という短いラベルを組み立てる
-    label="${wf_name}:${lineno} ${action}"
-
-    # 参照が 40 桁の 16 進数（＝コミット SHA）かどうかを判定する
-    if [[ ! "$pinned" =~ ^[0-9a-f]{40}$ ]]; then
-        # 特権ワークフローでは可変タグ参照そのものが FR-9.6(b) 違反なので失敗させる
-        if [[ "$scope" == "privileged" ]]; then
-            fail "${label} is pinned to a full commit SHA (FR-9.6(b))" \
-                "referenced by the mutable ref '${pinned}'; every action in a privileged workflow must be pinned to a 40-char commit SHA"
-        fi
-        # 非特権ワークフローの可変タグは FR-9.6(b) の対象外なので、何も言わず次へ進む
-        return 0
-    fi
+    local label="$1" action="$2" pinned="$3" marker="$4"
+    local repo_slug actual rc
 
     # `owner/repo/path@ref`（サブディレクトリ指定）も正式な書き方なので、
     # clone 先の URL には先頭 2 セグメント（owner/repo）だけを使う
@@ -191,7 +224,7 @@ check_uses_line() {
     # マーカーが無いとどの版にピンしているか機械的に判定できないため、失敗として扱う
     if [[ -z "$marker" ]]; then
         fail "${label} has a version marker" \
-            "SHA-pinned but no trailing '# vX.Y.Z' marker; FR-9.6(b) makes that marker the source of truth for the pinned release"
+            "SHA-pinned but no trailing version marker (e.g. '# v1.2.3'); FR-9.6(b) makes that marker the source of truth for the pinned release"
         return 0
     fi
 
@@ -203,6 +236,13 @@ check_uses_line() {
     if [[ "$rc" -eq 2 ]]; then
         fail "${label} marker ${marker} exists upstream" \
             "https://github.com/${repo_slug} has no tag '${marker}'; the marker names a release that does not exist (typo?), or it was deleted or renamed upstream"
+        return 0
+    fi
+
+    # リポジトリ自体に届かない＝action 名の誤り・改名・非公開化と確定できる（通信障害ではない）
+    if [[ "$rc" -eq 4 ]]; then
+        fail "${label} repository is reachable" \
+            "https://github.com/${repo_slug} could not be read (renamed, deleted, or private); check the action name rather than the network"
         return 0
     fi
 
@@ -223,6 +263,77 @@ check_uses_line() {
     fi
 }
 
+# 1 行の `uses:` を検査する関数
+# 第 1 引数: ワークフローのファイル名 / 第 2 引数: 行番号 / 第 3 引数: 行の内容
+# 第 4 引数: その行が特権ワークフローのものなら "privileged"、それ以外は "plain"
+check_uses_line() {
+    # 引数をそれぞれ意味の分かる名前の変数に取り出す
+    local wf_name="$1" lineno="$2" content="$3" scope="$4"
+    local ref action pinned marker label
+
+    # `uses:` の値（参照文字列の全体）を取り出す
+    ref="$(printf '%s' "$content" | sed -E 's/^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*([^[:space:]]+).*/\2/')"
+    # YAML では値を引用符で囲めるため、URL に混入しないよう `'` と `"` を取り除く
+    ref="${ref//\'/}"
+    ref="${ref//\"/}"
+    # 行末のコメントに書かれたバージョンマーカーを取り出す（`v` 接頭辞は付かない上流もあるため任意とする）
+    marker="$(printf '%s' "$content" | sed -nE 's/.*#[[:space:]]*(v?[0-9][^[:space:]]*).*/\1/p')"
+    # 表示用に「ファイル名:行番号 の参照」という短いラベルを組み立てる
+    label="${wf_name}:${lineno} ${ref%%@*}"
+
+    # リポジトリ内のローカル action（`./…`）は外部から取り込まないため、供給網ピンの対象外とする
+    if [[ "$ref" == ./* || "$ref" == ../* ]]; then
+        # 特権ワークフローでも、この参照はリポジトリ自身の内容なので合格として扱う
+        if [[ "$scope" == "privileged" ]]; then
+            pass "${label} is a local action (in-repo, no external pin required)"
+        fi
+        return 0
+    fi
+
+    # Docker イメージ参照（`docker://…`）は SHA ではなくダイジェストで固定する必要がある
+    if [[ "$ref" == docker://* ]]; then
+        # 特権ワークフローではダイジェスト（`@sha256:…`）で固定されていなければ可変参照として失敗させる
+        if [[ "$scope" == "privileged" ]]; then
+            if [[ "$ref" =~ @sha256:[0-9a-f]{64}$ ]]; then
+                pass "${label} is pinned to an image digest"
+            else
+                fail "${label} is pinned immutably (FR-9.6(b))" \
+                    "container action '${ref}' uses a mutable image reference; pin it by digest (docker://image@sha256:<64 hex>)"
+            fi
+        fi
+        return 0
+    fi
+
+    # ここから先は `owner/repo[/path]@ref` 形式の action 参照として扱う
+    # `@` を含まない参照は版を固定できていないので、特権ワークフローでは失敗させる
+    if [[ "$ref" != *@* ]]; then
+        if [[ "$scope" == "privileged" ]]; then
+            fail "${label} is pinned immutably (FR-9.6(b))" \
+                "action reference '${ref}' names no version at all; pin it to a 40-char commit SHA"
+        fi
+        return 0
+    fi
+
+    # `@` の前の部分（owner/repo あるいは owner/repo/path）を取り出す
+    action="${ref%%@*}"
+    # `@` の後ろの部分（コミット SHA か、v1 のような可変タグ）を取り出す
+    pinned="${ref##*@}"
+
+    # 参照が 40 桁の 16 進数（＝コミット SHA）かどうかを判定する
+    if [[ ! "$pinned" =~ ^[0-9a-f]{40}$ ]]; then
+        # 特権ワークフローでは可変タグ参照そのものが FR-9.6(b) 違反なので失敗させる
+        if [[ "$scope" == "privileged" ]]; then
+            fail "${label} is pinned to a full commit SHA (FR-9.6(b))" \
+                "referenced by the mutable ref '${pinned}'; every action in a privileged workflow must be pinned to a 40-char commit SHA"
+        fi
+        # 非特権ワークフローの可変タグは FR-9.6(b) の対象外なので、何も言わず次へ進む
+        return 0
+    fi
+
+    # SHA ピンされている行は、特権かどうかによらずマーカーとの整合を確認する（多層防御）
+    verify_marker_against_pin "$label" "$action" "$pinned" "$marker"
+}
+
 # 指定した 1 つのワークフローファイル内の `uses:` 行をすべて検査する関数
 # 第 1 引数: ワークフローファイルのパス / 第 2 引数: "privileged" か "plain"
 check_workflow_file() {
@@ -234,7 +345,9 @@ check_workflow_file() {
     # そのファイルで `uses:` 行が 1 つでも見つかったかを記録する
     local seen=0
 
-    # `uses:` を含む行を行番号付きで 1 行ずつ読み取って検査する
+    # `uses:` 行を行番号付きで 1 行ずつ読み取って検査する。
+    # ここでは参照の形（`@` の有無・`docker://`・ローカル参照）で絞り込まない。
+    # 絞り込むと「該当形式でない＝検査対象なし＝合格」という取りこぼしが生まれるため。
     # YAML では手順の先頭要素が `- uses:` と書かれることもあるため、行頭の `- ` も許容する
     while IFS= read -r entry; do
         # 「行番号:行の内容」の形なので、まず行番号を取り出す
@@ -245,7 +358,7 @@ check_workflow_file() {
         seen=1
         # 取り出した 1 行を検査する
         check_uses_line "$wf_name" "$lineno" "$content" "$scope"
-    done < <(grep -nE '^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*[^[:space:]]+@' "$path" || true)
+    done < <(grep -nE '^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*[^[:space:]]' "$path" || true)
 
     # 特権ワークフローに `uses:` が 1 行も無いのは、抽出条件の破損か構成変更を意味するため失敗にする
     # （検査対象が消えたことを「合格」と読み替えないための歯止め）
@@ -255,34 +368,24 @@ check_workflow_file() {
     fi
 }
 
-# FR-9.6(b) の対象である特権ワークフローを 1 つずつ検査する
-for wf in "${PRIVILEGED_WORKFLOWS[@]}"; do
+# 下限リストに挙げた特権ワークフローが実在することを先に確かめる
+# （改名・削除で検査対象ごと消えた場合に「対象なし＝合格」とならないようにする）
+for wf in "${ALWAYS_PRIVILEGED[@]}"; do
     # 対象ファイルの絶対パスを組み立てる
     wf_path="${WORKFLOW_DIR}/${wf}"
     # ファイルが存在しない＝改名・削除・移動なので、黙って飛ばさず失敗として報告する
     if [[ ! -f "$wf_path" ]]; then
         fail "${wf} exists (FR-9.6(b))" \
             "expected a privileged workflow at ${wf_path} but it is missing; it was renamed, moved, or deleted"
-        continue
     fi
-    # 特権ワークフローとして、すべての `uses:` がピン済みかを含めて検査する
-    check_workflow_file "$wf_path" "privileged"
 done
 
-# 残りのワークフローは FR-9.6(b) の対象外だが、SHA ピンがあればマーカー整合だけ確認する（多層防御）
+# ワークフロー定義ファイルを 1 つずつ、特権かどうかを内容から判定したうえで検査する
 while IFS= read -r wf_path; do
-    # ファイル名だけを取り出して、特権ワークフローの一覧と突き合わせる
-    wf_name="$(basename "$wf_path")"
-    # すでに特権ワークフローとして検査済みなら二重に検査しない
-    already=0
-    for wf in "${PRIVILEGED_WORKFLOWS[@]}"; do
-        if [[ "$wf_name" == "$wf" ]]; then
-            already=1
-            break
-        fi
-    done
-    # 未検査のファイルだけを、可変タグを許容するモードで検査する
-    if [[ "$already" -eq 0 ]]; then
+    # このファイルが特権かどうかを内容から判定し、適用する規則を決める
+    if is_privileged_workflow "$wf_path"; then
+        check_workflow_file "$wf_path" "privileged"
+    else
         check_workflow_file "$wf_path" "plain"
     fi
 # ワークフロー定義ファイルを名前順に列挙する（実行結果を再現しやすくするため）
