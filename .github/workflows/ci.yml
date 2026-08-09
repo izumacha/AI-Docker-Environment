@@ -51,14 +51,6 @@ jobs:
         # stub, so this runs in type-check without building the image.
         run: bash test/guard_test.sh
 
-      - name: action pin / marker agreement (FR-9.6b)
-        # Not hermetic: resolves each pinned action's release tag upstream, so
-        # this needs network (as does the lint-tool install step above). Kept
-        # in type-check rather than e2e because it needs no Docker build and
-        # gives the fastest signal on a bad pin. Fails closed -- an
-        # unresolvable tag is a failure, never a silent skip.
-        run: bash test/action_pin_test.sh
-
       - name: entrypoint.sh SEC-13 unit tests (AIDOCK_SKIP_FIREWALL / AIDOCK_INSECURE_ACK)
         # Hermetic, Docker-free: the fail-closed refusal path exits before
         # reaching init-firewall.sh or gosu; the acknowledged-skip path
@@ -87,6 +79,17 @@ jobs:
           set -e
           echo "compose config exit (HOST_WORKSPACE unset): $code"
           [ "$code" -ne 0 ] || { echo "FAIL: compose must fail closed when HOST_WORKSPACE is unset"; exit 1; }
+
+      - name: action pin / marker agreement (FR-9.6b)
+        # Deliberately last in this job: it is the only non-hermetic step here,
+        # resolving each pinned action's release tag upstream (the lint-tool
+        # install above is likewise networked). Ordering it behind the
+        # deterministic suites means a genuine shellcheck or guard regression
+        # surfaces without waiting on the network. The script bounds its own
+        # ls-remote calls with a timeout so a stalled upstream reports its own
+        # diagnosis rather than silently consuming the job's 10-minute budget,
+        # and fails closed -- an unresolvable tag is a failure, never a skip.
+        run: bash test/action_pin_test.sh
 
   e2e:
     name: e2e (acceptance criteria)
