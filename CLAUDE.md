@@ -55,6 +55,7 @@
 │   └── entrypoint.sh       # firewall 初期化 → exec
 ├── test/guard_test.sh      # guard_workspace() 等の自動テスト（CI から実行）
 ├── test/entrypoint_test.sh # entrypoint.sh の SEC-13 二重キーテスト（CI から実行）
+├── test/action_pin_test.sh # action ピンとマーカーの一致検証（FR-9.6(b) / CI から実行）
 ├── .github/workflows/      # ci.yml（型チェック＋e2e）/ post-ci-verify.yml（Claude Code Action）
 ├── compose.yaml            # サービス定義 + セキュリティオプション
 ├── docs/requirements.md    # 要件定義書（正本 / Source of Truth）
@@ -101,7 +102,7 @@ OAuth トークンは必ず名前付きボリューム `claude-home` に置き�
 ### CI / Git ワークフロー（固有事項）
 
 - CI は GitHub Actions（`.github/workflows/ci.yml`）で**型チェック**（shellcheck / hadolint / `docker compose config`）と **e2e**（AC-1〜AC-4 / AC-7 の実機検証）を実行（FR-8 / AC-8）。`ci.yml` から codex へのコメント投稿はしない（FR-7）。
-- CI 成功後、`.github/workflows/post-ci-verify.yml` が Claude Code Action（`anthropics/claude-code-action@v1`）を起動し type-check / e2e を検証・要約して PR にコメント（FR-9 / AC-9）。認証は Claude GitHub App + `CLAUDE_CODE_OAUTH_TOKEN` secret。`workflow_run` の仕様上 `main` マージ後に有効。codex（コードレビュー）とは別物。
+- CI 成功後、`.github/workflows/post-ci-verify.yml` が Claude Code Action（`anthropics/claude-code-action`、SHA ピン）を起動し type-check / e2e を検証・要約して PR にコメント（FR-9 / AC-9）。認証は Claude GitHub App + `CLAUDE_CODE_OAUTH_TOKEN` secret。`workflow_run` の仕様上 `main` マージ後に有効。codex（コードレビュー）とは別物。
 
 ### 見せ方（§15 の具体化）
 

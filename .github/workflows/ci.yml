@@ -37,11 +37,11 @@ jobs:
           hadolint --version
 
       - name: shellcheck
-        run: shellcheck bin/aidock docker/init-firewall.sh docker/entrypoint.sh test/guard_test.sh test/entrypoint_test.sh
+        run: shellcheck bin/aidock docker/init-firewall.sh docker/entrypoint.sh test/guard_test.sh test/entrypoint_test.sh test/action_pin_test.sh
 
       - name: bash syntax check
         run: |
-          for f in bin/aidock docker/init-firewall.sh docker/entrypoint.sh test/guard_test.sh test/entrypoint_test.sh; do
+          for f in bin/aidock docker/init-firewall.sh docker/entrypoint.sh test/guard_test.sh test/entrypoint_test.sh test/action_pin_test.sh; do
               bash -n "$f"
           done
 
@@ -79,6 +79,17 @@ jobs:
           set -e
           echo "compose config exit (HOST_WORKSPACE unset): $code"
           [ "$code" -ne 0 ] || { echo "FAIL: compose must fail closed when HOST_WORKSPACE is unset"; exit 1; }
+
+      - name: action pin / marker agreement (FR-9.6(b))
+        # Deliberately last in this job: it is the only non-hermetic step here,
+        # resolving each pinned action's release tag upstream (the lint-tool
+        # install above is likewise networked). Ordering it behind the
+        # deterministic suites means a genuine shellcheck or guard regression
+        # surfaces without waiting on the network. The script bounds its own
+        # ls-remote calls with a timeout so a stalled upstream reports its own
+        # diagnosis rather than silently consuming the job's 10-minute budget,
+        # and fails closed -- an unresolvable tag is a failure, never a skip.
+        run: bash test/action_pin_test.sh
 
   e2e:
     name: e2e (acceptance criteria)
