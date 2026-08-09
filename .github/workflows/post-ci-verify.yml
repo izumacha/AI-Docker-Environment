@@ -75,9 +75,18 @@ jobs:
       - name: Claude verifies and comments
         if: env.CLAUDE_OAUTH_TOKEN_AVAILABLE == 'true' && steps.pr.outputs.number != ''
         # Pinned to a full commit SHA (not the mutable v1 tag) to avoid a
-        # supply-chain risk in this privileged job. SHA resolved authoritatively
-        # via `git ls-remote` (the v1 annotated tag peels to this commit) for
-        # release v1.0.135. Bump deliberately when upgrading.
+        # supply-chain risk in this privileged job. Bump deliberately when
+        # upgrading. To verify the pin, peel the exact release tag named by the
+        # trailing marker on the `uses:` line below and expect an exact match:
+        #   git ls-remote https://github.com/anthropics/claude-code-action \
+        #     'refs/tags/<marker>^{}'
+        # Resolve that release tag, never `v1`: `v1` moves with every release,
+        # so it peels to a different commit than the pin and a maintainer who
+        # checks against it would either "fix" the pin to whatever `v1` points
+        # at today (defeating the pin) or distrust a correct one. That marker is
+        # also the single source of truth for the pinned version -- Dependabot
+        # rewrites the SHA and the marker together, so this comment names no
+        # version of its own, which would silently go stale on the next bump.
         uses: anthropics/claude-code-action@c038e4dcdedfbbca18dfb17df35a17e40ded4ddc # v1.0.186
         env:
           GH_TOKEN: ${{ github.token }}
