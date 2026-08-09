@@ -76,12 +76,20 @@ jobs:
         if: env.CLAUDE_OAUTH_TOKEN_AVAILABLE == 'true' && steps.pr.outputs.number != ''
         # Pinned to a full commit SHA (not the mutable v1 tag) to avoid a
         # supply-chain risk in this privileged job. Bump deliberately when
-        # upgrading. To verify the pin, peel the exact release tag named by the
-        # trailing marker on the `uses:` line below and expect an exact match:
+        # upgrading. To verify the pin, resolve the exact release tag named by
+        # the trailing marker on the `uses:` line below and expect the commit
+        # to match it:
         #   git ls-remote https://github.com/anthropics/claude-code-action \
-        #     'refs/tags/<marker>^{}'
+        #     'refs/tags/<marker>' 'refs/tags/<marker>^{}'
+        # Ask for both refs. An annotated tag answers with a `^{}` line holding
+        # the commit it peels to; a lightweight tag has no `^{}` line and points
+        # at the commit directly. Upstreams mix the two -- actions/github-script
+        # tagged v7.x lightweight and v9.0.0 annotated -- so a `^{}`-only query
+        # silently returns nothing for half of them, which reads as "no match"
+        # and casts doubt on a perfectly good pin. Take the `^{}` line when it
+        # is present, otherwise the plain one.
         # Resolve that release tag, never `v1`: `v1` moves with every release,
-        # so it peels to a different commit than the pin and a maintainer who
+        # so it resolves to a different commit than the pin and a maintainer who
         # checks against it would either "fix" the pin to whatever `v1` points
         # at today (defeating the pin) or distrust a correct one. That marker is
         # also the single source of truth for the pinned version -- Dependabot
