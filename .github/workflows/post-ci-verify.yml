@@ -46,7 +46,7 @@ jobs:
         id: pr
         if: env.CLAUDE_OAUTH_TOKEN_AVAILABLE == 'true'
         # SHA-pinned on the same terms as the claude-code-action step below
-        # (FR-9.6b); test/action_pin_test.sh checks this marker too.
+        # (FR-9.6(b)); test/action_pin_test.sh checks this marker too.
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
@@ -82,7 +82,7 @@ jobs:
         # test/action_pin_test.sh asserts in CI that the two still agree, so
         # neither can drift unnoticed. Bump deliberately; never check a pin
         # against `v1`, which moves with every release and so resolves to a
-        # different commit than the pin. Procedure: FR-9.6b of
+        # different commit than the pin. Procedure: FR-9.6(b) of
         # docs/requirements.md.
         uses: anthropics/claude-code-action@c038e4dcdedfbbca18dfb17df35a17e40ded4ddc # v1.0.186
         env:

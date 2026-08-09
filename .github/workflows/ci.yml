@@ -80,7 +80,7 @@ jobs:
           echo "compose config exit (HOST_WORKSPACE unset): $code"
           [ "$code" -ne 0 ] || { echo "FAIL: compose must fail closed when HOST_WORKSPACE is unset"; exit 1; }
 
-      - name: action pin / marker agreement (FR-9.6b)
+      - name: action pin / marker agreement (FR-9.6(b))
         # Deliberately last in this job: it is the only non-hermetic step here,
         # resolving each pinned action's release tag upstream (the lint-tool
         # install above is likewise networked). Ordering it behind the

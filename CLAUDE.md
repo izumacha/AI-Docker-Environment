@@ -55,7 +55,7 @@
 │   └── entrypoint.sh       # firewall 初期化 → exec
 ├── test/guard_test.sh      # guard_workspace() 等の自動テスト（CI から実行）
 ├── test/entrypoint_test.sh # entrypoint.sh の SEC-13 二重キーテスト（CI から実行）
-├── test/action_pin_test.sh # action ピンとマーカーの一致検証（FR-9.6b / CI から実行）
+├── test/action_pin_test.sh # action ピンとマーカーの一致検証（FR-9.6(b) / CI から実行）
 ├── .github/workflows/      # ci.yml（型チェック＋e2e）/ post-ci-verify.yml（Claude Code Action）
 ├── compose.yaml            # サービス定義 + セキュリティオプション
 ├── docs/requirements.md    # 要件定義書（正本 / Source of Truth）
