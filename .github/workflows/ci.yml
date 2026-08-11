@@ -37,11 +37,11 @@ jobs:
           hadolint --version
 
       - name: shellcheck
-        run: shellcheck bin/aidock docker/init-firewall.sh docker/entrypoint.sh test/guard_test.sh test/entrypoint_test.sh test/action_pin_test.sh docs/demo/record-demo.sh
+        run: shellcheck bin/aidock docker/init-firewall.sh docker/entrypoint.sh test/guard_test.sh test/entrypoint_test.sh test/action_pin_test.sh test/record_demo_test.sh docs/demo/record-demo.sh
 
       - name: bash syntax check
         run: |
-          for f in bin/aidock docker/init-firewall.sh docker/entrypoint.sh test/guard_test.sh test/entrypoint_test.sh test/action_pin_test.sh docs/demo/record-demo.sh; do
+          for f in bin/aidock docker/init-firewall.sh docker/entrypoint.sh test/guard_test.sh test/entrypoint_test.sh test/action_pin_test.sh test/record_demo_test.sh docs/demo/record-demo.sh; do
               bash -n "$f"
           done
 
@@ -57,6 +57,13 @@ jobs:
         # explicitly skips init-firewall.sh and only needs a PATH-stubbed
         # gosu to observe that `exec gosu agent "$@"` was reached.
         run: bash test/entrypoint_test.sh
+
+      - name: record-demo.sh fail-closed unit tests
+        # Hermetic, Docker-free: docker / asciinema / agg / bin/aidock are all
+        # PATH stubs, so this asserts the recording contract (propagate the
+        # recorded command's exit status, never leave a GIF for a failed run,
+        # treat the egress checks as assertions) without building an image.
+        run: bash test/record_demo_test.sh
 
       - name: hadolint (Dockerfile)
         run: hadolint docker/Dockerfile

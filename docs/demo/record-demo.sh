@@ -79,10 +79,55 @@ DEMO_WORKSPACE="$(mktemp -d /tmp/aidock-demo-workspace.XXXXXX)"
 # 録画対象コマンドの本体と、その終了コードを受け取るための一時ファイル
 STEPS_FILE="$(mktemp /tmp/aidock-demo-steps.XXXXXX.sh)"
 STATUS_FILE="$(mktemp /tmp/aidock-demo-status.XXXXXX)"
-# スクリプト終了時に一時ファイル類を必ず片付ける
-trap 'rm -rf "${DEMO_WORKSPACE}" "${STEPS_FILE}" "${STATUS_FILE}"' EXIT
+# 一時ファイル類の後始末。**1 か所にまとめる**: trap を 2 度張る (端末サイズを戻す版とそうでない版)
+# ので、削除対象をそれぞれに書き写すと、後で足した一時ファイルが片方だけ消し忘れられる
+cleanup() {
+    # 作業ディレクトリと一時ファイルをまとめて消す
+    rm -rf "${DEMO_WORKSPACE}" "${STEPS_FILE}" "${STATUS_FILE}"
+}
+# スクリプト終了時に必ず片付ける (端末サイズを変えた場合は後段でトラップを張り直す)
+trap cleanup EXIT
 # ワークスペースがマウントされていることを録画中に見せるためのダミーファイル
 printf '# aidock demo sample project\n' > "${DEMO_WORKSPACE}/README.md"
+
+# コンテナ内で走らせる検査本体を、**マウントされるワークスペースへファイルとして置く**。
+#
+# **なぜ標準入力へ直接流し込まないか**: `aidock shell` は `compose run` を経由し、
+# compose は標準出力が端末かどうかで TTY 割り当てを決める (`-T` の既定値。実測: 標準出力が
+# pty なら TTY あり)。asciinema 配下では標準出力が pty なのでコンテナには TTY が付き、
+# **端末のライン discipline が流し込んだ入力をそのまま画面へエコーする**。
+# つまりヒアドキュメントに書いた内容は 1 行残らず録画に写る。ここに日本語コメントを書くと、
+# CJK グリフを持たない agg の既定フォントでは豆腐 (□) の列になってしまう。
+# ファイルへ逃がせば、標準入力に流れるのは下の ASCII 2 行だけになる。
+CHECKS_FILE="${DEMO_WORKSPACE}/aidock-demo-checks.sh"
+# ヒアドキュメントの区切りをクォートし、書き出す時点では何も展開しない
+cat > "${CHECKS_FILE}" << 'CHECKS'
+# 未定義変数とパイプ途中の失敗も検出する (デモは「壊れていないこと」の証拠なので握り潰さない)
+set -euo pipefail
+
+# /workspace にホスト側のデモ用ディレクトリがマウントされていることを見せる
+ls -la
+# root ではなく agent へ降格していることを見せる
+whoami
+
+# 遮断確認: 許可外ホストへ**到達できてしまったら** default-deny の退行なので失敗させる。
+# `|| echo` だけで受け流すと、firewall が壊れていても «blocked» 行が出ないまま
+# 成功扱いになり、壊れたサンドボックスを「安全」と宣伝する GIF ができてしまう
+if curl -sS --max-time 5 https://example.com > /dev/null 2>&1; then
+    echo 'ERROR: example.com is REACHABLE -- default-deny egress is broken'
+    exit 1
+fi
+echo '=> example.com blocked (default-deny)'
+
+# 到達確認: 許可ホストへ到達できなければ許可リスト/DNS の退行なので失敗させる。
+# curl の終了コードを直接見る (`curl | head` にすると head の 0 が curl の失敗を覆い隠す)
+if ! anthropic_head="$(curl -sSI --max-time 10 https://api.anthropic.com)"; then
+    echo 'ERROR: api.anthropic.com is UNREACHABLE -- allowlist/DNS regression'
+    exit 1
+fi
+# 応答のステータス行だけを見せる
+printf '%s\n' "${anthropic_head}" | head -n 1
+CHECKS
 
 # 打ったコマンドを画面に見せてから実行するヘルパーを、録画される側のスクリプトに埋め込む。
 # **これが無いと GIF に「何を打つとこうなるか」が写らない**: 外側は非対話シェルなので
@@ -98,9 +143,12 @@ printf '# aidock demo sample project\n' > "${DEMO_WORKSPACE}/README.md"
 export AIDOCK_DEMO_REPO_ROOT="${REPO_ROOT}"
 export AIDOCK_DEMO_WORKSPACE="${DEMO_WORKSPACE}"
 
-# コンテナ内へ渡すコマンドは最後に `exit` を送る。TTY 付きの対話 bash は標準入力の
-# 終端だけでは終わらないことがあり、その場合 aidock shell が返らず録画がハングする。
 cat > "${STEPS_FILE}" << 'STEPS'
+# 未定義変数も失敗扱いにする。**bash <file> は新しいシェルなので外側の set は継がれない** —
+# ここで -u を付けないと、環境変数が渡らなかったときに `cd ""` が黙って成功し (bash では
+# 何もせず 0 を返す)、まったく別のディレクトリでビルドした映像を録ってしまう
+set -euo pipefail
+
 # 打ったコマンドを表示してから実行する (録画に操作が写るようにするため)
 run() {
     # 直前に空行を入れ、プロンプト風に "$ コマンド" を表示する
@@ -108,8 +156,7 @@ run() {
     # 表示した内容をそのまま実行する
     "$@"
 }
-# 1 つでも失敗したら以降を実行しない (壊れた録画を作らない)
-set -e
+
 # リポジトリルートへ移動してイメージをビルドする (パスは環境変数から受け取る)
 cd "${AIDOCK_DEMO_REPO_ROOT}"
 run ./bin/aidock build
@@ -117,31 +164,12 @@ run ./bin/aidock build
 cd "${AIDOCK_DEMO_WORKSPACE}"
 # 次に打つコマンドを表示する (aidock shell はヒアドキュメントを渡すので run を使わない)
 printf '\n$ %s\n' "aidock shell  # firewall init -> checks"
-# コンテナを起動し、マウント内容・降格ユーザー・遮断・到達をまとめて確認する
+# コンテナを起動し、マウントした検査スクリプトを実行させる。
+# **標準入力へ流すのはこの 2 行だけ**にする (TTY エコーで録画に写るため ASCII に限る)。
+# 末尾の exit は、TTY 付きの対話 bash が標準入力の終端だけでは終わらず、
+# aidock shell が返らないまま録画がハングするのを防ぐ
 "${AIDOCK_DEMO_REPO_ROOT}/bin/aidock" shell << 'INNER'
-# 失敗したらそこで止める (デモは「壊れていないこと」の証拠なので握り潰さない)
-set -e
-# /workspace にホスト側のデモ用ディレクトリがマウントされていることを見せる
-ls -la
-# root ではなく agent へ降格していることを見せる
-whoami
-# 遮断確認: 許可外ホストへ**到達できてしまったら** default-deny の退行なので失敗させる。
-# `|| echo` だけで受け流すと、firewall が壊れていても «blocked» 行が出ないまま
-# 成功扱いになり、壊れたサンドボックスを「安全」と宣伝する GIF ができてしまう
-if curl -sS --max-time 5 https://example.com > /dev/null 2>&1; then
-    echo 'ERROR: example.com is REACHABLE -- default-deny egress is broken'
-    exit 1
-fi
-echo '=> example.com blocked (default-deny)'
-# 到達確認: 許可ホストへ到達できなければ許可リスト/DNS の退行なので失敗させる。
-# curl の終了コードを直接見る (`curl | head` にすると head の 0 が curl の失敗を覆い隠す)
-if ! anthropic_head="$(curl -sSI --max-time 10 https://api.anthropic.com)"; then
-    echo 'ERROR: api.anthropic.com is UNREACHABLE -- allowlist/DNS regression'
-    exit 1
-fi
-# 応答のステータス行だけを見せる
-printf '%s\n' "${anthropic_head}" | head -n 1
-# 対話 bash は標準入力の終端だけでは終わらないことがあるため明示的に抜ける
+bash /workspace/aidock-demo-checks.sh
 exit
 INNER
 STEPS
@@ -151,30 +179,41 @@ log "録画を開始します → ${CAST_FILE}"
 # **判定は標準入力 (fd 0) で行う**: stty が読み書きするのは fd 0 なので、fd 1 を見て
 # 分岐すると「標準出力だけ端末」の状況 (make / nohup 経由など) で stty が黙って失敗し、
 # 固定したはずのサイズが効かないまま録画されてしまう
-if [ -t 0 ]; then
+# **判定には標準出力 (fd 1) も含める**: サイズを変えるのは stty (fd 0) だが、asciinema が
+# 録画データへ書き込む端末サイズは fd 1 から読む。fd 0 だけ見て分岐すると、
+# `./record-demo.sh > run.log` のように標準出力だけリダイレクトした場合に stty は成功する一方、
+# 録画は既定の 80x24 で記録され、「固定した」と報告しながら幅が変わってしまう
+if [ -t 0 ] && [ -t 1 ]; then
     # 元のサイズを控えてから変更し、EXIT トラップで必ず戻す
     # (戻さないと呼び出し元の端末が 120x30 のままになり、以後の表示が崩れる)
     ORIGINAL_STTY_SIZE="$(stty size 2> /dev/null || true)"
     if [ -n "${ORIGINAL_STTY_SIZE}" ]; then
         # stty size は "行 桁" の順で返すので、そのまま rows/cols へ割り当てて復元する
-        trap 'rm -rf "${DEMO_WORKSPACE}" "${STEPS_FILE}" "${STATUS_FILE}"; stty rows ${ORIGINAL_STTY_SIZE% *} cols ${ORIGINAL_STTY_SIZE#* } 2> /dev/null || true' EXIT
+        trap 'cleanup; stty rows ${ORIGINAL_STTY_SIZE% *} cols ${ORIGINAL_STTY_SIZE#* } 2> /dev/null || true' EXIT
     fi
     # 録画用のサイズへ変更する (失敗したら理由を伝える。黙って無視しない)
     if ! stty cols "${RECORD_COLS}" rows "${RECORD_ROWS}" 2> /dev/null; then
         log "warning: 端末サイズを ${RECORD_COLS}x${RECORD_ROWS} に固定できませんでした。GIF の幅が環境依存になります。"
     fi
 else
-    # 端末が無ければサイズを固定できないので、幅が環境依存になることを伝える
-    log "warning: 標準入力が端末ではないため端末サイズを固定できません。GIF の幅が環境依存になります。"
+    # どちらかが端末でなければサイズを固定できないので、幅が環境依存になることを伝える
+    log "warning: 標準入力または標準出力が端末ではないため端末サイズを固定できません。GIF の幅が環境依存になります。"
 fi
 # --idle-time-limit でビルド待ちなどの無操作時間を 2 秒に圧縮する。
 # **asciinema rec は録画対象コマンドの終了コードを引き継がない**ため、`set -e` では
 # 失敗を検知できない。ステップ側の終了コードをファイルへ書き出し、録画後に読んで判定する
 # --command は asciinema が**利用者のログインシェル**で解釈するため、`bash -c` を明示して
 # POSIX 互換でないシェル (fish / csh 等) でも `$?` の書き出しが確実に走るようにする
-asciinema rec --overwrite --idle-time-limit 2 \
+# **`|| { ... }` で受ける**: `set -e` のまま asciinema 自体が失敗 (Ctrl-C・起動失敗など) すると
+# ここでスクリプトが即終了し、後段の後始末に到達しない。--overwrite で .cast は既に
+# 上書きされているため、古い .gif だけが残って両者が食い違う
+if ! asciinema rec --overwrite --idle-time-limit 2 \
     --command "bash -c \"bash '${STEPS_FILE}'; echo \\\$? > '${STATUS_FILE}'\"" \
-    "${CAST_FILE}"
+    "${CAST_FILE}"; then
+    log "error: asciinema による録画自体が失敗しました (中断・起動失敗など)。"
+    discard_stale_gif
+    exit 1
+fi
 
 # 録画対象コマンドの終了コードを読む (書かれていなければ失敗扱いにする = fail-closed)。
 # mktemp が空ファイルを先に作るので、「空」= echo まで到達しなかった、と判別できる
@@ -197,7 +236,13 @@ fi
 log "GIF へ変換します → ${GIF_FILE}"
 # 録画中の文字列はすべて ASCII に揃えてある。agg の既定フォント (JetBrains Mono 等) は
 # 日本語グリフを持たず、CJK を含めると豆腐 (□) になって最重要の一行が読めなくなるため
-agg --font-size 16 "${CAST_FILE}" "${GIF_FILE}"
+# agg も `|| { ... }` で受ける: 途中で失敗すると書きかけの GIF がそのまま残り、
+# 一見もっともらしい .cast と並んでコミットされてしまう
+if ! agg --font-size 16 "${CAST_FILE}" "${GIF_FILE}"; then
+    log "error: GIF への変換に失敗しました。"
+    discard_stale_gif
+    exit 1
+fi
 
 # GIF の上限 (CLAUDE.md §15) を超えていたら警告する。
 # **文言の閾値も定数から組み立てる**: ここに 10MB と直書きすると、GIF_MAX_BYTES を
