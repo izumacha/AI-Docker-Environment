@@ -149,10 +149,21 @@ cat > "${STEPS_FILE}" << 'STEPS'
 # 何もせず 0 を返す)、まったく別のディレクトリでビルドした映像を録ってしまう
 set -euo pipefail
 
+# 録画に映すプロンプトの体裁。**1 か所に置く**: 2 つのステップが同じ見た目である必要があり、
+# 書き写すと片方だけ変えたときに録画内でプロンプトが食い違う (§6 UI 文言は単一の参照元)
+PROMPT_FORMAT='\n$ %s\n'
+
+# 打ったコマンドを表示する (実行はしない。ヒアドキュメントを渡す step でも使えるようにするため)
+show() {
+    # 直前に空行を入れ、プロンプト風に "$ コマンド" を表示する
+    # shellcheck disable=SC2059  # 体裁を 1 か所に集約するため書式は変数から与える
+    printf "${PROMPT_FORMAT}" "$*"
+}
+
 # 打ったコマンドを表示してから実行する (録画に操作が写るようにするため)
 run() {
-    # 直前に空行を入れ、プロンプト風に "$ コマンド" を表示する
-    printf '\n$ %s\n' "$*"
+    # まず画面に見せる
+    show "$@"
     # 表示した内容をそのまま実行する
     "$@"
 }
@@ -163,7 +174,7 @@ run ./bin/aidock build
 # 個人情報を含まないデモ用ワークスペースへ移動する (ここが /workspace としてマウントされる)
 cd "${AIDOCK_DEMO_WORKSPACE}"
 # 次に打つコマンドを表示する (aidock shell はヒアドキュメントを渡すので run を使わない)
-printf '\n$ %s\n' "aidock shell  # firewall init -> checks"
+show "aidock shell  # firewall init -> checks"
 # コンテナを起動し、マウントした検査スクリプトを実行させる。
 # **標準入力へ流すのはこの 2 行だけ**にする (TTY エコーで録画に写るため ASCII に限る)。
 # 末尾の exit は、TTY 付きの対話 bash が標準入力の終端だけでは終わらず、
@@ -249,8 +260,13 @@ fi
 # 変えたときにメッセージだけが古い値を主張する (§6 単一の参照元)
 GIF_SIZE="$(stat -c %s "${GIF_FILE}")"
 if [ "${GIF_SIZE}" -gt "${GIF_MAX_BYTES}" ]; then
-    log "warning: GIF が上限 $((GIF_MAX_BYTES / 1024 / 1024))MB を超えています (${GIF_SIZE} bytes)。"
-    log "         このままコミットせず、--idle-time-limit や解像度を調整して録り直してください。"
+    # **警告で済ませない**: 他の不備 (agg の失敗・ステップの失敗) では GIF を消しているのに
+    # ここだけ残すと、`record-demo.sh && git add docs/demo` で上限超過の GIF がそのまま
+    # コミットされる。基準を満たさない成果物は置いていかない (§15 / fail-closed)
+    log "error: GIF が上限 $((GIF_MAX_BYTES / 1024 / 1024))MB を超えています (${GIF_SIZE} bytes)。"
+    log "       --idle-time-limit や解像度を調整して録り直してください。"
+    discard_stale_gif
+    exit 1
 fi
 
 # 生成できたことと、コミット前の目視確認を促す

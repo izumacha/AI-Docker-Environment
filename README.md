@@ -192,6 +192,7 @@ GitHub Actions で次を実行する。
 ├── test/guard_test.sh      # guard_workspace() 等の自動テスト（CI から実行）
 ├── test/entrypoint_test.sh # entrypoint.sh の SEC-13 二重キーテスト（CI から実行）
 ├── test/action_pin_test.sh # action ピンとマーカーの一致検証（FR-9.6(b) / CI から実行）
+├── test/record_demo_test.sh # デモ録画スクリプトの fail-closed 契約テスト（CI から実行）
 ├── docs/
 │   ├── requirements.md     # 要件定義書（正本 / Source of Truth）
 │   └── demo/               # デモ録画（.cast/.gif）と自動生成スクリプト record-demo.sh

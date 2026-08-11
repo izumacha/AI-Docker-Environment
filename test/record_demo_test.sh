@@ -94,6 +94,26 @@ assert_missing() {
     fi
 }
 
+# 指定したファイルに文字列が含まれることを確認する
+assert_file_contains() {
+    # ファイルを読んで部分一致で探す
+    if grep -qF -- "$2" "$1" 2> /dev/null; then
+        report 0 "$3"
+    else
+        report 1 "$3"
+    fi
+}
+
+# 指定したファイルが ASCII だけで構成されていることを確認する
+assert_file_ascii() {
+    # 非 ASCII バイト (0x80-0xFF) が 1 つでもあれば失敗
+    if LC_ALL=C grep -qP '[\x80-\xFF]' "$1" 2> /dev/null; then
+        report 1 "$2"
+    else
+        report 0 "$2"
+    fi
+}
+
 # 指定したファイルが存在することを確認する
 assert_exists() {
     # ファイルがあれば成功
@@ -120,8 +140,20 @@ STUB
 # agg スタブ: cast を読んだことにして、それらしい GIF を書き出す
 cat > "${STUB_BIN}/agg" << 'STUB'
 #!/usr/bin/env bash
-# 最後の引数が出力先の GIF なので、そこへダミー内容を書く
-printf 'GIF89a-stub' > "${!#}"
+# 最後の引数が出力先の GIF
+out="${!#}"
+# 変換が途中で失敗するケースを模す（書きかけの GIF を残して非ゼロで終わる）
+if [[ "${AIDOCK_TEST_MODE:-ok}" == "aggfail" ]]; then
+    printf 'partial' > "${out}"
+    exit 1
+fi
+# 上限超過の GIF を作るケースを模す（sparse file なので一瞬で作れる）
+if [[ "${AIDOCK_TEST_MODE:-ok}" == "biggif" ]]; then
+    truncate -s 11M "${out}"
+    exit 0
+fi
+# 通常はそれらしいダミー内容を書く
+printf 'GIF89a-stub' > "${out}"
 STUB
 
 # asciinema スタブ: 本物と同じく **録画対象コマンドの終了コードを引き継がない**。
@@ -148,10 +180,18 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+# --overwrite 相当: 実行前に cast を置き換える（本物も先に truncate する）
+printf 'cast-stub\n' > "${cast_path}"
+# asciinema 自体が失敗するケース（Ctrl-C・起動失敗など）を模す
+if [[ "${AIDOCK_TEST_MODE:-ok}" == "asciinemafail" ]]; then
+    exit 130
+fi
+# 録画対象コマンドを起動しないケース（非 POSIX シェル等で状態ファイルが書かれない）を模す
+if [[ "${AIDOCK_TEST_MODE:-ok}" == "nostatus" ]]; then
+    exit 0
+fi
 # 本物と同様、録画対象は利用者のシェル経由で起動する
 sh -c "${command_to_run}" || true
-# --overwrite 相当: cast を録画内容で置き換える
-printf 'cast-stub\n' > "${cast_path}"
 # 録画対象が失敗しても asciinema 自体は成功で返る（この挙動の再現がテストの肝）
 exit 0
 STUB
@@ -190,8 +230,9 @@ if [[ "${1:-}" == "build" ]]; then
 fi
 # shell サブコマンド: 標準入力に流れてくるコマンドを読み、検査スクリプトを実行する
 if [[ "${1:-}" == "shell" ]]; then
-    # 標準入力（"bash /workspace/aidock-demo-checks.sh" と "exit"）は読み捨てる
-    cat > /dev/null
+    # 標準入力に流れてきた内容を保存する（テスト側が中身と文字集合を検証するため）。
+    # 実機ではここが TTY にエコーされて録画へ写るので、ASCII だけであることが重要
+    cat > "${AIDOCK_TEST_STDIN_CAPTURE}"
     # マウント相当: ワークスペースに置かれた検査スクリプトを、curl だけ差し替えて実行する
     checks="${AIDOCK_DEMO_WORKSPACE}/aidock-demo-checks.sh"
     # curl スタブを置くディレクトリを作る
@@ -237,10 +278,14 @@ run_record() {
     local mode="$1"
     # 検査スクリプトの場所は record-demo.sh が export する AIDOCK_DEMO_WORKSPACE で
     # スタブ側へ伝わるので、ここでは何も渡さない
+    # コンテナへ流し込まれた標準入力を受け取るファイル（毎回まっさらにする）
+    STDIN_CAPTURE="${TEST_TMP}/stdin-capture"
+    : > "${STDIN_CAPTURE}"
     set +e
     LAST_OUTPUT="$(
         cd "${FAKE_REPO}" &&
             PATH="${STUB_BIN}:${PATH}" AIDOCK_TEST_MODE="${mode}" \
+                AIDOCK_TEST_STDIN_CAPTURE="${STDIN_CAPTURE}" \
                 ./docs/demo/record-demo.sh 2>&1
     )"
     LAST_STATUS=$?
@@ -258,35 +303,57 @@ assert_status 0 "healthy sandbox: exits 0"
 assert_exists "${FAKE_GIF}" "healthy sandbox: writes the GIF"
 assert_contains "example.com blocked" "healthy sandbox: records the default-deny proof"
 
-# 2) default-deny の退行: 許可外ホストへ到達できたら失敗し、GIF を残さない
+# 1b) コンテナへ流す標準入力は **ASCII のみ**であること。
+#     実機ではここが TTY にエコーされて録画に写るため、日本語を流すと agg の既定フォントで
+#     豆腐 (□) になる。検査本体はマウントしたスクリプトへ逃がしてあるので、
+#     標準入力に載るのは検査スクリプトの起動行と exit だけのはず
+assert_file_contains "${STDIN_CAPTURE}" "bash /workspace/aidock-demo-checks.sh" \
+    "container stdin invokes the mounted checks script"
+assert_file_ascii "${STDIN_CAPTURE}" "container stdin is ASCII only (would be echoed into the recording)"
+
+# 2) default-deny の退行: 許可外ホストへ到達できたら失敗し、直前の実行で出来た GIF も残さない
 run_record leaky
 assert_status 1 "reachable example.com: exits non-zero"
 assert_contains "default-deny egress is broken" "reachable example.com: names the regression"
-assert_missing "${FAKE_GIF}" "reachable example.com: refuses to leave a GIF"
+assert_missing "${FAKE_GIF}" "reachable example.com: discards the GIF left by the previous run"
 
 # 3) 許可リスト / DNS の退行: 許可ホストへ到達できなければ失敗し、GIF を残さない
-run_record ok
-rm -f "${FAKE_GIF}"
 run_record blocked
 assert_status 1 "unreachable api.anthropic.com: exits non-zero"
 assert_contains "allowlist/DNS regression" "unreachable api.anthropic.com: names the regression"
 assert_missing "${FAKE_GIF}" "unreachable api.anthropic.com: refuses to leave a GIF"
 
 # 4) ビルド失敗: 録画対象が失敗したら（asciinema は 0 を返すが）失敗として扱う
-run_record ok
 run_record buildfail
 assert_status 1 "failing build: exits non-zero despite asciinema returning 0"
 assert_missing "${FAKE_GIF}" "failing build: refuses to leave a GIF"
 
-# 5) 失敗時は前回の GIF を残さない（.cast と食い違うため）
+# 5) asciinema 自体の失敗（中断・起動失敗）でも古い GIF を残さない。
+#    set -e で即終了すると後始末に到達しないため、明示的に受けているかを見る
 run_record ok
 assert_exists "${FAKE_GIF}" "stale GIF setup: a successful run leaves a GIF"
-run_record leaky
-assert_missing "${FAKE_GIF}" "failed run discards the GIF left by the previous run"
+run_record asciinemafail
+assert_status 1 "asciinema failure: exits non-zero"
+assert_missing "${FAKE_GIF}" "asciinema failure: discards the stale GIF"
 
-# 6) 検査スクリプトはワークスペース経由で渡し、標準入力へは ASCII だけを流す
-#    （TTY エコーで録画へ写るため。日本語を流すと agg の既定フォントで豆腐になる）
-assert_contains "aidock-demo-checks.sh" "container command is passed as a mounted script path"
+# 6) 状態ファイルが書かれなかった場合（録画対象を起動できなかった）も fail-closed
+run_record ok
+run_record nostatus
+assert_status 1 "missing status file: exits non-zero"
+assert_contains "終了コードを取得できませんでした" "missing status file: distinguishes it from a failed step"
+assert_missing "${FAKE_GIF}" "missing status file: discards the stale GIF"
+
+# 7) GIF 変換の失敗でも、書きかけの GIF を残さない
+run_record ok
+run_record aggfail
+assert_status 1 "agg failure: exits non-zero"
+assert_missing "${FAKE_GIF}" "agg failure: discards the partial GIF"
+
+# 8) 上限を超える GIF は成果物として残さない（§15 の 10MB 基準）
+run_record biggif
+assert_status 1 "oversized GIF: exits non-zero"
+assert_contains "上限" "oversized GIF: names the cap"
+assert_missing "${FAKE_GIF}" "oversized GIF: refuses to leave the oversized artifact"
 
 # --- summary ----------------------------------------------------------------
 # パス数とフェイル数を集計してテスト結果の概要を出力する
