@@ -40,89 +40,9 @@ TEST_TMP="$(mktemp -d)"
 # テスト終了時に一時ディレクトリを必ず片付ける
 trap 'rm -rf "${TEST_TMP}"' EXIT
 
-# 成功したテストの件数
-PASS=0
-# 失敗したテストの件数
-FAIL=0
-
-# 直近の実行結果を保持する変数（終了コードと標準出力＋標準エラーの内容）
-LAST_STATUS=0
-LAST_OUTPUT=""
-
-# 期待どおりなら PASS、違えば FAIL を数えて内容を表示する共通ヘルパー
-report() {
-    # 第 1 引数が真（0）なら成功として数える
-    if [[ "$1" -eq 0 ]]; then
-        PASS=$((PASS + 1))
-        printf 'ok   - %s\n' "$2"
-    else
-        FAIL=$((FAIL + 1))
-        printf 'NOT OK - %s\n' "$2"
-        # 失敗時は原因調査のため実行結果を出す
-        printf '       status=%s\n' "${LAST_STATUS}"
-        printf '       output=%s\n' "${LAST_OUTPUT}"
-    fi
-}
-
-# 終了コードが期待値と一致することを確認する
-assert_status() {
-    # 実際の終了コードと期待値を比較する（set -e で中断しないよう if で受ける）
-    if [[ "${LAST_STATUS}" -eq "$1" ]]; then
-        report 0 "$2"
-    else
-        report 1 "$2"
-    fi
-}
-
-# 出力に指定した文字列が含まれることを確認する
-assert_contains() {
-    # 部分一致で探す
-    if [[ "${LAST_OUTPUT}" == *"$1"* ]]; then
-        report 0 "$2"
-    else
-        report 1 "$2"
-    fi
-}
-
-# 指定したファイルが存在しないことを確認する
-assert_missing() {
-    # ファイルが無ければ成功
-    if [[ ! -e "$1" ]]; then
-        report 0 "$2"
-    else
-        report 1 "$2"
-    fi
-}
-
-# 指定したファイルに文字列が含まれることを確認する
-assert_file_contains() {
-    # ファイルを読んで部分一致で探す
-    if grep -qF -- "$2" "$1" 2> /dev/null; then
-        report 0 "$3"
-    else
-        report 1 "$3"
-    fi
-}
-
-# 指定したファイルが ASCII だけで構成されていることを確認する
-assert_file_ascii() {
-    # 非 ASCII バイト (0x80-0xFF) が 1 つでもあれば失敗
-    if LC_ALL=C grep -qP '[\x80-\xFF]' "$1" 2> /dev/null; then
-        report 1 "$2"
-    else
-        report 0 "$2"
-    fi
-}
-
-# 指定したファイルが存在することを確認する
-assert_exists() {
-    # ファイルがあれば成功
-    if [[ -e "$1" ]]; then
-        report 0 "$2"
-    else
-        report 1 "$2"
-    fi
-}
+# 共有のカウンタ・アサーション群（4 本目の書き写しを増やさないため lib へ切り出した）
+# shellcheck source=test/lib/harness.sh
+source "${SCRIPT_DIR}/lib/harness.sh"
 
 # --- スタブの用意 -------------------------------------------------------------
 
@@ -230,6 +150,9 @@ if [[ "${1:-}" == "build" ]]; then
 fi
 # shell サブコマンド: 標準入力に流れてくるコマンドを読み、検査スクリプトを実行する
 if [[ "${1:-}" == "shell" ]]; then
+    # 起動時のカレントディレクトリを保存する。実機ではここが /workspace として
+    # bind mount されるので、**デモ用の一時ディレクトリでなければ操作者の実パスが録画に写る**
+    pwd > "${AIDOCK_TEST_PWD_CAPTURE}"
     # 標準入力に流れてきた内容を保存する（テスト側が中身と文字集合を検証するため）。
     # 実機ではここが TTY にエコーされて録画へ写るので、ASCII だけであることが重要
     cat > "${AIDOCK_TEST_STDIN_CAPTURE}"
@@ -281,11 +204,15 @@ run_record() {
     # コンテナへ流し込まれた標準入力を受け取るファイル（毎回まっさらにする）
     STDIN_CAPTURE="${TEST_TMP}/stdin-capture"
     : > "${STDIN_CAPTURE}"
+    # aidock shell を起動したときのカレントディレクトリを受け取るファイル
+    PWD_CAPTURE="${TEST_TMP}/pwd-capture"
+    : > "${PWD_CAPTURE}"
     set +e
     LAST_OUTPUT="$(
         cd "${FAKE_REPO}" &&
             PATH="${STUB_BIN}:${PATH}" AIDOCK_TEST_MODE="${mode}" \
                 AIDOCK_TEST_STDIN_CAPTURE="${STDIN_CAPTURE}" \
+                AIDOCK_TEST_PWD_CAPTURE="${PWD_CAPTURE}" \
                 ./docs/demo/record-demo.sh 2>&1
     )"
     LAST_STATUS=$?
@@ -310,6 +237,15 @@ assert_contains "example.com blocked" "healthy sandbox: records the default-deny
 assert_file_contains "${STDIN_CAPTURE}" "bash /workspace/aidock-demo-checks.sh" \
     "container stdin invokes the mounted checks script"
 assert_file_ascii "${STDIN_CAPTURE}" "container stdin is ASCII only (would be echoed into the recording)"
+# 対話 bash を確実に終わらせる exit が送られていること
+# （無いと TTY 付きシェルが EOF で終わらず、録画がハングする）
+assert_file_contains "${STDIN_CAPTURE}" "exit" "container stdin ends the shell with an explicit exit"
+
+# 1c) 録画は**デモ用の一時ディレクトリ**から起動すること。
+#     ここを外すと操作者の実パスが /workspace として bind mount され、
+#     ls -la でその中身まで録画に写る（CLAUDE.md §3「実パスを写さない」）
+assert_file_contains "${PWD_CAPTURE}" "/tmp/aidock-demo-workspace." \
+    "aidock shell runs from the neutral demo workspace, not the operator's cwd"
 
 # 2) default-deny の退行: 許可外ホストへ到達できたら失敗し、直前の実行で出来た GIF も残さない
 run_record leaky
@@ -329,22 +265,22 @@ assert_status 1 "failing build: exits non-zero despite asciinema returning 0"
 assert_missing "${FAKE_GIF}" "failing build: refuses to leave a GIF"
 
 # 5) asciinema 自体の失敗（中断・起動失敗）でも古い GIF を残さない。
-#    set -e で即終了すると後始末に到達しないため、明示的に受けているかを見る
-run_record ok
-assert_exists "${FAKE_GIF}" "stale GIF setup: a successful run leaves a GIF"
+#    set -e で即終了すると後始末に到達しないため、明示的に受けているかを見る。
+#    前回の成果物が残っている状態は touch で直接作る（本番実行を挟むより意図が明確で速い）
+touch "${FAKE_GIF}"
 run_record asciinemafail
 assert_status 1 "asciinema failure: exits non-zero"
 assert_missing "${FAKE_GIF}" "asciinema failure: discards the stale GIF"
 
 # 6) 状態ファイルが書かれなかった場合（録画対象を起動できなかった）も fail-closed
-run_record ok
+touch "${FAKE_GIF}"
 run_record nostatus
 assert_status 1 "missing status file: exits non-zero"
 assert_contains "終了コードを取得できませんでした" "missing status file: distinguishes it from a failed step"
 assert_missing "${FAKE_GIF}" "missing status file: discards the stale GIF"
 
 # 7) GIF 変換の失敗でも、書きかけの GIF を残さない
-run_record ok
+touch "${FAKE_GIF}"
 run_record aggfail
 assert_status 1 "agg failure: exits non-zero"
 assert_missing "${FAKE_GIF}" "agg failure: discards the partial GIF"
@@ -356,7 +292,5 @@ assert_contains "上限" "oversized GIF: names the cap"
 assert_missing "${FAKE_GIF}" "oversized GIF: refuses to leave the oversized artifact"
 
 # --- summary ----------------------------------------------------------------
-# パス数とフェイル数を集計してテスト結果の概要を出力する
-printf '\n# %d passed, %d failed\n' "$PASS" "$FAIL"
-# フェイルが 1 件でもあれば非ゼロで終了してテストスイートを失敗させる
-[[ "$FAIL" -eq 0 ]]
+# 集計と終了コードの決定は共有ハーネスに任せる
+harness_summary
