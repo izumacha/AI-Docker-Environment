@@ -5,7 +5,7 @@
 変更が必要な場合は **先に本書を改訂し、PR 内で根拠を述べた上で実装に着手する**。
 
 - **対象バージョン**: v1 系（Linux 専用、Claude Code 公式 CLI を Docker でサンドボックス化）
-- **最終更新**: 2026-08-09
+- **最終更新**: 2026-08-11
 - **位置づけ**: 要件 ＞ 設計 ＞ 実装。本書未記載の事項は CLAUDE.md / README.md の記述に従う。
 
 ---
@@ -69,6 +69,7 @@
 
 | ID | コマンド | 必須挙動 |
 | --- | --- | --- |
+| 2026-08-11 | README 冒頭にデモブロックを追加し、デモ録画（asciinema cast / GIF）の自動生成スクリプト `docs/demo/record-demo.sh` を新設（FR-8.1 の shellcheck / `bash -n` 対象へ追加）。録画の代表フローは自動化可能な範囲（`build → shell` でのファイアウォール初期化・遮断確認・`agent` 降格確認）とし、`login → run` の対話部分は手動録画で補足する方針を CLAUDE.md §3 に明記。録画本体（`.cast`/`.gif`）は Docker が使える Linux ホストで生成する宿題として管理。サンドボックスの実装・セキュリティ不変条件に変更はない。 | Claude Code |
 | FR-1.1 | `build` | `HOST_UID`/`HOST_GID` を build args として `docker compose build` を実行。 |
 | FR-1.2 | `login` | `AIDOCK_PROFILE=login` を立て、`compose run --rm claude claude /login` を実行。 |
 | FR-1.3 | `run [args...]` / 引数なし | `$PWD` を `/workspace` に bind mount して Claude Code を起動。`run` は既定サブコマンド。追加 `args` は `compose run --rm claude` に **位置引数として無変換で渡される**（SEC-14 参照）。**`AIDOCK_PROFILE=run` を明示的に固定する**（呼び出し元シェルのアンビエントな値を上書きする。SEC-19）。 |
@@ -125,7 +126,7 @@
 `.github/workflows/ci.yml`（GitHub Actions）で**型チェック**と **e2e** を実行する。push（全ブランチ）および `main` への pull_request で発火し、`permissions: contents: read` のみを付与する（FR-7 に従い codex へのコメント投稿は行わない）。
 
 - FR-8.1: **type-check ジョブ**は次の静的解析を実行し、いずれか失敗で CI を不合格とする。
-  - `shellcheck`（v0.11.0、GitHub Releases から取得した固定版）を全シェルスクリプト（`bin/aidock`・`docker/init-firewall.sh`・`docker/entrypoint.sh`・`test/guard_test.sh`・`test/entrypoint_test.sh`・`test/action_pin_test.sh`）に適用。
+  - `shellcheck`（v0.11.0、GitHub Releases から取得した固定版）を全シェルスクリプト（`bin/aidock`・`docker/init-firewall.sh`・`docker/entrypoint.sh`・`test/guard_test.sh`・`test/entrypoint_test.sh`・`test/action_pin_test.sh`・`docs/demo/record-demo.sh`）に適用。
   - `bash -n` による構文チェック（同じ 6 ファイルすべてに適用）。
   - `hadolint`（v2.14.0、GitHub Releases から取得した固定版）で `docker/Dockerfile` を検査。`DL3008`（apt パッケージのバージョン固定）は `.hadolint.yaml` で除外する（理由は NFR-5.1: 再現性は `CLAUDE_CODE_VERSION` 固定と `--no-install-recommends` で担保し、OS ライブラリの逐一ピン留めは方針外）。
   - `docker compose -f compose.yaml config -q` による compose 定義の妥当性検証。加えて `HOST_WORKSPACE` 未設定での `docker compose config` が **非ゼロ exit** することを検証し、SEC-8(a) の fail-closed（`${HOST_WORKSPACE:?...}`）を回帰検出する（AC-2）。
