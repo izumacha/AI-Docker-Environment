@@ -108,7 +108,9 @@ OAuth トークンは必ず名前付きボリューム `claude-home` に置き�
 
 - スタック形態は「CLI / サンドボックス」: 公開 URL・スクショは適用外、**端末操作の録画（asciinema / GIF）で代替**する。
 - 録画対象の代表フロー 1 本: `bin/aidock build → login → run`（コンテナ起動 → ファイアウォール初期化 → `agent` ユーザーでの Claude Code 起動まで）。補足として `firewall-refresh` や遮断確認（許可外ホストへの接続拒否）を含めてもよい。
-- 録画は `docs/` 配下に置くか asciinema.org のリンクを README 冒頭のデモブロックに記載する。録画に OAuth トークン・ホストの実パス（`$HOME` 配下の個人情報が分かるパス）を写さない。
+- 録画は `docs/demo/` 配下に置くか asciinema.org のリンクを README 冒頭のデモブロックに記載する。録画に OAuth トークン・ホストの実パス（`$HOME` 配下の個人情報が分かるパス）を写さない。
+- 録画の生成は `./docs/demo/record-demo.sh` で自動化している（Linux ホスト + Docker + asciinema + agg が必要。詳細は `docs/demo/README.md`）。
+- **未対応（意図的に残している宿題。満たしたらこの行を削除する）**: `docs/demo/aidock-demo.cast` / `.gif` 本体は未生成。Docker が使える Linux ホストで上記スクリプトを実行して生成・コミットし、README のデモブロックの画像行（TODO コメント）を有効化する。
 
 ---
 

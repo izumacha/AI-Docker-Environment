@@ -15,6 +15,25 @@ allowlist を組み合わせている。
 配下と、それらを丸ごと含む `~/.config` 自体では `aidock` の起動を機械的に拒否する
 （`~/.config/htop` 等の非機密サブディレクトリからの起動は許可される）。
 
+## デモ
+
+代表フロー「`aidock build` → `aidock shell`（コンテナ起動 → ファイアウォール初期化 →
+`agent` ユーザーへの降格 → 許可外ホストの遮断確認 → `api.anthropic.com` への到達確認）」の
+端末録画を [`docs/demo/`](docs/demo/) に置く。
+
+<!-- TODO(録画未生成): Docker が動く Linux ホストで `./docs/demo/record-demo.sh` を実行して
+     docs/demo/aidock-demo.cast / aidock-demo.gif を生成・コミットしたら、
+     下の画像行のコメントを外してこの TODO を削除する。
+![aidock のビルドからサンドボックス起動・ファイアウォール遮断確認までの端末録画](docs/demo/aidock-demo.gif)
+-->
+
+録画の生成・更新は次の 1 コマンド（Linux ホスト + Docker + asciinema + agg が必要。
+詳細と撮影時の注意は [`docs/demo/README.md`](docs/demo/README.md)）:
+
+```bash
+./docs/demo/record-demo.sh
+```
+
 ## なぜ作ったか
 
 Claude Code のような AI コーディングエージェントは、ファイルの読み書きやコマンド実行、ネットワークアクセスを
