@@ -19,12 +19,13 @@ allowlist を組み合わせている。
 
 代表フロー「`aidock build` → `aidock shell`（コンテナ起動 → ファイアウォール初期化 →
 `agent` ユーザーへの降格 → 許可外ホストの遮断確認 → `api.anthropic.com` への到達確認）」の
-端末録画を [`docs/demo/`](docs/demo/) に置く。
+端末録画を [`docs/demo/`](docs/demo/) に置く方針だが、**録画本体はまだ未生成**（下記の
+コマンドで生成する。詳細は `CLAUDE.md` §3 の「見せ方」の宿題欄）。
 
-<!-- TODO(録画未生成): Docker が動く Linux ホストで `./docs/demo/record-demo.sh` を実行して
+<!-- TODO(録画未生成): Docker が動く Linux ホストで `./docs/demo/record-demo.sh` を実行し、
      docs/demo/aidock-demo.cast / aidock-demo.gif を生成・コミットしたら、
-     下の画像行のコメントを外してこの TODO を削除する。
-![aidock のビルドからサンドボックス起動・ファイアウォール遮断確認までの端末録画](docs/demo/aidock-demo.gif)
+     このコメントブロック全体を次の 1 行で置き換える（上段の「まだ未生成」の断り書きも消す）:
+     ![aidock のビルドからサンドボックス起動・ファイアウォール遮断確認までの端末録画](docs/demo/aidock-demo.gif)
 -->
 
 録画の生成・更新は次の 1 コマンド（Linux ホスト + Docker + asciinema + agg が必要。
@@ -191,6 +192,8 @@ GitHub Actions で次を実行する。
 ├── test/guard_test.sh      # guard_workspace() 等の自動テスト（CI から実行）
 ├── test/entrypoint_test.sh # entrypoint.sh の SEC-13 二重キーテスト（CI から実行）
 ├── test/action_pin_test.sh # action ピンとマーカーの一致検証（FR-9.6(b) / CI から実行）
+├── test/record_demo_test.sh # デモ録画スクリプトの fail-closed 契約テスト（CI から実行）
+├── test/lib/harness.sh     # テスト共通のカウンタ・アサーション（各テストが source）
 ├── docs/
 │   ├── requirements.md     # 要件定義書（正本 / Source of Truth）
 │   └── demo/               # デモ録画（.cast/.gif）と自動生成スクリプト record-demo.sh
