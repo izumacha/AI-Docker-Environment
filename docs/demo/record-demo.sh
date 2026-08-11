@@ -55,6 +55,7 @@ printf '# aidock demo sample project\n' > "${DEMO_WORKSPACE}/README.md"
 #   - shell は遮断確認 → 到達確認 → ユーザー確認だけを流して終了する
 # 遮断確認の curl は失敗が期待値なので `|| echo` で明示的に受け止める。
 DEMO_STEPS="$(cat << EOF
+set -e
 cd '${REPO_ROOT}'
 ./bin/aidock build
 cd '${DEMO_WORKSPACE}'
