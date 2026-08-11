@@ -255,6 +255,20 @@ fi
 # GIF の上限 (CLAUDE.md §15) を超えていたら警告する。
 # **文言の閾値も定数から組み立てる**: ここに 10MB と直書きすると、GIF_MAX_BYTES を
 # 変えたときにメッセージだけが古い値を主張する (§6 単一の参照元)
+# **中身が GIF であることを先に確かめる**: agg が 0 で終わりながら空ファイルや
+# 壊れた出力を残すことがある (書き込み中断・ディスク不足など)。上限だけを見ていると
+# 0 バイトは «上限以下» として素通りし、README に死んだサムネイルが貼られてしまう
+if [ ! -s "${GIF_FILE}" ]; then
+    log "error: 生成された GIF が空です。agg の出力を確認してください。"
+    discard_stale_gif
+    exit 1
+fi
+# GIF のシグネチャ (GIF87a / GIF89a の先頭 4 バイト) を確認する
+if [ "$(head -c 4 "${GIF_FILE}")" != "GIF8" ]; then
+    log "error: 生成されたファイルが GIF ではありません。agg の出力を確認してください。"
+    discard_stale_gif
+    exit 1
+fi
 GIF_SIZE="$(stat -c %s "${GIF_FILE}")"
 if [ "${GIF_SIZE}" -gt "${GIF_MAX_BYTES}" ]; then
     # **警告で済ませない**: 他の不備 (agg の失敗・ステップの失敗) では GIF を消しているのに

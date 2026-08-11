@@ -53,7 +53,12 @@ mkdir -p "${STUB_BIN}"
 # docker スタブ: 依存チェック（docker info）だけを満たす。実際のコンテナは起動しない
 cat > "${STUB_BIN}/docker" << 'STUB'
 #!/usr/bin/env bash
-# info は「デーモンに到達できた」ことにして成功で返す
+# デーモンが止まっているケースを模す（CLI はあるが info が失敗する）
+if [[ "${AIDOCK_TEST_MODE:-ok}" == "nodaemon" ]]; then
+    echo "Cannot connect to the Docker daemon" >&2
+    exit 1
+fi
+# 通常は「デーモンに到達できた」ことにして成功で返す
 exit 0
 STUB
 
@@ -67,8 +72,20 @@ if [[ "${AIDOCK_TEST_MODE:-ok}" == "aggfail" ]]; then
     printf 'partial' > "${out}"
     exit 1
 fi
+# 0 で終わりながら空ファイルを残すケースを模す（書き込み中断・ディスク不足など）
+if [[ "${AIDOCK_TEST_MODE:-ok}" == "emptygif" ]]; then
+    : > "${out}"
+    exit 0
+fi
+# 0 で終わりながら GIF でない中身を残すケースを模す
+if [[ "${AIDOCK_TEST_MODE:-ok}" == "notagif" ]]; then
+    printf 'not-a-gif' > "${out}"
+    exit 0
+fi
 # 上限超過の GIF を作るケースを模す（sparse file なので一瞬で作れる）
 if [[ "${AIDOCK_TEST_MODE:-ok}" == "biggif" ]]; then
+    # 本物と同じシグネチャで始め、sparse file で上限超過のサイズにする
+    printf 'GIF89a' > "${out}"
     truncate -s 11M "${out}"
     exit 0
 fi
@@ -135,8 +152,7 @@ FAKE_GIF="${FAKE_REPO}/docs/demo/aidock-demo.gif"
 #   leaky     … 許可外ホストへ到達できてしまう（default-deny の退行）
 #   blocked   … 許可ホストへ到達できない（許可リスト / DNS の退行）
 #   buildfail … build が失敗する
-write_aidock_stub() {
-    cat > "${FAKE_REPO}/bin/aidock" << 'STUB'
+cat > "${FAKE_REPO}/bin/aidock" << 'STUB'
 #!/usr/bin/env bash
 set -uo pipefail
 # build サブコマンド: テストモードに応じて成功／失敗を返す
@@ -189,9 +205,7 @@ CURL
 fi
 exit 0
 STUB
-    chmod +x "${FAKE_REPO}/bin/aidock"
-}
-write_aidock_stub
+chmod +x "${FAKE_REPO}/bin/aidock"
 
 # --- 実行ヘルパー -------------------------------------------------------------
 
@@ -290,6 +304,28 @@ run_record biggif
 assert_status 1 "oversized GIF: exits non-zero"
 assert_contains "上限" "oversized GIF: names the cap"
 assert_missing "${FAKE_GIF}" "oversized GIF: refuses to leave the oversized artifact"
+
+# 9) agg が 0 で終わっても中身が壊れていれば成果物にしない（上限だけでなく下限も見る）
+touch "${FAKE_GIF}"
+run_record emptygif
+assert_status 1 "empty GIF: exits non-zero"
+assert_missing "${FAKE_GIF}" "empty GIF: refuses to leave the empty artifact"
+
+touch "${FAKE_GIF}"
+run_record notagif
+assert_status 1 "non-GIF output: exits non-zero"
+assert_missing "${FAKE_GIF}" "non-GIF output: refuses to leave the bogus artifact"
+
+# 10) Docker デーモンへ到達できなければ、録画を始める前に案内して止まる
+run_record nodaemon
+assert_status 1 "unreachable Docker daemon: exits non-zero"
+assert_contains "デーモンを起動してから" "unreachable Docker daemon: gives an actionable message"
+
+# 11) 端末が無い環境では「幅が環境依存になる」と警告する。
+#     この警告が出るということは端末サイズを固定する分岐が生きている証拠でもある
+#     （テストは端末を持たないので、必ずこちらの経路を通る）
+run_record ok
+assert_contains "端末サイズを固定できません" "no terminal: warns that the GIF width is environment-dependent"
 
 # --- summary ----------------------------------------------------------------
 # 集計と終了コードの決定は共有ハーネスに任せる
