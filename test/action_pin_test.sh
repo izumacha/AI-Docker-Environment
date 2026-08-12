@@ -75,6 +75,13 @@ PASS=0
 # 失敗したチェックの件数を数えるカウンタ
 FAIL=0
 
+# 特権判定の回帰ケース用に、仮のワークフローを置く一時ディレクトリを 1 つだけ作る
+TEST_TMP="$(mktemp -d)"
+# 途中で中断された場合も含め、終了時に必ず一時ディレクトリを片付ける（他のテストスイートと同じ流儀）
+trap 'rm -rf "${TEST_TMP}"' EXIT
+# 仮のワークフローに連番の名前を付けるためのカウンタ
+FIXTURE_SEQ=0
+
 # 1 件の検査に成功したときの共通処理（合格を表示して成功数を増やす）
 pass() {
     # 合格した内容を「ok   - ...」の形式で表示する
@@ -91,6 +98,102 @@ fail() {
     [[ $# -ge 2 ]] && printf '       %s\n' "$2"
     # 失敗件数を 1 つ増やす
     FAIL=$((FAIL + 1))
+}
+
+# ワークフロー中の `permissions:` 宣言が「read / none 以外の権限」を 1 つでも与えているかを調べる関数
+# 第 1 引数: ワークフローファイルのパス
+# 与えていると判断したら標準出力へ `privileged` を出し、読み取り専用だけなら何も出さない
+#
+# 「write という文字列を探す」のではなく「read / none 以外が 1 つでもあるか」を見るのが要点。
+# GitHub Actions は同じ許可を何通りにも書けるため（`write-all` / フロー形式 `{contents: write}` /
+# 行末コメント付き `contents: write  # 説明`）、write の綴りを直接探す方式は書き方を変えるだけで
+# すり抜ける（issue #87 で 3 形態すべての取りこぼしを実測）。解釈できない書き方に出会った場合も
+# 「読めなかった＝合格」ではなく特権に倒す（このファイル全体を貫く fail-closed の方針）。
+permissions_grant_beyond_read() {
+    # 検査対象のファイルパスを、呼び出し側の変数に依存しないよう自前の変数へ取り出す
+    local path="$1"
+
+    # YAML を 1 行ずつたどり、`permissions:` の値（同一行のスカラー／フロー形式／続く字下げブロック）を解釈する
+    awk '
+        # ブロック形式の `permissions:` を読んでいる最中かどうかを表す旗
+        BEGIN { in_block = 0; block_indent = 0 }
+        {
+            # 判定に使う 1 行分の文字列を作業用の変数へ取り出す
+            line = $0
+            # Windows 改行（CR）が混じっていても末尾の空白判定が狂わないよう取り除く
+            sub(/\r$/, "", line)
+            # 行末コメントを落とす（`contents: write  # 説明` のような書き方でも値だけを見るため）
+            sub(/[[:space:]]*#.*$/, "", line)
+            # 空行・コメントだけの行はここで読み飛ばす
+            if (line ~ /^[[:space:]]*$/) next
+
+            # 最初に現れる非空白文字の位置から、その行の字下げ幅を求める
+            indent = match(line, /[^[:space:]]/) - 1
+
+            # 字下げブロックの内側にいる場合は、1 項目ずつ許可の値を確かめる
+            if (in_block) {
+                # 字下げが浅くなった＝ブロックの終わりなので、この行は通常の行として読み直す
+                if (indent <= block_indent) {
+                    in_block = 0
+                } else {
+                    # `contents: read` のような「名前: 値」1 項目の形かどうかを確かめる
+                    if (line ~ /^[[:space:]]*[A-Za-z][A-Za-z0-9_-]*:[[:space:]]*[A-Za-z-]+[[:space:]]*$/) {
+                        # コロンより後ろを値として取り出す
+                        value = line
+                        sub(/^[^:]*:[[:space:]]*/, "", value)
+                        sub(/[[:space:]]*$/, "", value)
+                        # read でも none でもない値は、何らかの書き込み権限を与えているとみなす
+                        if (value != "read" && value != "none") { print "privileged"; exit }
+                    } else {
+                        # 想定外の書き方は解釈できないので、安全側（特権）に倒す
+                        print "privileged"; exit
+                    }
+                    # この行の処理は済んだので次の行へ進む
+                    next
+                }
+            }
+
+            # `permissions:` の宣言行かどうかを調べる（ワークフロー全体・ジョブ単位のどちらも対象）
+            if (line ~ /^[[:space:]]*permissions:/) {
+                # `permissions:` の後ろに書かれた値を取り出す
+                value = line
+                sub(/^[[:space:]]*permissions:[[:space:]]*/, "", value)
+                sub(/[[:space:]]*$/, "", value)
+                # 値が空＝この下に字下げブロックが続く形なので、ブロック読み取りに切り替える
+                if (value == "") { in_block = 1; block_indent = indent; next }
+                # `read-all` は全スコープ読み取り専用なので特権ではない
+                if (value == "read-all") next
+                # `{...}` の 1 行フロー形式は、中身をカンマで分けて 1 項目ずつ確かめる
+                if (value ~ /^\{.*\}$/) {
+                    # 前後の波括弧を外して中身だけにする
+                    inner = value
+                    sub(/^\{[[:space:]]*/, "", inner)
+                    sub(/[[:space:]]*\}$/, "", inner)
+                    # `permissions: {}` は全スコープ none と同義なので特権ではない
+                    if (inner == "") next
+                    # カンマ区切りの項目に分割する
+                    n = split(inner, items, ",")
+                    # 取り出した項目を 1 つずつ検査する
+                    for (i = 1; i <= n; i++) {
+                        # 前後の空白を落として「名前: 値」だけにする
+                        item = items[i]
+                        gsub(/^[[:space:]]+|[[:space:]]+$/, "", item)
+                        # 想定した「名前: 値」の形でなければ解釈できないので特権に倒す
+                        if (item !~ /^[A-Za-z][A-Za-z0-9_-]*:[[:space:]]*[A-Za-z-]+$/) { print "privileged"; exit }
+                        # コロンより後ろを値として取り出す
+                        v = item
+                        sub(/^[^:]*:[[:space:]]*/, "", v)
+                        # read でも none でもなければ書き込み権限を与えているとみなす
+                        if (v != "read" && v != "none") { print "privileged"; exit }
+                    }
+                    # フロー形式の全項目が読み取り専用だったので次の行へ進む
+                    next
+                }
+                # `write-all` を含め、ここまでで扱えなかった値はすべて特権として扱う
+                print "privileged"; exit
+            }
+        }
+    ' "$path"
 }
 
 # 渡されたワークフローが「特権」かどうかをファイルの内容から判定する関数
@@ -111,19 +214,26 @@ is_privileged_workflow() {
         fi
     done
 
-    # secret を参照するワークフローは、漏洩すれば影響が出るため特権として扱う
-    if grep -qE 'secrets\.[A-Za-z_]' "$path"; then
+    # secret を参照するワークフローは、漏洩すれば影響が出るため特権として扱う。
+    # `${{ secrets.NAME }}` のドット付き参照に加え、reusable workflow 呼び出しの
+    # `secrets: inherit`（呼び出し先へ全 secret をそのまま渡す）も同じ重みで拾う。
+    # 後者は個々の secret 名がどこにも現れないため、ドット付き参照だけを探す方式では
+    # 「参照が無い＝非特権」と誤判定され、可変参照の外部ワークフローへ全 secret を
+    # 流す構成がピン強制をすり抜けた（issue #87）
+    if grep -qE 'secrets\.[A-Za-z_]|^[[:space:]]*secrets:[[:space:]]*inherit[[:space:]]*$' "$path"; then
         return 0
     fi
 
-    # 書き込み権限（`... : write`）を明示的に与えているワークフローは特権として扱う
-    if grep -qE '^[[:space:]]*[a-z-]+:[[:space:]]*write[[:space:]]*$' "$path"; then
+    # ワークフロー全体に効く `permissions:`（字下げ 0 の宣言）が無い場合は特権として扱う。
+    # ジョブ単位の宣言しか無いワークフローでは、宣言を書き忘れたジョブが
+    # リポジトリ既定（書き込み可能になりうる）のまま動くため、
+    # 「全ジョブに効く宣言がある」ことを非特権の必要条件にする（fail-closed）
+    if ! grep -qE '^permissions:' "$path"; then
         return 0
     fi
 
-    # `permissions:` の宣言自体が無い場合、既定値がリポジトリ設定次第で書き込み可能になりうるため、
-    # 安全側に倒して特権として扱う（不明なら拒否＝fail-closed の方針に合わせる）
-    if ! grep -qE '^[[:space:]]*permissions:' "$path"; then
+    # `permissions:` の宣言のうち 1 つでも read / none 以外を与えていれば特権として扱う
+    if [[ -n "$(permissions_grant_beyond_read "$path")" ]]; then
         return 0
     fi
 
@@ -367,6 +477,186 @@ check_workflow_file() {
             "no 'uses:' reference found; the workflow was restructured, or this checker's matcher no longer recognises its syntax"
     fi
 }
+
+# 特権判定そのものを、既知の書き方を並べた仮のワークフローで検査する関数
+# 第 1 引数: 期待する判定（privileged / plain）/ 第 2 引数: 表示用の説明 / 第 3 引数: ワークフローの中身
+#
+# なぜここに置くか: この分類器が「特権なのに plain」と誤れば、そのワークフロー内の可変タグは
+# 一切検査されないまま CI が緑になる（issue #87 で 4 形態の取りこぼしを実測）。
+# 実在のワークフローを見るだけでは、今そのリポジトリに無い書き方の取りこぼしに気付けないため、
+# 負例・正例を仮のファイルとして持ち込み、分類器を直接固定する。
+# 上流への問い合わせを伴わないので、ネットワーク不要でここだけ先に結果が出る。
+assert_privilege_classification() {
+    # 引数をそれぞれ意味の分かる名前の変数に取り出す
+    local expected="$1" label="$2" body="$3"
+    # 検査ごとに別名のファイルを作るための連番を 1 つ進める
+    FIXTURE_SEQ=$((FIXTURE_SEQ + 1))
+    # 判定にかけるための仮のワークフローの置き場所を決める
+    # （下限リスト `ALWAYS_PRIVILEGED` のファイル名と衝突しない名前にして、内容だけで判定させる）
+    local fixture="${TEST_TMP}/fixture-${FIXTURE_SEQ}.yml"
+    # 渡されたワークフローの中身を仮のファイルへ書き出す
+    printf '%s\n' "$body" > "$fixture"
+
+    # 実際の判定結果を、期待値と同じ語彙（privileged / plain）で受け取る
+    local actual="plain"
+    if is_privileged_workflow "$fixture"; then
+        actual="privileged"
+    fi
+
+    # 期待どおりかどうかを、他の検査と同じ書式で報告する
+    if [[ "$actual" == "$expected" ]]; then
+        pass "privilege classifier: ${label} → ${expected}"
+    else
+        fail "privilege classifier: ${label} → ${expected}" \
+            "classified as '${actual}'; a workflow misread as 'plain' has its mutable action refs skipped entirely, so FR-9.6(b) stops applying to it"
+    fi
+}
+
+# --- 特権と判定しなければならない書き方（issue #87 の負例と、その周辺） ---
+
+# すべてのスコープに書き込みを与える省略形。`... : write` 行が現れないため綴り探索では拾えない
+assert_privilege_classification privileged 'permissions: write-all' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7'
+
+# 1 行で書くフロー形式。値が行末に来ないため、行末一致の綴り探索では拾えない
+assert_privilege_classification privileged 'flow mapping {contents: write}' \
+'name: X
+permissions: {contents: write}
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7'
+
+# 行末コメント付き。値の後ろに文字が続くため、行末一致の綴り探索では拾えない
+assert_privilege_classification privileged 'trailing comment after the value' \
+'name: X
+permissions:
+  contents: write  # explanatory note
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7'
+
+# reusable workflow へ全 secret を渡す形。個々の secret 名が現れないためドット付き参照では拾えない
+assert_privilege_classification privileged 'secrets: inherit on a reusable workflow call' \
+'name: X
+permissions:
+  contents: read
+jobs:
+  j:
+    uses: some-org/some-repo/.github/workflows/verify.yml@main
+    secrets: inherit'
+
+# ジョブ単位でだけ書き込みを与える形（ワークフロー全体の宣言は読み取り専用）
+assert_privilege_classification privileged 'job-level write under a read-only workflow default' \
+'name: X
+permissions:
+  contents: read
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7'
+
+# ジョブ単位の宣言しか無い形。宣言の無いジョブがリポジトリ既定のまま動くため安全側に倒す
+assert_privilege_classification privileged 'job-level permissions only (no workflow-wide default)' \
+'name: X
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7'
+
+# `permissions:` の宣言が一切無い形（従来から特権扱い。退行させないため固定する）
+assert_privilege_classification privileged 'no permissions declaration at all' \
+'name: X
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7'
+
+# `${{ secrets.NAME }}` のドット付き参照（従来から特権扱い。退行させないため固定する）
+# GitHub Actions の式をそのまま検査対象にするため、シェルに展開させず単一引用で literal のまま渡す
+# shellcheck disable=SC2016
+assert_privilege_classification privileged 'dotted ${{ secrets.NAME }} reference' \
+'name: X
+permissions:
+  contents: read
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          token: ${{ secrets.SOME_TOKEN }}'
+
+# 解釈できない書き方（複数行にまたがるフロー形式）は、読めた範囲で通さず特権に倒す
+assert_privilege_classification privileged 'unparseable multi-line flow mapping' \
+'name: X
+permissions: {contents: read,
+              actions: read}
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7'
+
+# --- 非特権と判定しなければならない書き方（分類器が「常に特権」へ振り切れていないことの確認） ---
+# ここが崩れると ci.yml の正当な可変タグまで違反扱いになり、CI が恒常的に赤くなる
+
+# ブロック形式の読み取り専用宣言（ci.yml が実際に採っている形）
+assert_privilege_classification plain 'read-only block mapping' \
+'name: X
+permissions:
+  contents: read
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7'
+
+# 全スコープ読み取り専用の省略形
+assert_privilege_classification plain 'permissions: read-all' \
+'name: X
+permissions: read-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7'
+
+# 空のフロー形式（全スコープ none と同義で、最も権限が狭い）
+assert_privilege_classification plain 'permissions: {} (all scopes none)' \
+'name: X
+permissions: {}
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7'
+
+# 読み取り専用のフロー形式（フロー形式そのものを特権扱いにしていないことの確認）
+assert_privilege_classification plain 'read-only flow mapping {contents: read}' \
+'name: X
+permissions: {contents: read}
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7'
 
 # 下限リストに挙げた特権ワークフローが実在することを先に確かめる
 # （改名・削除で検査対象ごと消えた場合に「対象なし＝合格」とならないようにする）
