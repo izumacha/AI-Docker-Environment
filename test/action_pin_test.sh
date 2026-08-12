@@ -100,20 +100,29 @@ fail() {
     FAIL=$((FAIL + 1))
 }
 
-# ワークフロー中の `permissions:` 宣言が「read / none 以外の権限」を 1 つでも与えているかを調べる関数
+# ワークフローの構造を 1 度だけ走査し、特権の根拠が本文にあるかどうかを調べる関数
 # 第 1 引数: ワークフローファイルのパス
-# 判定を必ず標準出力へ出す（`privileged` = read/none 以外を与えている / `read-only` = 読み取り専用だけ）。
-# **無出力を「読み取り専用」と読み替えない**のが要点: awk 自体が異常終了した場合や、POSIX 文字クラスを
+# 判定を必ず標準出力へ出す（`privileged` = 特権の根拠がある / `read-only` = 根拠が無い）。
+#
+# 見るのは次の 2 つで、どちらも「YAML の構造としてその位置に置かれているか」で判定する:
+#   - `permissions:` の宣言が `read` / `none` 以外の権限を 1 つでも与えているか
+#   - `secrets:` を鍵に持つ行があるか（reusable workflow への `inherit` と、名前を挙げるブロック形式）
+# 2 つを同じ走査にまとめてあるのは、どちらも**ブロックスカラー（`run: |` 等）の本文を
+# 構造と読み違えない**という同じ前提を必要とするため。行単位の grep では字下げを追えないので、
+# `run:` の本文にたまたま `permissions: write-all` と書いただけで特権と誤判定し、
+# **意図的に可変タグを使っている `ci.yml`** を違反扱いにして CI を恒常的に赤くしてしまう（実測）。
+#
+# **無出力を「根拠なし」と読み替えない**のが要点: awk 自体が異常終了した場合や、POSIX 文字クラスを
 # 解釈できない awk に当たった場合に無出力になるため、「何も出なかった＝合格」にすると解析の失敗が
 # そのまま特権判定の取りこぼしに化ける（このファイルが繰り返し踏んだ「不在＝合格」）。
 # 呼び出し側は `read-only` と明示されたときだけ非特権と判断する。
 #
-# 「write という文字列を探す」のではなく「read / none 以外が 1 つでもあるか」を見るのが要点。
+# 権限は「write という文字列を探す」のではなく「read / none 以外が 1 つでもあるか」で見る。
 # GitHub Actions は同じ許可を何通りにも書けるため（`write-all` / フロー形式 `{contents: write}` /
 # 行末コメント付き `contents: write  # 説明`）、write の綴りを直接探す方式は書き方を変えるだけで
 # すり抜ける（issue #87 で 3 形態すべての取りこぼしを実測）。解釈できない書き方に出会った場合も
 # 「読めなかった＝合格」ではなく特権に倒す（このファイル全体を貫く fail-closed の方針）。
-permissions_grant_beyond_read() {
+scan_workflow_structure() {
     # 検査対象のファイルパスを、呼び出し側の変数に依存しないよう自前の変数へ取り出す
     local path="$1"
 
@@ -121,25 +130,60 @@ permissions_grant_beyond_read() {
     # 引用符の文字集合は awk の変数として渡す（awk のプログラムはシェルの単一引用符で囲まれており、
     # その中に `'` を直接書けないため）
     awk -v quote_chars='["'"'"']' '
-        # ブロック形式の `permissions:` を読んでいる最中かどうかを表す旗と、結論を出したかどうかの旗
-        BEGIN { in_block = 0; block_indent = 0; decided = 0 }
+        # ブロック形式の `permissions:` を読んでいる最中かどうか、ブロックスカラーの本文の中かどうか、
+        # そして結論を出したかどうかを表す旗
+        BEGIN { in_block = 0; block_indent = 0; in_scalar = 0; scalar_indent = 0; decided = 0 }
         {
             # 判定に使う 1 行分の文字列を作業用の変数へ取り出す
             line = $0
             # Windows 改行（CR）が混じっていても末尾の空白判定が狂わないよう取り除く
             sub(/\r$/, "", line)
-            # 行末コメントを落とす（`contents: write  # 説明` のような書き方でも値だけを見るため）
-            sub(/[[:space:]]*#.*$/, "", line)
-            # 引用符をすべて取り除き、`"permissions":` と `permissions:`、`"write"` と `write` を同じ形に揃える。
-            # YAML は鍵も値も引用できるため、引用の有無を綴りとして数え上げると必ず取りこぼす
-            # （`"permissions": write-all` が非特権と誤判定される穴を実測。secret 検出を語一致へ広げたのと同じ理由）。
-            # 許可の宣言に現れる鍵・値は引用符を含まない短い識別子なので、一律に落として差し支えない
-            gsub(quote_chars, "", line)
-            # 空行・コメントだけの行はここで読み飛ばす
+            # 空行は構造を変えないので、どの状態にいても読み飛ばす
             if (line ~ /^[[:space:]]*$/) next
 
             # 最初に現れる非空白文字の位置から、その行の字下げ幅を求める
             indent = match(line, /[^[:space:]]/) - 1
+
+            # ブロックスカラー（`run: |` 等）の本文は YAML の構造ではなくただの文字列なので、
+            # 字下げが浅くなるまで丸ごと読み飛ばす。ここを飛ばさないと、シェルスクリプトの中に
+            # 書かれた `permissions:` や `secrets:` を宣言と読み違える
+            if (in_scalar) {
+                if (indent > scalar_indent) next
+                in_scalar = 0
+            }
+
+            # ここから先は構造として解釈するので、行末コメントを落とす
+            # （`contents: write  # 説明` のような書き方でも値だけを見るため）
+            sub(/[[:space:]]*#.*$/, "", line)
+            # 引用符をすべて取り除き、`"permissions":` と `permissions:`、`"write"` と `write` を同じ形に揃える。
+            # YAML は鍵も値も引用できるため、引用の有無を綴りとして数え上げると必ず取りこぼす
+            # （`"permissions": write-all` が非特権と誤判定される穴を実測）
+            gsub(quote_chars, "", line)
+            # 大文字小文字の揺れも同様に潰しておく（`WRITE` と `write`、`Secrets:` と `secrets:` を同じ形にする）
+            line = tolower(line)
+            # コメントだけの行はここで読み飛ばす
+            if (line ~ /^[[:space:]]*$/) next
+
+            # `run: |` や `script: >-` のようにブロックスカラーが始まる行を見つけたら、
+            # 次の行から本文として読み飛ばす準備をする
+            if (line ~ /^[[:space:]]*(-[[:space:]]+)?[a-z_][a-z0-9_.-]*[[:space:]]*:[[:space:]]*[|>][0-9]*[+-]?[[:space:]]*$/) {
+                # ただし `permissions:` / `secrets:` 自身がブロックスカラーで書かれている場合は話が別で、
+                # 本文を読み飛ばすと宣言そのものが見えなくなる。解釈できない宣言として特権に倒す
+                # （`permissions: >-` の本文に `write-all` を置く書き方で取りこぼす退行を実測）
+                if (line ~ /^[[:space:]]*(-[[:space:]]+)?(permissions|secrets)[[:space:]]*:/) {
+                    print "privileged"; decided = 1; exit
+                }
+                in_scalar = 1
+                scalar_indent = indent
+                in_block = 0
+                next
+            }
+
+            # `secrets:` を鍵に持つ行は、reusable workflow へ secret を渡す形（`inherit` もブロック形式も）
+            # なので、値の綴りを見ずに特権と判断する
+            if (line ~ /^[[:space:]]*(-[[:space:]]+)?secrets[[:space:]]*:/) {
+                print "privileged"; decided = 1; exit
+            }
 
             # 字下げブロックの内側にいる場合は、1 項目ずつ許可の値を確かめる
             if (in_block) {
@@ -148,7 +192,7 @@ permissions_grant_beyond_read() {
                     in_block = 0
                 } else {
                     # `contents: read` のような「名前: 値」1 項目の形かどうかを確かめる
-                    if (line ~ /^[[:space:]]*[A-Za-z][A-Za-z0-9_-]*:[[:space:]]*[A-Za-z-]+[[:space:]]*$/) {
+                    if (line ~ /^[[:space:]]*[a-z][a-z0-9_-]*:[[:space:]]*[a-z-]+[[:space:]]*$/) {
                         # コロンより後ろを値として取り出す
                         value = line
                         sub(/^[^:]*:[[:space:]]*/, "", value)
@@ -191,7 +235,7 @@ permissions_grant_beyond_read() {
                         item = items[i]
                         gsub(/^[[:space:]]+|[[:space:]]+$/, "", item)
                         # 想定した「名前: 値」の形でなければ解釈できないので特権に倒す
-                        if (item !~ /^[A-Za-z][A-Za-z0-9_-]*:[[:space:]]*[A-Za-z-]+$/) { print "privileged"; decided = 1; exit }
+                        if (item !~ /^[a-z][a-z0-9_-]*:[[:space:]]*[a-z-]+$/) { print "privileged"; decided = 1; exit }
                         # コロンより後ろを値として取り出す
                         v = item
                         sub(/^[^:]*:[[:space:]]*/, "", v)
@@ -242,18 +286,29 @@ is_privileged_workflow() {
     # そこで「語があるか」ではなく「鍵として使われているか／式の中で参照されているか」を見る
 
     # (a) `${{ … }}` の式の中で参照される形。`secrets.NAME` も `toJSON(secrets)` も
-    #     添字形式もすべてここに当たる。式は改行をまたげるため、ファイル全体を 1 行に潰してから
-    #     照合する（`[^}]*` が式の終端を越えないよう歯止めになる）
-    if tr '\n' ' ' < "$path" | grep -qiE '\$\{\{[^}]*secrets'; then
+    #     添字形式もすべてここに当たる。
+    #     式は改行をまたげるのでファイル全体を 1 本につなぎ、**式の終端 `}}` で区切り直してから**探す。
+    #     「最初の `}` まで」で区切ると `${{ format('{0}', secrets.X) }}` のように式の内側に `}` を
+    #     含む書き方で照合が途中で切れ、参照を見落とす（実測）。逆に区切らずに探すと、
+    #     ファイルのどこかにある `${{ … }}` と、無関係な場所の `secrets` の語が結び付いてしまう
+    if awk '
+        # 全行を 1 本の文字列につなぐ（式が改行をまたいでいても 1 つのまとまりとして扱うため）
+        { joined = joined " " $0 }
+        END {
+            # 式の終端をすべて改行に置き換え、1 つの式が 1 行に収まる形にする
+            gsub(/}}/, "\n", joined)
+            # 式の開始から終端までの間に secrets が現れれば参照とみなす（大文字小文字は問わない）
+            if (tolower(joined) ~ /\$\{\{[^\n]*secrets/) exit 0
+            # どの式にも現れなければ、この形での参照は無い
+            exit 1
+        }
+    ' "$path"; then
         return 0
     fi
 
-    # (b) `secrets:` を鍵に持つ形。reusable workflow 呼び出しの `secrets: inherit`（呼び出し先へ
-    #     全 secret をそのまま渡す）と、名前を挙げて渡すブロック形式の両方がここに当たる。
-    #     引用符・コロン前の空白・大文字小文字はいずれも問わない（値の綴りは見ない）
-    if grep -qiE '^[[:space:]]*["'\'']?secrets["'\'']?[[:space:]]*:' "$path"; then
-        return 0
-    fi
+    # (b) `secrets:` を鍵に持つ形は、後段の構造走査（`scan_workflow_structure`）が
+    #     `permissions:` と同じ 1 回の走査で拾う。`run:` などのブロックスカラー本文を
+    #     構造として読み違えないためには字下げの追跡が要るので、行単位の grep では足りない
 
     # ワークフロー全体に効く `permissions:`（字下げ 0 の宣言）が無い場合は特権として扱う。
     # ジョブ単位の宣言しか無いワークフローでは、宣言を書き忘れたジョブが
@@ -265,7 +320,7 @@ is_privileged_workflow() {
 
     # `permissions:` の宣言を解析した結論を受け取る
     local verdict
-    verdict="$(permissions_grant_beyond_read "$path")"
+    verdict="$(scan_workflow_structure "$path")"
 
     # **`read-only` と明示されたときだけ**非特権と認める。
     # `privileged` はもちろん、解析器が異常終了して無出力になった場合や想定外の出力が来た場合も、
@@ -742,6 +797,31 @@ jobs:
               secrets.SOME_TOKEN
             }}'
 
+# 式の内側に `}` を含む形。式の終端ではなく最初の `}` で区切ると、参照を見落とす
+# shellcheck disable=SC2016
+assert_privilege_classification privileged 'secrets reference after a brace inside the expression' \
+'name: X
+permissions:
+  contents: read
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          token: ${{ format('"'"'{0}'"'"', secrets.SOME_TOKEN) }}'
+
+# `permissions:` 自身をブロックスカラーで書く形。本文を読み飛ばすと宣言ごと見えなくなるので特権に倒す
+assert_privilege_classification privileged 'permissions written as a folded block scalar' \
+'name: X
+permissions: >-
+  write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7'
+
 # ジョブ単位でだけ書き込みを与える形（ワークフロー全体の宣言は読み取り専用）
 assert_privilege_classification privileged 'job-level write under a read-only workflow default' \
 'name: X
@@ -889,6 +969,41 @@ assert_privilege_classification plain 'the word secrets only in prose (step name
 'name: X
 permissions:
   contents: read
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: lint (also greps for secrets)
+        run: echo hi
+      - uses: actions/checkout@v7'
+
+# `run:` のブロックスカラー本文に構造そっくりの行が混じる形。本文は YAML の構造ではなくただの文字列で、
+# ここを宣言と読み違えると、**意図的に可変タグを使っている `ci.yml`** が違反扱いになり CI が恒常的に赤くなる
+assert_privilege_classification plain 'permissions-looking line inside a run: block scalar' \
+'name: X
+permissions:
+  contents: read
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          cat <<SNIP
+          permissions: write-all
+          secrets: inherit
+          SNIP
+      - uses: actions/checkout@v7'
+
+# 無関係な式（`${{ github.ref }}` 等）と、散文としての `secrets` が同じファイルに同居する形。
+# 式の終端で区切らずに探すと、この 2 つが結び付いて「式の中の secret 参照」に見えてしまう。
+# `ci.yml` は実際に `concurrency` で `${{ github.ref }}` を使っているため、これは机上の話ではない
+# shellcheck disable=SC2016
+assert_privilege_classification plain 'unrelated expression plus the word secrets in prose' \
+'name: X
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
 jobs:
   j:
     runs-on: ubuntu-latest
