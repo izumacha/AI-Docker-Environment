@@ -75,6 +75,13 @@ PASS=0
 # 失敗したチェックの件数を数えるカウンタ
 FAIL=0
 
+# 特権判定の回帰ケース用に、仮のワークフローを置く一時ディレクトリを 1 つだけ作る
+TEST_TMP="$(mktemp -d)"
+# 途中で中断された場合も含め、終了時に必ず一時ディレクトリを片付ける（他のテストスイートと同じ流儀）
+trap 'rm -rf "${TEST_TMP}"' EXIT
+# 仮のワークフローに連番の名前を付けるためのカウンタ
+FIXTURE_SEQ=0
+
 # 1 件の検査に成功したときの共通処理（合格を表示して成功数を増やす）
 pass() {
     # 合格した内容を「ok   - ...」の形式で表示する
@@ -91,6 +98,221 @@ fail() {
     [[ $# -ge 2 ]] && printf '       %s\n' "$2"
     # 失敗件数を 1 つ増やす
     FAIL=$((FAIL + 1))
+}
+
+# ワークフローから「YAML の構造として意味を持つ行」だけを `行番号:行の内容` の形で書き出す関数
+# 第 1 引数: ワークフローファイルのパス
+#
+# 何を落とすか: ブロックスカラー（`run: |` / `prompt: >-` 等）の本文。あれは YAML の構造ではなく
+# ただの文字列なので、そこに書かれた `permissions:` や `uses:` を宣言と読み違えてはいけない。
+# スカラーを開始する行そのもの（`run: |`）は構造なので残す。
+#
+# なぜ 1 か所に集約するか: 特権判定と `uses:` 抽出の**両方**がこの前提を必要とするのに、
+# 片方だけに読み飛ばしを入れると非対称な誤りが出る。実際、判定側だけに入れた段階では
+# `run:` の本文に書かれた `- uses: …@v7` が違反として誤報され、正しくピンされている
+# `post-ci-verify.yml`（`prompt:` に長いブロックスカラーを持つ）で CI が恒常的に赤くなりえた。
+# 出力形式を `grep -n` と同じ `行番号:内容` に揃えてあるので、消費側は行番号を保ったまま使える
+emit_structural_lines() {
+    # 検査対象のファイルパスを変数に入れる
+    local path="$1"
+
+    # 引用符の文字集合は awk の変数として渡す（awk のプログラムはシェルの単一引用符で囲まれており、
+    # その中に `'` を直接書けないため）
+    awk -v quote_chars='["'"'"']' '
+        # ブロックスカラーの本文の中かどうかと、その開始行の字下げ幅を覚える
+        BEGIN { in_scalar = 0; scalar_indent = 0 }
+        {
+            # 判定に使う 1 行分の文字列を作業用の変数へ取り出す
+            line = $0
+            # Windows 改行（CR）が混じっていても末尾の空白判定が狂わないよう取り除く
+            sub(/\r$/, "", line)
+            # 空行は構造を持たないので、状態を変えずに読み飛ばす
+            if (line ~ /^[[:space:]]*$/) next
+
+            # 最初に現れる非空白文字の位置から、その行の字下げ幅を求める
+            indent = match(line, /[^[:space:]]/) - 1
+
+            # ブロックスカラーの本文は、字下げが浅くなるまで丸ごと読み飛ばす
+            if (in_scalar) {
+                if (indent > scalar_indent) next
+                in_scalar = 0
+            }
+
+            # 引用符を落として `"uses":` と `uses:` を同じ形に揃えてから書き出す。
+            # ここで揃えておけば、消費側それぞれが引用の有無を数え上げずに済む
+            emitted = line
+            gsub(quote_chars, "", emitted)
+            # ここまで残った行は構造なので、行番号を付けて書き出す
+            print NR ":" emitted
+
+            # スカラー開始かどうかは、コメント・大文字小文字を揃えた写しで判定する
+            probe = emitted
+            sub(/[[:space:]]*#.*$/, "", probe)
+            probe = tolower(probe)
+            # `run: |` や `prompt: >-` のような行なら、次の行から本文として読み飛ばす
+            if (probe ~ /^[[:space:]]*(-[[:space:]]+)?[a-z_][a-z0-9_.-]*[[:space:]]*:[[:space:]]*[|>][0-9]*[+-]?[[:space:]]*$/) {
+                in_scalar = 1
+                # 本文の範囲は**鍵の桁**で決める。ダッシュの桁で決めると、
+                # `- if: >-` の本文だけでなく**同じ手順の兄弟キー**（次行の `uses:` 等）まで
+                # 飲み込んでしまい、可変タグが検査対象から丸ごと外れる（実測）
+                if (match(probe, /^[[:space:]]*-[[:space:]]+/)) {
+                    # `- ` を含む前置きの長さが、そのまま鍵の桁になる
+                    scalar_indent = RLENGTH
+                } else {
+                    scalar_indent = indent
+                }
+            }
+        }
+    ' "$path"
+}
+
+# ワークフローの構造を 1 度だけ走査し、特権の根拠が本文にあるかどうかを調べる関数
+# 第 1 引数: ワークフローファイルのパス
+# 判定を必ず標準出力へ出す（`privileged` = 特権の根拠がある / `read-only` = 根拠が無い）。
+#
+# 見るのは次の 2 つで、どちらも「YAML の構造としてその位置に置かれているか」で判定する:
+#   - `permissions:` の宣言が `read` / `none` 以外の権限を 1 つでも与えているか
+#   - `secrets:` を鍵に持つ行があるか（reusable workflow への `inherit` と、名前を挙げるブロック形式）
+# 2 つを同じ走査にまとめてあるのは、どちらも**ブロックスカラー（`run: |` 等）の本文を
+# 構造と読み違えない**という同じ前提を必要とするため。行単位の grep では字下げを追えないので、
+# `run:` の本文にたまたま `permissions: write-all` と書いただけで特権と誤判定し、
+# **意図的に可変タグを使っている `ci.yml`** を違反扱いにして CI を恒常的に赤くしてしまう（実測）。
+#
+# **無出力を「根拠なし」と読み替えない**のが要点: awk 自体が異常終了した場合や、POSIX 文字クラスを
+# 解釈できない awk に当たった場合に無出力になるため、「何も出なかった＝合格」にすると解析の失敗が
+# そのまま特権判定の取りこぼしに化ける（このファイルが繰り返し踏んだ「不在＝合格」）。
+# 呼び出し側は `read-only` と明示されたときだけ非特権と判断する。
+#
+# 権限は「write という文字列を探す」のではなく「read / none 以外が 1 つでもあるか」で見る。
+# GitHub Actions は同じ許可を何通りにも書けるため（`write-all` / フロー形式 `{contents: write}` /
+# 行末コメント付き `contents: write  # 説明`）、write の綴りを直接探す方式は書き方を変えるだけで
+# すり抜ける（issue #87 で 3 形態すべての取りこぼしを実測）。解釈できない書き方に出会った場合も
+# 「読めなかった＝合格」ではなく特権に倒す（このファイル全体を貫く fail-closed の方針）。
+scan_workflow_structure() {
+    # 検査対象のファイルパスを、呼び出し側の変数に依存しないよう自前の変数へ取り出す
+    local path="$1"
+
+    # YAML を 1 行ずつたどり、`permissions:` の値（同一行のスカラー／フロー形式／続く字下げブロック）を解釈する。
+    # 引用符の文字集合は awk の変数として渡す（awk のプログラムはシェルの単一引用符で囲まれており、
+    # その中に `'` を直接書けないため）
+    emit_structural_lines "$path" | awk -v quote_chars='["'"'"']' '
+        # ブロック形式の `permissions:` を読んでいる最中かどうか、結論を出したかどうか、
+        # そして構造行を 1 行でも受け取ったかどうかを表す旗
+        BEGIN { in_block = 0; block_indent = 0; decided = 0; seen = 0 }
+        {
+            # 構造行を 1 行受け取ったことを記録する（1 行も来ないのは抽出側の異常なので後段で特権に倒す）
+            seen = 1
+            # `行番号:内容` の形で渡されるので、行番号を落として内容だけを取り出す
+            line = $0
+            sub(/^[0-9]+:/, "", line)
+
+            # 最初に現れる非空白文字の位置から、その行の字下げ幅を求める
+            indent = match(line, /[^[:space:]]/) - 1
+
+            # 構造として解釈するので、行末コメントを落とす
+            # （`contents: write  # 説明` のような書き方でも値だけを見るため）
+            sub(/[[:space:]]*#.*$/, "", line)
+            # 引用符をすべて取り除き、`"permissions":` と `permissions:`、`"write"` と `write` を同じ形に揃える。
+            # YAML は鍵も値も引用できるため、引用の有無を綴りとして数え上げると必ず取りこぼす
+            # （`"permissions": write-all` が非特権と誤判定される穴を実測）
+            gsub(quote_chars, "", line)
+            # 大文字小文字の揺れも同様に潰しておく（`WRITE` と `write`、`Secrets:` と `secrets:` を同じ形にする）
+            line = tolower(line)
+            # コメントだけの行はここで読み飛ばす
+            if (line ~ /^[[:space:]]*$/) next
+
+            # `permissions:` / `secrets:` 自身がブロックスカラー（`permissions: >-` 等）で書かれている場合、
+            # 本文は抽出側で落とされるため宣言の中身が見えない。解釈できない宣言として特権に倒す
+            if (line ~ /^[[:space:]]*(-[[:space:]]+)?(permissions|secrets)[[:space:]]*:[[:space:]]*[|>][0-9]*[+-]?[[:space:]]*$/) {
+                print "privileged"; decided = 1; exit
+            }
+
+            # `secrets:` を鍵に持つ行は、reusable workflow へ secret を渡す形（`inherit` もブロック形式も）
+            # なので、値の綴りを見ずに特権と判断する
+            if (line ~ /^[[:space:]]*(-[[:space:]]+)?secrets[[:space:]]*:/) {
+                print "privileged"; decided = 1; exit
+            }
+
+            # 1 行のフローマッピングでジョブを書くと（`j: {runs-on: …, permissions: {contents: write}}`）、
+            # 鍵が行頭に来ないため上の行頭一致では見えない。フローの区切り（`{` か `,`）の直後に
+            # `permissions` / `secrets` が現れる形を、解釈できない宣言として特権に倒す
+            # （この経路で `secrets: inherit` のバイパスが 1 行の書き換えで復活することを実測）
+            if (line ~ /[{,][[:space:]]*(permissions|secrets)[[:space:]]*:/) {
+                print "privileged"; decided = 1; exit
+            }
+
+            # 字下げブロックの内側にいる場合は、1 項目ずつ許可の値を確かめる
+            if (in_block) {
+                # 字下げが浅くなった＝ブロックの終わりなので、この行は通常の行として読み直す
+                if (indent <= block_indent) {
+                    in_block = 0
+                } else {
+                    # `contents: read` のような「名前: 値」1 項目の形かどうかを確かめる
+                    if (line ~ /^[[:space:]]*[a-z][a-z0-9_-]*:[[:space:]]*[a-z-]+[[:space:]]*$/) {
+                        # コロンより後ろを値として取り出す
+                        value = line
+                        sub(/^[^:]*:[[:space:]]*/, "", value)
+                        sub(/[[:space:]]*$/, "", value)
+                        # read でも none でもない値は、何らかの書き込み権限を与えているとみなす
+                        if (value != "read" && value != "none") { print "privileged"; decided = 1; exit }
+                    } else {
+                        # 想定外の書き方は解釈できないので、安全側（特権）に倒す
+                        print "privileged"; decided = 1; exit
+                    }
+                    # この行の処理は済んだので次の行へ進む
+                    next
+                }
+            }
+
+            # `permissions:` の宣言行かどうかを調べる（ワークフロー全体・ジョブ単位のどちらも対象）。
+            # `permissions :` のようにコロンの前に空白を挟む書き方も YAML では正しいので許容する
+            if (line ~ /^[[:space:]]*permissions[[:space:]]*:/) {
+                # 最初のコロンより後ろを値として取り出す
+                value = line
+                sub(/^[^:]*:[[:space:]]*/, "", value)
+                sub(/[[:space:]]*$/, "", value)
+                # 値が空＝この下に字下げブロックが続く形なので、ブロック読み取りに切り替える
+                if (value == "") { in_block = 1; block_indent = indent; next }
+                # `read-all` は全スコープ読み取り専用なので特権ではない
+                if (value == "read-all") next
+                # `{...}` の 1 行フロー形式は、中身をカンマで分けて 1 項目ずつ確かめる
+                if (value ~ /^\{.*\}$/) {
+                    # 前後の波括弧を外して中身だけにする
+                    inner = value
+                    sub(/^\{[[:space:]]*/, "", inner)
+                    sub(/[[:space:]]*\}$/, "", inner)
+                    # `permissions: {}` は全スコープ none と同義なので特権ではない
+                    if (inner == "") next
+                    # カンマ区切りの項目に分割する
+                    n = split(inner, items, ",")
+                    # 取り出した項目を 1 つずつ検査する
+                    for (i = 1; i <= n; i++) {
+                        # 前後の空白を落として「名前: 値」だけにする
+                        item = items[i]
+                        gsub(/^[[:space:]]+|[[:space:]]+$/, "", item)
+                        # 想定した「名前: 値」の形でなければ解釈できないので特権に倒す
+                        if (item !~ /^[a-z][a-z0-9_-]*:[[:space:]]*[a-z-]+$/) { print "privileged"; decided = 1; exit }
+                        # コロンより後ろを値として取り出す
+                        v = item
+                        sub(/^[^:]*:[[:space:]]*/, "", v)
+                        # read でも none でもなければ書き込み権限を与えているとみなす
+                        if (v != "read" && v != "none") { print "privileged"; decided = 1; exit }
+                    }
+                    # フロー形式の全項目が読み取り専用だったので次の行へ進む
+                    next
+                }
+                # `write-all` を含め、ここまでで扱えなかった値はすべて特権として扱う
+                print "privileged"; decided = 1; exit
+            }
+        }
+        # 最後まで read / none 以外が出てこなかったときだけ「読み取り専用」と結論する。
+        # exit で抜けた場合も END は実行されるため、旗で二重出力を防ぐ。
+        # 構造行が 1 行も来なかった場合は抽出側が壊れているので、「根拠なし」ではなく特権に倒す
+        END {
+            if (decided) exit
+            if (seen) print "read-only"; else print "privileged"
+        }
+    '
 }
 
 # 渡されたワークフローが「特権」かどうかをファイルの内容から判定する関数
@@ -111,19 +333,59 @@ is_privileged_workflow() {
         fi
     done
 
-    # secret を参照するワークフローは、漏洩すれば影響が出るため特権として扱う
-    if grep -qE 'secrets\.[A-Za-z_]' "$path"; then
+    # secret がこのワークフローを通るなら、漏洩すれば影響が出るため特権として扱う。
+    # 判定は綴りを数え上げず、**`secrets` が構文上どの位置に置かれているか**の 2 通りだけで行う。
+    # 綴りの列挙が続かない理由: Actions は同じ意味を何通りにも書ける（`secrets.NAME` /
+    # `secrets['NAME']` / `secrets ["NAME"]` / `toJSON(secrets)` / `secrets: inherit` /
+    # `secrets: 'inherit'` / `"secrets": inherit` / 行末コメント付き / 文脈名は大文字小文字を
+    # 区別しないので `Secrets.NAME` も有効……）。issue #87 とその後のセルフレビューで
+    # 3 度、列挙の穴を突かれている。
+    # 逆に「`secrets` という語がどこかにあれば特権」まで広げると今度は行き過ぎで、
+    # 例えば `ci.yml` のステップ名に `secrets` の語が入っただけで、**意図的に可変タグを使っている**
+    # 同ファイルが違反扱いになり CI が恒常的に赤くなる（この取り違えも実測した）。
+    # そこで「語があるか」ではなく「鍵として使われているか／式の中で参照されているか」を見る
+
+    # (a) `${{ … }}` の式の中で参照される形。`secrets.NAME` も `toJSON(secrets)` も
+    #     添字形式もすべてここに当たる。
+    #     式は改行をまたげるのでファイル全体を 1 本につなぎ、**式の終端 `}}` で区切り直してから**探す。
+    #     「最初の `}` まで」で区切ると `${{ format('{0}', secrets.X) }}` のように式の内側に `}` を
+    #     含む書き方で照合が途中で切れ、参照を見落とす（実測）。逆に区切らずに探すと、
+    #     ファイルのどこかにある `${{ … }}` と、無関係な場所の `secrets` の語が結び付いてしまう
+    if awk '
+        # 全行を 1 本の文字列につなぐ（式が改行をまたいでいても 1 つのまとまりとして扱うため）
+        { joined = joined " " $0 }
+        END {
+            # 式の終端をすべて改行に置き換え、1 つの式が 1 行に収まる形にする
+            gsub(/}}/, "\n", joined)
+            # 式の開始から終端までの間に secrets が現れれば参照とみなす（大文字小文字は問わない）
+            if (tolower(joined) ~ /\$\{\{[^\n]*secrets/) exit 0
+            # どの式にも現れなければ、この形での参照は無い
+            exit 1
+        }
+    ' "$path"; then
         return 0
     fi
 
-    # 書き込み権限（`... : write`）を明示的に与えているワークフローは特権として扱う
-    if grep -qE '^[[:space:]]*[a-z-]+:[[:space:]]*write[[:space:]]*$' "$path"; then
+    # (b) `secrets:` を鍵に持つ形は、後段の構造走査（`scan_workflow_structure`）が
+    #     `permissions:` と同じ 1 回の走査で拾う。`run:` などのブロックスカラー本文を
+    #     構造として読み違えないためには字下げの追跡が要るので、行単位の grep では足りない
+
+    # ワークフロー全体に効く `permissions:`（字下げ 0 の宣言）が無い場合は特権として扱う。
+    # ジョブ単位の宣言しか無いワークフローでは、宣言を書き忘れたジョブが
+    # リポジトリ既定（書き込み可能になりうる）のまま動くため、
+    # 「全ジョブに効く宣言がある」ことを非特権の必要条件にする（fail-closed）
+    if ! grep -qE "^[\"']?permissions[\"']?[[:space:]]*:" "$path"; then
         return 0
     fi
 
-    # `permissions:` の宣言自体が無い場合、既定値がリポジトリ設定次第で書き込み可能になりうるため、
-    # 安全側に倒して特権として扱う（不明なら拒否＝fail-closed の方針に合わせる）
-    if ! grep -qE '^[[:space:]]*permissions:' "$path"; then
+    # `permissions:` の宣言を解析した結論を受け取る
+    local verdict
+    verdict="$(scan_workflow_structure "$path")"
+
+    # **`read-only` と明示されたときだけ**非特権と認める。
+    # `privileged` はもちろん、解析器が異常終了して無出力になった場合や想定外の出力が来た場合も、
+    # 「判定できなかった」として特権に倒す（不明なら拒否＝fail-closed）
+    if [[ "$verdict" != "read-only" ]]; then
         return 0
     fi
 
@@ -271,8 +533,12 @@ check_uses_line() {
     local wf_name="$1" lineno="$2" content="$3" scope="$4"
     local ref action pinned marker label
 
-    # `uses:` の値（参照文字列の全体）を取り出す
-    ref="$(printf '%s' "$content" | sed -E 's/^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*([^[:space:]]+).*/\2/')"
+    # `uses:` の値（参照文字列の全体）を取り出す。
+    # 先頭に空白を足してから「最後の `uses:` の直前までを捨てる」ことで、
+    # 手順の先頭（`- uses: …`）とフローマッピングの中（`- {uses: …}`）を同じ 1 本の式で扱える
+    ref="$(printf ' %s' "$content" | sed -E 's/.*[[:space:]{,]uses[[:space:]]*:[[:space:]]*//')"
+    # フロー形式では値の直後に区切り（`}` `]` `,`）が続くので、そこまでを値とする
+    ref="$(printf '%s' "$ref" | sed -E 's/[][[:space:],}].*$//')"
     # YAML では値を引用符で囲めるため、URL に混入しないよう `'` と `"` を取り除く
     ref="${ref//\'/}"
     ref="${ref//\"/}"
@@ -358,7 +624,14 @@ check_workflow_file() {
         seen=1
         # 取り出した 1 行を検査する
         check_uses_line "$wf_name" "$lineno" "$content" "$scope"
-    done < <(grep -nE '^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*[^[:space:]]' "$path" || true)
+    # 抽出元は `emit_structural_lines`（ブロックスカラーの本文を除いた構造行）。
+    # 行番号付きで渡ってくるので、`uses:` 行だけを行番号ごと選び出す
+    # 引用符は抽出側で落とされているので、鍵は `uses` の形に揃っている。
+    # 手順の先頭（`- uses:`）に加えて、フローマッピングの中（`- {uses: …}` / `{a: b, uses: …}`）も拾い、
+    # `uses : …` のようにコロンの前に空白を挟む書き方（YAML では正しい）も許容する
+    # — 鍵の表記ゆれは特権判定側で 3 度取りこぼしており、強制側だけ 1 通りに絞る理由が無い
+    done < <(emit_structural_lines "$path" \
+        | grep -E '^[0-9]+:([[:space:]]*(-[[:space:]]+)?|.*[{,][[:space:]]*)uses[[:space:]]*:[[:space:]]*[^[:space:]]' || true)
 
     # 特権ワークフローに `uses:` が 1 行も無いのは、抽出条件の破損か構成変更を意味するため失敗にする
     # （検査対象が消えたことを「合格」と読み替えないための歯止め）
@@ -367,6 +640,623 @@ check_workflow_file() {
             "no 'uses:' reference found; the workflow was restructured, or this checker's matcher no longer recognises its syntax"
     fi
 }
+
+# 1 つのワークフローについて、特権判定から `uses:` 検査までを一続きに行う関数
+# 第 1 引数: ワークフローファイルのパス
+#
+# 本番の走査ループと回帰テストの**両方がこの 1 本を呼ぶ**ことに意味がある。
+# 判定と検査を別々に書くと、判定の回帰テストが緑のまま「判定結果を検査へ渡す配線」だけが
+# 壊れうる（例: 常に `plain` を渡すよう書き換えても、分類器の単体検査は全件通る）。
+# 経路を 1 本に束ねることで、その配線自体を回帰テストの射程に入れる
+check_workflow_path() {
+    # 検査対象のファイルパスを変数に入れる
+    local path="$1"
+
+    # このファイルが特権かどうかを内容から判定し、適用する規則を決める
+    if is_privileged_workflow "$path"; then
+        check_workflow_file "$path" "privileged"
+    else
+        check_workflow_file "$path" "plain"
+    fi
+}
+
+# 仮のワークフローを実際の検査経路へ通し、違反として数えられるかどうかを確かめる関数
+# 第 1 引数: 期待する結果（enforced = 違反として検出される / accepted = 何も咎められない）
+# 第 2 引数: 表示用の説明 / 第 3 引数: ワークフローの中身
+#
+# なぜ分類器の判定を見るだけでは足りないか: FR-9.6(b) の実効性は
+# 「特権と判定する」→「その中の `uses:` すべてに不変なピンを要求する」の 2 段で成り立つ。
+# 前段だけを固定すると後段を丸ごと削っても回帰テストが緑のままになるため、
+# ここでは `check_workflow_path()` に通し、集計カウンタの増分で結果を観測する。
+# 上流問い合わせを起こさないよう、仮のワークフローには SHA ピンを書かない（可変参照だけを使う）
+assert_pin_enforcement() {
+    # 引数をそれぞれ意味の分かる名前の変数に取り出す
+    local expected="$1" label="$2" body="$3"
+    # 検査ごとに別名のファイルを作るための連番を 1 つ進める
+    FIXTURE_SEQ=$((FIXTURE_SEQ + 1))
+    # 仮のワークフローの置き場所を決める
+    local fixture="${TEST_TMP}/enforce-${FIXTURE_SEQ}.yml"
+    # 渡されたワークフローの中身を仮のファイルへ書き出す
+    printf '%s\n' "$body" > "$fixture"
+
+    # 仮のワークフローの検査結果が本物の集計に混ざらないよう、現在の値を退避する
+    local saved_pass="$PASS" saved_fail="$FAIL"
+    # 本番と同じ経路へ通す（表示は集計だけを見たいので捨てる）
+    check_workflow_path "$fixture" > /dev/null
+    # この仮のワークフローが何件の違反を生んだかを増分から求める
+    local violations=$((FAIL - saved_fail))
+    # 退避しておいた集計を元に戻す
+    PASS="$saved_pass"
+    FAIL="$saved_fail"
+
+    # 違反が 1 件以上あれば「強制された」、0 件なら「受理された」とみなす
+    local actual="accepted"
+    if [[ "$violations" -gt 0 ]]; then
+        actual="enforced"
+    fi
+
+    # 期待どおりかどうかを、他の検査と同じ書式で報告する
+    if [[ "$actual" == "$expected" ]]; then
+        pass "pin enforcement: ${label} → ${expected}"
+    else
+        fail "pin enforcement: ${label} → ${expected}" \
+            "the workflow was ${actual} (${violations} violation(s)); privilege classification and pin enforcement are wired together by check_workflow_path(), so this covers both"
+    fi
+}
+
+# 特権判定そのものを、既知の書き方を並べた仮のワークフローで検査する関数
+# 第 1 引数: 期待する判定（privileged / plain）/ 第 2 引数: 表示用の説明 / 第 3 引数: ワークフローの中身
+#
+# なぜここに置くか: この分類器が「特権なのに plain」と誤れば、そのワークフロー内の可変タグは
+# 一切検査されないまま CI が緑になる（issue #87 で 4 形態の取りこぼしを実測）。
+# 実在のワークフローを見るだけでは、今そのリポジトリに無い書き方の取りこぼしに気付けないため、
+# 負例・正例を仮のファイルとして持ち込み、分類器を直接固定する。
+# 上流への問い合わせを伴わないので、ネットワーク不要でここだけ先に結果が出る。
+assert_privilege_classification() {
+    # 引数をそれぞれ意味の分かる名前の変数に取り出す
+    local expected="$1" label="$2" body="$3"
+    # 検査ごとに別名のファイルを作るための連番を 1 つ進める
+    FIXTURE_SEQ=$((FIXTURE_SEQ + 1))
+    # 判定にかけるための仮のワークフローの置き場所を決める
+    # （下限リスト `ALWAYS_PRIVILEGED` のファイル名と衝突しない名前にして、内容だけで判定させる）
+    local fixture="${TEST_TMP}/fixture-${FIXTURE_SEQ}.yml"
+    # 渡されたワークフローの中身を仮のファイルへ書き出す
+    printf '%s\n' "$body" > "$fixture"
+
+    # 実際の判定結果を、期待値と同じ語彙（privileged / plain）で受け取る
+    local actual="plain"
+    if is_privileged_workflow "$fixture"; then
+        actual="privileged"
+    fi
+
+    # 期待どおりかどうかを、他の検査と同じ書式で報告する
+    if [[ "$actual" == "$expected" ]]; then
+        pass "privilege classifier: ${label} → ${expected}"
+    else
+        fail "privilege classifier: ${label} → ${expected}" \
+            "classified as '${actual}'; a workflow misread as 'plain' has its mutable action refs skipped entirely, so FR-9.6(b) stops applying to it"
+    fi
+}
+
+# --- 特権と判定しなければならない書き方（issue #87 の負例と、その周辺） ---
+
+# すべてのスコープに書き込みを与える省略形。`... : write` 行が現れないため綴り探索では拾えない
+assert_privilege_classification privileged 'permissions: write-all' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7'
+
+# 1 行で書くフロー形式。値が行末に来ないため、行末一致の綴り探索では拾えない
+assert_privilege_classification privileged 'flow mapping {contents: write}' \
+'name: X
+permissions: {contents: write}
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7'
+
+# 行末コメント付き。値の後ろに文字が続くため、行末一致の綴り探索では拾えない
+assert_privilege_classification privileged 'trailing comment after the value' \
+'name: X
+permissions:
+  contents: write  # explanatory note
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7'
+
+# reusable workflow へ全 secret を渡す形。個々の secret 名が現れないためドット付き参照では拾えない
+assert_privilege_classification privileged 'secrets: inherit on a reusable workflow call' \
+'name: X
+permissions:
+  contents: read
+jobs:
+  j:
+    uses: some-org/some-repo/.github/workflows/verify.yml@main
+    secrets: inherit'
+
+# `secrets: inherit` に行末コメントが付く形（`inherit` の綴り一致では行末が合わず拾えない）
+assert_privilege_classification privileged 'secrets: inherit with a trailing comment' \
+'name: X
+permissions:
+  contents: read
+jobs:
+  j:
+    uses: some-org/some-repo/.github/workflows/verify.yml@main
+    secrets: inherit  # forward everything'
+
+# `secrets: inherit` が引用符で囲まれる形（同上）
+assert_privilege_classification privileged 'secrets: quoted inherit' \
+"name: X
+permissions:
+  contents: read
+jobs:
+  j:
+    uses: some-org/some-repo/.github/workflows/verify.yml@main
+    secrets: 'inherit'"
+
+# 名前を挙げて secret を渡すブロック形式（鍵の存在だけで拾う）
+assert_privilege_classification privileged 'secrets block forwarding named secrets' \
+'name: X
+permissions:
+  contents: read
+jobs:
+  j:
+    uses: some-org/some-repo/.github/workflows/verify.yml@main
+    secrets:
+      TOKEN: placeholder'
+
+# 添字形式の式参照。Actions の正式な書き方だがドット付き参照では拾えない
+# shellcheck disable=SC2016
+assert_privilege_classification privileged "indexed \${{ secrets['NAME'] }} reference" \
+'name: X
+permissions:
+  contents: read
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          token: ${{ secrets['"'"'SOME_TOKEN'"'"'] }}'
+
+# 文脈名の大文字小文字を変えた形。Actions の文脈名は大文字小文字を区別しないため、
+# `secrets` の小文字だけを見ると綴りではなく「字の大小」で迂回できてしまう
+# shellcheck disable=SC2016
+assert_privilege_classification privileged 'capitalised ${{ Secrets.NAME }} reference' \
+'name: X
+permissions:
+  contents: read
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          token: ${{ Secrets.SOME_TOKEN }}'
+
+# 鍵側の大文字小文字（同上）
+assert_privilege_classification privileged 'capitalised Secrets: inherit key' \
+'name: X
+permissions:
+  contents: read
+jobs:
+  j:
+    uses: some-org/some-repo/.github/workflows/verify.yml@main
+    Secrets: inherit'
+
+# 式が改行をまたぐ形。1 行ずつ見ると `${{` と `secrets` が別の行に分かれて当たらない
+# shellcheck disable=SC2016
+assert_privilege_classification privileged 'secrets reference split across lines' \
+'name: X
+permissions:
+  contents: read
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          token: >-
+            ${{
+              secrets.SOME_TOKEN
+            }}'
+
+# 式の内側に `}` を含む形。式の終端ではなく最初の `}` で区切ると、参照を見落とす
+# shellcheck disable=SC2016
+assert_privilege_classification privileged 'secrets reference after a brace inside the expression' \
+'name: X
+permissions:
+  contents: read
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          token: ${{ format('"'"'{0}'"'"', secrets.SOME_TOKEN) }}'
+
+# `permissions:` 自身をブロックスカラーで書く形。本文を読み飛ばすと宣言ごと見えなくなるので特権に倒す
+assert_privilege_classification privileged 'permissions written as a folded block scalar' \
+'name: X
+permissions: >-
+  write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7'
+
+# ジョブを 1 行のフローマッピングで書く形。鍵が行頭に来ないため、行頭一致だけでは宣言が見えない
+assert_privilege_classification privileged 'job written as a single-line flow mapping with permissions' \
+'name: X
+permissions:
+  contents: read
+jobs:
+  j: {runs-on: ubuntu-latest, permissions: {contents: write}, steps: [{uses: actions/checkout@v7}]}'
+
+# 同じくフローマッピングでの `secrets: inherit`。1 行に書き換えるだけでバイパスが復活してはならない
+assert_privilege_classification privileged 'secrets: inherit inside a flow mapping' \
+'name: X
+permissions:
+  contents: read
+jobs:
+  j: {uses: org/repo/.github/workflows/verify.yml@main, secrets: inherit}'
+
+# ジョブ単位でだけ書き込みを与える形（ワークフロー全体の宣言は読み取り専用）
+assert_privilege_classification privileged 'job-level write under a read-only workflow default' \
+'name: X
+permissions:
+  contents: read
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7'
+
+# ジョブ単位の宣言しか無い形。宣言の無いジョブがリポジトリ既定のまま動くため安全側に倒す
+assert_privilege_classification privileged 'job-level permissions only (no workflow-wide default)' \
+'name: X
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7'
+
+# `permissions:` の宣言が一切無い形（従来から特権扱い。退行させないため固定する）
+assert_privilege_classification privileged 'no permissions declaration at all' \
+'name: X
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7'
+
+# `${{ secrets.NAME }}` のドット付き参照（従来から特権扱い。退行させないため固定する）
+# GitHub Actions の式をそのまま検査対象にするため、シェルに展開させず単一引用で literal のまま渡す
+# shellcheck disable=SC2016
+assert_privilege_classification privileged 'dotted ${{ secrets.NAME }} reference' \
+'name: X
+permissions:
+  contents: read
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          token: ${{ secrets.SOME_TOKEN }}'
+
+# 鍵を二重引用符で囲む形。鍵の綴りを 1 通りだけ数え上げると、宣言そのものが見えなくなる
+assert_privilege_classification privileged 'double-quoted permissions key at job level' \
+'name: X
+permissions:
+  contents: read
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    "permissions": write-all
+    steps:
+      - uses: actions/checkout@v7'
+
+# 鍵を単一引用符で囲む形（同上）
+assert_privilege_classification privileged 'single-quoted permissions key at job level' \
+"name: X
+permissions:
+  contents: read
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    'permissions': write-all
+    steps:
+      - uses: actions/checkout@v7"
+
+# コロンの前に空白を挟む形（YAML では正しい書き方）
+assert_privilege_classification privileged 'space before the colon of the permissions key' \
+'name: X
+permissions:
+  contents: read
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    permissions : write-all
+    steps:
+      - uses: actions/checkout@v7'
+
+# 値を引用符で囲んだ書き込み権限（引用符を落として解釈できていることの確認）
+assert_privilege_classification privileged 'quoted write value in a block mapping' \
+'name: X
+permissions:
+  contents: "write"
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7'
+
+# 解釈できない書き方（複数行にまたがるフロー形式）は、読めた範囲で通さず特権に倒す
+assert_privilege_classification privileged 'unparseable multi-line flow mapping' \
+'name: X
+permissions: {contents: read,
+              actions: read}
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7'
+
+# --- 非特権と判定しなければならない書き方（分類器が「常に特権」へ振り切れていないことの確認） ---
+# ここが崩れると ci.yml の正当な可変タグまで違反扱いになり、CI が恒常的に赤くなる
+
+# ブロック形式の読み取り専用宣言（ci.yml が実際に採っている形）
+assert_privilege_classification plain 'read-only block mapping' \
+'name: X
+permissions:
+  contents: read
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7'
+
+# 全スコープ読み取り専用の省略形
+assert_privilege_classification plain 'permissions: read-all' \
+'name: X
+permissions: read-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7'
+
+# 空のフロー形式（全スコープ none と同義で、最も権限が狭い）
+assert_privilege_classification plain 'permissions: {} (all scopes none)' \
+'name: X
+permissions: {}
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7'
+
+# 散文として `secrets` の語が出るだけの形。ステップ名やコメントでの言及を特権扱いにすると、
+# **意図的に可変タグを使っている `ci.yml`** が違反扱いになり CI が恒常的に赤くなるため、
+# 「語があるか」ではなく「構文上どこに置かれているか」で判定していることを固定する
+assert_privilege_classification plain 'the word secrets only in prose (step name)' \
+'name: X
+permissions:
+  contents: read
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: lint (also greps for secrets)
+        run: echo hi
+      - uses: actions/checkout@v7'
+
+# `run:` のブロックスカラー本文に構造そっくりの行が混じる形。本文は YAML の構造ではなくただの文字列で、
+# ここを宣言と読み違えると、**意図的に可変タグを使っている `ci.yml`** が違反扱いになり CI が恒常的に赤くなる
+assert_privilege_classification plain 'permissions-looking line inside a run: block scalar' \
+'name: X
+permissions:
+  contents: read
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          cat <<SNIP
+          permissions: write-all
+          secrets: inherit
+          SNIP
+      - uses: actions/checkout@v7'
+
+# 無関係な式（`${{ github.ref }}` 等）と、散文としての `secrets` が同じファイルに同居する形。
+# 式の終端で区切らずに探すと、この 2 つが結び付いて「式の中の secret 参照」に見えてしまう。
+# `ci.yml` は実際に `concurrency` で `${{ github.ref }}` を使っているため、これは机上の話ではない
+# shellcheck disable=SC2016
+assert_privilege_classification plain 'unrelated expression plus the word secrets in prose' \
+'name: X
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: lint (also greps for secrets)
+        run: echo hi
+      - uses: actions/checkout@v7'
+
+# 引用符付きの読み取り専用宣言（引用符を落とした結果、過剰に特権へ倒れていないことの確認）
+assert_privilege_classification plain 'quoted read-only keys and values' \
+'name: X
+"permissions":
+  "contents": "read"
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7'
+
+# 読み取り専用のフロー形式（フロー形式そのものを特権扱いにしていないことの確認）
+assert_privilege_classification plain 'read-only flow mapping {contents: read}' \
+'name: X
+permissions: {contents: read}
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7'
+
+# --- 分類とピン強制の接続（判定結果が実際に規則へ効いているか） ---
+
+# 特権ワークフロー中の可変タグは違反として検出されなければならない（FR-9.6(b) の中心）
+assert_pin_enforcement enforced 'privileged workflow with a mutable tag' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7'
+
+# 版の指定が無い参照も、固定できていないので違反として検出されなければならない
+assert_pin_enforcement enforced 'privileged workflow with an unversioned action ref' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout'
+
+# コンテナ参照はダイジェスト固定が必要で、タグ参照は違反として検出されなければならない
+assert_pin_enforcement enforced 'privileged workflow with a mutable docker:// ref' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker://alpine:3.20'
+
+# 特権ワークフローに `uses:` が 1 行も無いのは、抽出条件の破損か構成変更なので違反として扱う
+assert_pin_enforcement enforced 'privileged workflow with no uses: at all' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hello'
+
+# リポジトリ内のローカル action は外部から取り込まないため、特権でも咎めない
+assert_pin_enforcement accepted 'privileged workflow using a local action' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/local'
+
+# `run:` のブロックスカラー本文に `uses:` そっくりの行が混じる形。本文は YAML の構造ではないので、
+# 違反として数えてはならない（`post-ci-verify.yml` は常に特権扱いで、実際に長い `prompt:` ブロックを
+# 持つため、ここを構造として読むと正しくピンされているファイルで CI が恒常的に赤くなる）
+assert_pin_enforcement accepted 'privileged workflow with a uses:-looking line inside a run: block' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/local
+      - run: |
+          cat <<SNIP
+          - uses: actions/checkout@v7
+          SNIP'
+
+# ブロックスカラーを値に持つ鍵（`- if: >-`）と**同じ手順の兄弟キー**が続く形。
+# 本文の範囲をダッシュの桁で決めると兄弟の `uses:` まで飲み込み、可変タグが検査対象から外れる
+assert_pin_enforcement enforced 'mutable tag as a sibling key of a block-scalar key' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/local
+      - if: >-
+          github.event_name == '"'"'push'"'"'
+        uses: actions/checkout@v7'
+
+# 鍵を引用符で囲む形。特権判定側では引用符を落としているので、抽出側も同じ形で揃っていなければならない
+assert_pin_enforcement enforced 'mutable tag under a quoted uses key' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/local
+      - "uses": actions/checkout@v7'
+
+# 手順を 1 行のフローマッピングで書く形。値の直後に `}` が続くため、参照の切り出しも合わせる必要がある
+assert_pin_enforcement enforced 'mutable tag inside a flow-mapping step' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/local
+      - {uses: actions/checkout@v7}'
+
+# フローマッピングの中で**正しくダイジェスト固定された**コンテナ参照。値の直後の `}` を
+# 切り落とさないと固定済みの参照が未固定に見え、正しい書き方を違反として誤報する
+assert_pin_enforcement accepted 'digest-pinned docker:// step inside a flow mapping' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - {uses: docker://alpine@sha256:0000000000000000000000000000000000000000000000000000000000000000}'
+
+# コロンの前に空白を挟む鍵（YAML では正しい書き方）。特権判定側で同じ揺れを 3 度取りこぼしているので、
+# 強制側でも 1 通りの綴りに絞らない
+assert_pin_enforcement enforced 'mutable tag under a uses key with a space before the colon' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/local
+      - uses : actions/checkout@v7'
+
+# 非特権ワークフローの可変タグは FR-9.6(b) の対象外なので咎めない（`ci.yml` が実際に依存している挙動）
+assert_pin_enforcement accepted 'plain workflow with a mutable tag' \
+'name: X
+permissions:
+  contents: read
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7'
 
 # 下限リストに挙げた特権ワークフローが実在することを先に確かめる
 # （改名・削除で検査対象ごと消えた場合に「対象なし＝合格」とならないようにする）
@@ -380,14 +1270,10 @@ for wf in "${ALWAYS_PRIVILEGED[@]}"; do
     fi
 done
 
-# ワークフロー定義ファイルを 1 つずつ、特権かどうかを内容から判定したうえで検査する
+# ワークフロー定義ファイルを 1 つずつ、実際の検査経路（`check_workflow_path`）に通す
 while IFS= read -r wf_path; do
-    # このファイルが特権かどうかを内容から判定し、適用する規則を決める
-    if is_privileged_workflow "$wf_path"; then
-        check_workflow_file "$wf_path" "privileged"
-    else
-        check_workflow_file "$wf_path" "plain"
-    fi
+    # 特権判定から `uses:` 検査までを、回帰テストと同じ 1 本の経路で実行する
+    check_workflow_path "$wf_path"
 # ワークフロー定義ファイルを名前順に列挙する（実行結果を再現しやすくするため）
 done < <(find "$WORKFLOW_DIR" -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) | sort)
 
