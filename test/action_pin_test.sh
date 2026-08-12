@@ -230,16 +230,28 @@ is_privileged_workflow() {
     done
 
     # secret がこのワークフローを通るなら、漏洩すれば影響が出るため特権として扱う。
-    # 判定は**書き方を列挙せず、`secrets` という語が現れるかどうか**だけで行う。
-    # 綴りを列挙する方式は、Actions が同じ意味を何通りにも書けるため必ず取りこぼす:
-    # `secrets.NAME` / `secrets['NAME']` / `secrets ["NAME"]` / `toJSON(secrets)` /
-    # `secrets: inherit` / `secrets: 'inherit'` / `"secrets": inherit` / 行末コメント付き……と、
-    # issue #87 とその後のセルフレビューで実際に 2 度、列挙の穴を突かれている。
-    # 語そのものを見れば、どの書き方でも必ず当たり、新しい書き方が増えても追随不要になる。
-    # 代償として、コメントで `secrets` に言及しただけのワークフローも特権に倒れる。
-    # 過剰な特権判定は action のピンを余計に要求するだけで済むのに対し、取りこぼしは
-    # そのワークフローへの FR-9.6(b) 適用を丸ごと止めるので、非対称なこの向きに倒す
-    if grep -qwE 'secrets' "$path"; then
+    # 判定は綴りを数え上げず、**`secrets` が構文上どの位置に置かれているか**の 2 通りだけで行う。
+    # 綴りの列挙が続かない理由: Actions は同じ意味を何通りにも書ける（`secrets.NAME` /
+    # `secrets['NAME']` / `secrets ["NAME"]` / `toJSON(secrets)` / `secrets: inherit` /
+    # `secrets: 'inherit'` / `"secrets": inherit` / 行末コメント付き / 文脈名は大文字小文字を
+    # 区別しないので `Secrets.NAME` も有効……）。issue #87 とその後のセルフレビューで
+    # 3 度、列挙の穴を突かれている。
+    # 逆に「`secrets` という語がどこかにあれば特権」まで広げると今度は行き過ぎで、
+    # 例えば `ci.yml` のステップ名に `secrets` の語が入っただけで、**意図的に可変タグを使っている**
+    # 同ファイルが違反扱いになり CI が恒常的に赤くなる（この取り違えも実測した）。
+    # そこで「語があるか」ではなく「鍵として使われているか／式の中で参照されているか」を見る
+
+    # (a) `${{ … }}` の式の中で参照される形。`secrets.NAME` も `toJSON(secrets)` も
+    #     添字形式もすべてここに当たる。式は改行をまたげるため、ファイル全体を 1 行に潰してから
+    #     照合する（`[^}]*` が式の終端を越えないよう歯止めになる）
+    if tr '\n' ' ' < "$path" | grep -qiE '\$\{\{[^}]*secrets'; then
+        return 0
+    fi
+
+    # (b) `secrets:` を鍵に持つ形。reusable workflow 呼び出しの `secrets: inherit`（呼び出し先へ
+    #     全 secret をそのまま渡す）と、名前を挙げて渡すブロック形式の両方がここに当たる。
+    #     引用符・コロン前の空白・大文字小文字はいずれも問わない（値の綴りは見ない）
+    if grep -qiE '^[[:space:]]*["'\'']?secrets["'\'']?[[:space:]]*:' "$path"; then
         return 0
     fi
 
@@ -688,6 +700,48 @@ jobs:
         with:
           token: ${{ secrets['"'"'SOME_TOKEN'"'"'] }}'
 
+# 文脈名の大文字小文字を変えた形。Actions の文脈名は大文字小文字を区別しないため、
+# `secrets` の小文字だけを見ると綴りではなく「字の大小」で迂回できてしまう
+# shellcheck disable=SC2016
+assert_privilege_classification privileged 'capitalised ${{ Secrets.NAME }} reference' \
+'name: X
+permissions:
+  contents: read
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          token: ${{ Secrets.SOME_TOKEN }}'
+
+# 鍵側の大文字小文字（同上）
+assert_privilege_classification privileged 'capitalised Secrets: inherit key' \
+'name: X
+permissions:
+  contents: read
+jobs:
+  j:
+    uses: some-org/some-repo/.github/workflows/verify.yml@main
+    Secrets: inherit'
+
+# 式が改行をまたぐ形。1 行ずつ見ると `${{` と `secrets` が別の行に分かれて当たらない
+# shellcheck disable=SC2016
+assert_privilege_classification privileged 'secrets reference split across lines' \
+'name: X
+permissions:
+  contents: read
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          token: >-
+            ${{
+              secrets.SOME_TOKEN
+            }}'
+
 # ジョブ単位でだけ書き込みを与える形（ワークフロー全体の宣言は読み取り専用）
 assert_privilege_classification privileged 'job-level write under a read-only workflow default' \
 'name: X
@@ -826,6 +880,21 @@ jobs:
   j:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v7'
+
+# 散文として `secrets` の語が出るだけの形。ステップ名やコメントでの言及を特権扱いにすると、
+# **意図的に可変タグを使っている `ci.yml`** が違反扱いになり CI が恒常的に赤くなるため、
+# 「語があるか」ではなく「構文上どこに置かれているか」で判定していることを固定する
+assert_privilege_classification plain 'the word secrets only in prose (step name)' \
+'name: X
+permissions:
+  contents: read
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: lint (also greps for secrets)
+        run: echo hi
       - uses: actions/checkout@v7'
 
 # 引用符付きの読み取り専用宣言（引用符を落とした結果、過剰に特権へ倒れていないことの確認）
