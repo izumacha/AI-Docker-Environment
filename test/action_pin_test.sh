@@ -138,18 +138,29 @@ emit_structural_lines() {
                 in_scalar = 0
             }
 
+            # 引用符を落として `"uses":` と `uses:` を同じ形に揃えてから書き出す。
+            # ここで揃えておけば、消費側それぞれが引用の有無を数え上げずに済む
+            emitted = line
+            gsub(quote_chars, "", emitted)
             # ここまで残った行は構造なので、行番号を付けて書き出す
-            print NR ":" line
+            print NR ":" emitted
 
-            # スカラー開始かどうかは、コメント・引用符・大文字小文字を揃えた写しで判定する
-            probe = line
+            # スカラー開始かどうかは、コメント・大文字小文字を揃えた写しで判定する
+            probe = emitted
             sub(/[[:space:]]*#.*$/, "", probe)
-            gsub(quote_chars, "", probe)
             probe = tolower(probe)
             # `run: |` や `prompt: >-` のような行なら、次の行から本文として読み飛ばす
             if (probe ~ /^[[:space:]]*(-[[:space:]]+)?[a-z_][a-z0-9_.-]*[[:space:]]*:[[:space:]]*[|>][0-9]*[+-]?[[:space:]]*$/) {
                 in_scalar = 1
-                scalar_indent = indent
+                # 本文の範囲は**鍵の桁**で決める。ダッシュの桁で決めると、
+                # `- if: >-` の本文だけでなく**同じ手順の兄弟キー**（次行の `uses:` 等）まで
+                # 飲み込んでしまい、可変タグが検査対象から丸ごと外れる（実測）
+                if (match(probe, /^[[:space:]]*-[[:space:]]+/)) {
+                    # `- ` を含む前置きの長さが、そのまま鍵の桁になる
+                    scalar_indent = RLENGTH
+                } else {
+                    scalar_indent = indent
+                }
             }
         }
     ' "$path"
@@ -522,8 +533,12 @@ check_uses_line() {
     local wf_name="$1" lineno="$2" content="$3" scope="$4"
     local ref action pinned marker label
 
-    # `uses:` の値（参照文字列の全体）を取り出す
-    ref="$(printf '%s' "$content" | sed -E 's/^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*([^[:space:]]+).*/\2/')"
+    # `uses:` の値（参照文字列の全体）を取り出す。
+    # 先頭に空白を足してから「最後の `uses:` の直前までを捨てる」ことで、
+    # 手順の先頭（`- uses: …`）とフローマッピングの中（`- {uses: …}`）を同じ 1 本の式で扱える
+    ref="$(printf ' %s' "$content" | sed -E 's/.*[[:space:]{,]uses:[[:space:]]*//')"
+    # フロー形式では値の直後に区切り（`}` `]` `,`）が続くので、そこまでを値とする
+    ref="$(printf '%s' "$ref" | sed -E 's/[][[:space:],}].*$//')"
     # YAML では値を引用符で囲めるため、URL に混入しないよう `'` と `"` を取り除く
     ref="${ref//\'/}"
     ref="${ref//\"/}"
@@ -611,7 +626,10 @@ check_workflow_file() {
         check_uses_line "$wf_name" "$lineno" "$content" "$scope"
     # 抽出元は `emit_structural_lines`（ブロックスカラーの本文を除いた構造行）。
     # 行番号付きで渡ってくるので、`uses:` 行だけを行番号ごと選び出す
-    done < <(emit_structural_lines "$path" | grep -E '^[0-9]+:[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*[^[:space:]]' || true)
+    # 引用符は抽出側で落とされているので、鍵は `uses:` の形に揃っている。
+    # 手順の先頭（`- uses:`）に加えて、フローマッピングの中（`- {uses: …}` / `{a: b, uses: …}`）も拾う
+    done < <(emit_structural_lines "$path" \
+        | grep -E '^[0-9]+:([[:space:]]*(-[[:space:]]+)?|.*[{,][[:space:]]*)uses:[[:space:]]*[^[:space:]]' || true)
 
     # 特権ワークフローに `uses:` が 1 行も無いのは、抽出条件の破損か構成変更を意味するため失敗にする
     # （検査対象が消えたことを「合格」と読み替えないための歯止め）
@@ -1167,6 +1185,53 @@ jobs:
           cat <<SNIP
           - uses: actions/checkout@v7
           SNIP'
+
+# ブロックスカラーを値に持つ鍵（`- if: >-`）と**同じ手順の兄弟キー**が続く形。
+# 本文の範囲をダッシュの桁で決めると兄弟の `uses:` まで飲み込み、可変タグが検査対象から外れる
+assert_pin_enforcement enforced 'mutable tag as a sibling key of a block-scalar key' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/local
+      - if: >-
+          github.event_name == '"'"'push'"'"'
+        uses: actions/checkout@v7'
+
+# 鍵を引用符で囲む形。特権判定側では引用符を落としているので、抽出側も同じ形で揃っていなければならない
+assert_pin_enforcement enforced 'mutable tag under a quoted uses key' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/local
+      - "uses": actions/checkout@v7'
+
+# 手順を 1 行のフローマッピングで書く形。値の直後に `}` が続くため、参照の切り出しも合わせる必要がある
+assert_pin_enforcement enforced 'mutable tag inside a flow-mapping step' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/local
+      - {uses: actions/checkout@v7}'
+
+# フローマッピングの中で**正しくダイジェスト固定された**コンテナ参照。値の直後の `}` を
+# 切り落とさないと固定済みの参照が未固定に見え、正しい書き方を違反として誤報する
+assert_pin_enforcement accepted 'digest-pinned docker:// step inside a flow mapping' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - {uses: docker://alpine@sha256:0000000000000000000000000000000000000000000000000000000000000000}'
 
 # 非特権ワークフローの可変タグは FR-9.6(b) の対象外なので咎めない（`ci.yml` が実際に依存している挙動）
 assert_pin_enforcement accepted 'plain workflow with a mutable tag' \
