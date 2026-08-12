@@ -536,7 +536,7 @@ check_uses_line() {
     # `uses:` の値（参照文字列の全体）を取り出す。
     # 先頭に空白を足してから「最後の `uses:` の直前までを捨てる」ことで、
     # 手順の先頭（`- uses: …`）とフローマッピングの中（`- {uses: …}`）を同じ 1 本の式で扱える
-    ref="$(printf ' %s' "$content" | sed -E 's/.*[[:space:]{,]uses:[[:space:]]*//')"
+    ref="$(printf ' %s' "$content" | sed -E 's/.*[[:space:]{,]uses[[:space:]]*:[[:space:]]*//')"
     # フロー形式では値の直後に区切り（`}` `]` `,`）が続くので、そこまでを値とする
     ref="$(printf '%s' "$ref" | sed -E 's/[][[:space:],}].*$//')"
     # YAML では値を引用符で囲めるため、URL に混入しないよう `'` と `"` を取り除く
@@ -626,10 +626,12 @@ check_workflow_file() {
         check_uses_line "$wf_name" "$lineno" "$content" "$scope"
     # 抽出元は `emit_structural_lines`（ブロックスカラーの本文を除いた構造行）。
     # 行番号付きで渡ってくるので、`uses:` 行だけを行番号ごと選び出す
-    # 引用符は抽出側で落とされているので、鍵は `uses:` の形に揃っている。
-    # 手順の先頭（`- uses:`）に加えて、フローマッピングの中（`- {uses: …}` / `{a: b, uses: …}`）も拾う
+    # 引用符は抽出側で落とされているので、鍵は `uses` の形に揃っている。
+    # 手順の先頭（`- uses:`）に加えて、フローマッピングの中（`- {uses: …}` / `{a: b, uses: …}`）も拾い、
+    # `uses : …` のようにコロンの前に空白を挟む書き方（YAML では正しい）も許容する
+    # — 鍵の表記ゆれは特権判定側で 3 度取りこぼしており、強制側だけ 1 通りに絞る理由が無い
     done < <(emit_structural_lines "$path" \
-        | grep -E '^[0-9]+:([[:space:]]*(-[[:space:]]+)?|.*[{,][[:space:]]*)uses:[[:space:]]*[^[:space:]]' || true)
+        | grep -E '^[0-9]+:([[:space:]]*(-[[:space:]]+)?|.*[{,][[:space:]]*)uses[[:space:]]*:[[:space:]]*[^[:space:]]' || true)
 
     # 特権ワークフローに `uses:` が 1 行も無いのは、抽出条件の破損か構成変更を意味するため失敗にする
     # （検査対象が消えたことを「合格」と読み替えないための歯止め）
@@ -1232,6 +1234,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - {uses: docker://alpine@sha256:0000000000000000000000000000000000000000000000000000000000000000}'
+
+# コロンの前に空白を挟む鍵（YAML では正しい書き方）。特権判定側で同じ揺れを 3 度取りこぼしているので、
+# 強制側でも 1 通りの綴りに絞らない
+assert_pin_enforcement enforced 'mutable tag under a uses key with a space before the colon' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/local
+      - uses : actions/checkout@v7'
 
 # 非特権ワークフローの可変タグは FR-9.6(b) の対象外なので咎めない（`ci.yml` が実際に依存している挙動）
 assert_pin_enforcement accepted 'plain workflow with a mutable tag' \
