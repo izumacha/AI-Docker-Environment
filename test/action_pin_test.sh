@@ -100,6 +100,61 @@ fail() {
     FAIL=$((FAIL + 1))
 }
 
+# ワークフローから「YAML の構造として意味を持つ行」だけを `行番号:行の内容` の形で書き出す関数
+# 第 1 引数: ワークフローファイルのパス
+#
+# 何を落とすか: ブロックスカラー（`run: |` / `prompt: >-` 等）の本文。あれは YAML の構造ではなく
+# ただの文字列なので、そこに書かれた `permissions:` や `uses:` を宣言と読み違えてはいけない。
+# スカラーを開始する行そのもの（`run: |`）は構造なので残す。
+#
+# なぜ 1 か所に集約するか: 特権判定と `uses:` 抽出の**両方**がこの前提を必要とするのに、
+# 片方だけに読み飛ばしを入れると非対称な誤りが出る。実際、判定側だけに入れた段階では
+# `run:` の本文に書かれた `- uses: …@v7` が違反として誤報され、正しくピンされている
+# `post-ci-verify.yml`（`prompt:` に長いブロックスカラーを持つ）で CI が恒常的に赤くなりえた。
+# 出力形式を `grep -n` と同じ `行番号:内容` に揃えてあるので、消費側は行番号を保ったまま使える
+emit_structural_lines() {
+    # 検査対象のファイルパスを変数に入れる
+    local path="$1"
+
+    # 引用符の文字集合は awk の変数として渡す（awk のプログラムはシェルの単一引用符で囲まれており、
+    # その中に `'` を直接書けないため）
+    awk -v quote_chars='["'"'"']' '
+        # ブロックスカラーの本文の中かどうかと、その開始行の字下げ幅を覚える
+        BEGIN { in_scalar = 0; scalar_indent = 0 }
+        {
+            # 判定に使う 1 行分の文字列を作業用の変数へ取り出す
+            line = $0
+            # Windows 改行（CR）が混じっていても末尾の空白判定が狂わないよう取り除く
+            sub(/\r$/, "", line)
+            # 空行は構造を持たないので、状態を変えずに読み飛ばす
+            if (line ~ /^[[:space:]]*$/) next
+
+            # 最初に現れる非空白文字の位置から、その行の字下げ幅を求める
+            indent = match(line, /[^[:space:]]/) - 1
+
+            # ブロックスカラーの本文は、字下げが浅くなるまで丸ごと読み飛ばす
+            if (in_scalar) {
+                if (indent > scalar_indent) next
+                in_scalar = 0
+            }
+
+            # ここまで残った行は構造なので、行番号を付けて書き出す
+            print NR ":" line
+
+            # スカラー開始かどうかは、コメント・引用符・大文字小文字を揃えた写しで判定する
+            probe = line
+            sub(/[[:space:]]*#.*$/, "", probe)
+            gsub(quote_chars, "", probe)
+            probe = tolower(probe)
+            # `run: |` や `prompt: >-` のような行なら、次の行から本文として読み飛ばす
+            if (probe ~ /^[[:space:]]*(-[[:space:]]+)?[a-z_][a-z0-9_.-]*[[:space:]]*:[[:space:]]*[|>][0-9]*[+-]?[[:space:]]*$/) {
+                in_scalar = 1
+                scalar_indent = indent
+            }
+        }
+    ' "$path"
+}
+
 # ワークフローの構造を 1 度だけ走査し、特権の根拠が本文にあるかどうかを調べる関数
 # 第 1 引数: ワークフローファイルのパス
 # 判定を必ず標準出力へ出す（`privileged` = 特権の根拠がある / `read-only` = 根拠が無い）。
@@ -129,30 +184,21 @@ scan_workflow_structure() {
     # YAML を 1 行ずつたどり、`permissions:` の値（同一行のスカラー／フロー形式／続く字下げブロック）を解釈する。
     # 引用符の文字集合は awk の変数として渡す（awk のプログラムはシェルの単一引用符で囲まれており、
     # その中に `'` を直接書けないため）
-    awk -v quote_chars='["'"'"']' '
-        # ブロック形式の `permissions:` を読んでいる最中かどうか、ブロックスカラーの本文の中かどうか、
-        # そして結論を出したかどうかを表す旗
-        BEGIN { in_block = 0; block_indent = 0; in_scalar = 0; scalar_indent = 0; decided = 0 }
+    emit_structural_lines "$path" | awk -v quote_chars='["'"'"']' '
+        # ブロック形式の `permissions:` を読んでいる最中かどうか、結論を出したかどうか、
+        # そして構造行を 1 行でも受け取ったかどうかを表す旗
+        BEGIN { in_block = 0; block_indent = 0; decided = 0; seen = 0 }
         {
-            # 判定に使う 1 行分の文字列を作業用の変数へ取り出す
+            # 構造行を 1 行受け取ったことを記録する（1 行も来ないのは抽出側の異常なので後段で特権に倒す）
+            seen = 1
+            # `行番号:内容` の形で渡されるので、行番号を落として内容だけを取り出す
             line = $0
-            # Windows 改行（CR）が混じっていても末尾の空白判定が狂わないよう取り除く
-            sub(/\r$/, "", line)
-            # 空行は構造を変えないので、どの状態にいても読み飛ばす
-            if (line ~ /^[[:space:]]*$/) next
+            sub(/^[0-9]+:/, "", line)
 
             # 最初に現れる非空白文字の位置から、その行の字下げ幅を求める
             indent = match(line, /[^[:space:]]/) - 1
 
-            # ブロックスカラー（`run: |` 等）の本文は YAML の構造ではなくただの文字列なので、
-            # 字下げが浅くなるまで丸ごと読み飛ばす。ここを飛ばさないと、シェルスクリプトの中に
-            # 書かれた `permissions:` や `secrets:` を宣言と読み違える
-            if (in_scalar) {
-                if (indent > scalar_indent) next
-                in_scalar = 0
-            }
-
-            # ここから先は構造として解釈するので、行末コメントを落とす
+            # 構造として解釈するので、行末コメントを落とす
             # （`contents: write  # 説明` のような書き方でも値だけを見るため）
             sub(/[[:space:]]*#.*$/, "", line)
             # 引用符をすべて取り除き、`"permissions":` と `permissions:`、`"write"` と `write` を同じ形に揃える。
@@ -164,24 +210,23 @@ scan_workflow_structure() {
             # コメントだけの行はここで読み飛ばす
             if (line ~ /^[[:space:]]*$/) next
 
-            # `run: |` や `script: >-` のようにブロックスカラーが始まる行を見つけたら、
-            # 次の行から本文として読み飛ばす準備をする
-            if (line ~ /^[[:space:]]*(-[[:space:]]+)?[a-z_][a-z0-9_.-]*[[:space:]]*:[[:space:]]*[|>][0-9]*[+-]?[[:space:]]*$/) {
-                # ただし `permissions:` / `secrets:` 自身がブロックスカラーで書かれている場合は話が別で、
-                # 本文を読み飛ばすと宣言そのものが見えなくなる。解釈できない宣言として特権に倒す
-                # （`permissions: >-` の本文に `write-all` を置く書き方で取りこぼす退行を実測）
-                if (line ~ /^[[:space:]]*(-[[:space:]]+)?(permissions|secrets)[[:space:]]*:/) {
-                    print "privileged"; decided = 1; exit
-                }
-                in_scalar = 1
-                scalar_indent = indent
-                in_block = 0
-                next
+            # `permissions:` / `secrets:` 自身がブロックスカラー（`permissions: >-` 等）で書かれている場合、
+            # 本文は抽出側で落とされるため宣言の中身が見えない。解釈できない宣言として特権に倒す
+            if (line ~ /^[[:space:]]*(-[[:space:]]+)?(permissions|secrets)[[:space:]]*:[[:space:]]*[|>][0-9]*[+-]?[[:space:]]*$/) {
+                print "privileged"; decided = 1; exit
             }
 
             # `secrets:` を鍵に持つ行は、reusable workflow へ secret を渡す形（`inherit` もブロック形式も）
             # なので、値の綴りを見ずに特権と判断する
             if (line ~ /^[[:space:]]*(-[[:space:]]+)?secrets[[:space:]]*:/) {
+                print "privileged"; decided = 1; exit
+            }
+
+            # 1 行のフローマッピングでジョブを書くと（`j: {runs-on: …, permissions: {contents: write}}`）、
+            # 鍵が行頭に来ないため上の行頭一致では見えない。フローの区切り（`{` か `,`）の直後に
+            # `permissions` / `secrets` が現れる形を、解釈できない宣言として特権に倒す
+            # （この経路で `secrets: inherit` のバイパスが 1 行の書き換えで復活することを実測）
+            if (line ~ /[{,][[:space:]]*(permissions|secrets)[[:space:]]*:/) {
                 print "privileged"; decided = 1; exit
             }
 
@@ -250,9 +295,13 @@ scan_workflow_structure() {
             }
         }
         # 最後まで read / none 以外が出てこなかったときだけ「読み取り専用」と結論する。
-        # exit で抜けた場合も END は実行されるため、旗で二重出力を防ぐ
-        END { if (!decided) print "read-only" }
-    ' "$path"
+        # exit で抜けた場合も END は実行されるため、旗で二重出力を防ぐ。
+        # 構造行が 1 行も来なかった場合は抽出側が壊れているので、「根拠なし」ではなく特権に倒す
+        END {
+            if (decided) exit
+            if (seen) print "read-only"; else print "privileged"
+        }
+    '
 }
 
 # 渡されたワークフローが「特権」かどうかをファイルの内容から判定する関数
@@ -560,7 +609,9 @@ check_workflow_file() {
         seen=1
         # 取り出した 1 行を検査する
         check_uses_line "$wf_name" "$lineno" "$content" "$scope"
-    done < <(grep -nE '^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*[^[:space:]]' "$path" || true)
+    # 抽出元は `emit_structural_lines`（ブロックスカラーの本文を除いた構造行）。
+    # 行番号付きで渡ってくるので、`uses:` 行だけを行番号ごと選び出す
+    done < <(emit_structural_lines "$path" | grep -E '^[0-9]+:[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*[^[:space:]]' || true)
 
     # 特権ワークフローに `uses:` が 1 行も無いのは、抽出条件の破損か構成変更を意味するため失敗にする
     # （検査対象が消えたことを「合格」と読み替えないための歯止め）
@@ -821,6 +872,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7'
+
+# ジョブを 1 行のフローマッピングで書く形。鍵が行頭に来ないため、行頭一致だけでは宣言が見えない
+assert_privilege_classification privileged 'job written as a single-line flow mapping with permissions' \
+'name: X
+permissions:
+  contents: read
+jobs:
+  j: {runs-on: ubuntu-latest, permissions: {contents: write}, steps: [{uses: actions/checkout@v7}]}'
+
+# 同じくフローマッピングでの `secrets: inherit`。1 行に書き換えるだけでバイパスが復活してはならない
+assert_privilege_classification privileged 'secrets: inherit inside a flow mapping' \
+'name: X
+permissions:
+  contents: read
+jobs:
+  j: {uses: org/repo/.github/workflows/verify.yml@main, secrets: inherit}'
 
 # ジョブ単位でだけ書き込みを与える形（ワークフロー全体の宣言は読み取り専用）
 assert_privilege_classification privileged 'job-level write under a read-only workflow default' \
@@ -1084,6 +1151,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: ./.github/actions/local'
+
+# `run:` のブロックスカラー本文に `uses:` そっくりの行が混じる形。本文は YAML の構造ではないので、
+# 違反として数えてはならない（`post-ci-verify.yml` は常に特権扱いで、実際に長い `prompt:` ブロックを
+# 持つため、ここを構造として読むと正しくピンされているファイルで CI が恒常的に赤くなる）
+assert_pin_enforcement accepted 'privileged workflow with a uses:-looking line inside a run: block' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/local
+      - run: |
+          cat <<SNIP
+          - uses: actions/checkout@v7
+          SNIP'
 
 # 非特権ワークフローの可変タグは FR-9.6(b) の対象外なので咎めない（`ci.yml` が実際に依存している挙動）
 assert_pin_enforcement accepted 'plain workflow with a mutable tag' \
