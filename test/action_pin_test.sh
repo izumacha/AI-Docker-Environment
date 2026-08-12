@@ -117,8 +117,10 @@ permissions_grant_beyond_read() {
     # 検査対象のファイルパスを、呼び出し側の変数に依存しないよう自前の変数へ取り出す
     local path="$1"
 
-    # YAML を 1 行ずつたどり、`permissions:` の値（同一行のスカラー／フロー形式／続く字下げブロック）を解釈する
-    awk '
+    # YAML を 1 行ずつたどり、`permissions:` の値（同一行のスカラー／フロー形式／続く字下げブロック）を解釈する。
+    # 引用符の文字集合は awk の変数として渡す（awk のプログラムはシェルの単一引用符で囲まれており、
+    # その中に `'` を直接書けないため）
+    awk -v quote_chars='["'"'"']' '
         # ブロック形式の `permissions:` を読んでいる最中かどうかを表す旗と、結論を出したかどうかの旗
         BEGIN { in_block = 0; block_indent = 0; decided = 0 }
         {
@@ -128,6 +130,11 @@ permissions_grant_beyond_read() {
             sub(/\r$/, "", line)
             # 行末コメントを落とす（`contents: write  # 説明` のような書き方でも値だけを見るため）
             sub(/[[:space:]]*#.*$/, "", line)
+            # 引用符をすべて取り除き、`"permissions":` と `permissions:`、`"write"` と `write` を同じ形に揃える。
+            # YAML は鍵も値も引用できるため、引用の有無を綴りとして数え上げると必ず取りこぼす
+            # （`"permissions": write-all` が非特権と誤判定される穴を実測。secret 検出を語一致へ広げたのと同じ理由）。
+            # 許可の宣言に現れる鍵・値は引用符を含まない短い識別子なので、一律に落として差し支えない
+            gsub(quote_chars, "", line)
             # 空行・コメントだけの行はここで読み飛ばす
             if (line ~ /^[[:space:]]*$/) next
 
@@ -157,11 +164,12 @@ permissions_grant_beyond_read() {
                 }
             }
 
-            # `permissions:` の宣言行かどうかを調べる（ワークフロー全体・ジョブ単位のどちらも対象）
-            if (line ~ /^[[:space:]]*permissions:/) {
-                # `permissions:` の後ろに書かれた値を取り出す
+            # `permissions:` の宣言行かどうかを調べる（ワークフロー全体・ジョブ単位のどちらも対象）。
+            # `permissions :` のようにコロンの前に空白を挟む書き方も YAML では正しいので許容する
+            if (line ~ /^[[:space:]]*permissions[[:space:]]*:/) {
+                # 最初のコロンより後ろを値として取り出す
                 value = line
-                sub(/^[[:space:]]*permissions:[[:space:]]*/, "", value)
+                sub(/^[^:]*:[[:space:]]*/, "", value)
                 sub(/[[:space:]]*$/, "", value)
                 # 値が空＝この下に字下げブロックが続く形なので、ブロック読み取りに切り替える
                 if (value == "") { in_block = 1; block_indent = indent; next }
@@ -239,7 +247,7 @@ is_privileged_workflow() {
     # ジョブ単位の宣言しか無いワークフローでは、宣言を書き忘れたジョブが
     # リポジトリ既定（書き込み可能になりうる）のまま動くため、
     # 「全ジョブに効く宣言がある」ことを非特権の必要条件にする（fail-closed）
-    if ! grep -qE '^permissions:' "$path"; then
+    if ! grep -qE "^[\"']?permissions[\"']?[[:space:]]*:" "$path"; then
         return 0
     fi
 
@@ -728,6 +736,53 @@ jobs:
         with:
           token: ${{ secrets.SOME_TOKEN }}'
 
+# 鍵を二重引用符で囲む形。鍵の綴りを 1 通りだけ数え上げると、宣言そのものが見えなくなる
+assert_privilege_classification privileged 'double-quoted permissions key at job level' \
+'name: X
+permissions:
+  contents: read
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    "permissions": write-all
+    steps:
+      - uses: actions/checkout@v7'
+
+# 鍵を単一引用符で囲む形（同上）
+assert_privilege_classification privileged 'single-quoted permissions key at job level' \
+"name: X
+permissions:
+  contents: read
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    'permissions': write-all
+    steps:
+      - uses: actions/checkout@v7"
+
+# コロンの前に空白を挟む形（YAML では正しい書き方）
+assert_privilege_classification privileged 'space before the colon of the permissions key' \
+'name: X
+permissions:
+  contents: read
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    permissions : write-all
+    steps:
+      - uses: actions/checkout@v7'
+
+# 値を引用符で囲んだ書き込み権限（引用符を落として解釈できていることの確認）
+assert_privilege_classification privileged 'quoted write value in a block mapping' \
+'name: X
+permissions:
+  contents: "write"
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7'
+
 # 解釈できない書き方（複数行にまたがるフロー形式）は、読めた範囲で通さず特権に倒す
 assert_privilege_classification privileged 'unparseable multi-line flow mapping' \
 'name: X
@@ -767,6 +822,17 @@ jobs:
 assert_privilege_classification plain 'permissions: {} (all scopes none)' \
 'name: X
 permissions: {}
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7'
+
+# 引用符付きの読み取り専用宣言（引用符を落とした結果、過剰に特権へ倒れていないことの確認）
+assert_privilege_classification plain 'quoted read-only keys and values' \
+'name: X
+"permissions":
+  "contents": "read"
 jobs:
   j:
     runs-on: ubuntu-latest
