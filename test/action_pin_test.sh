@@ -102,7 +102,11 @@ fail() {
 
 # ワークフロー中の `permissions:` 宣言が「read / none 以外の権限」を 1 つでも与えているかを調べる関数
 # 第 1 引数: ワークフローファイルのパス
-# 与えていると判断したら標準出力へ `privileged` を出し、読み取り専用だけなら何も出さない
+# 判定を必ず標準出力へ出す（`privileged` = read/none 以外を与えている / `read-only` = 読み取り専用だけ）。
+# **無出力を「読み取り専用」と読み替えない**のが要点: awk 自体が異常終了した場合や、POSIX 文字クラスを
+# 解釈できない awk に当たった場合に無出力になるため、「何も出なかった＝合格」にすると解析の失敗が
+# そのまま特権判定の取りこぼしに化ける（このファイルが繰り返し踏んだ「不在＝合格」）。
+# 呼び出し側は `read-only` と明示されたときだけ非特権と判断する。
 #
 # 「write という文字列を探す」のではなく「read / none 以外が 1 つでもあるか」を見るのが要点。
 # GitHub Actions は同じ許可を何通りにも書けるため（`write-all` / フロー形式 `{contents: write}` /
@@ -115,8 +119,8 @@ permissions_grant_beyond_read() {
 
     # YAML を 1 行ずつたどり、`permissions:` の値（同一行のスカラー／フロー形式／続く字下げブロック）を解釈する
     awk '
-        # ブロック形式の `permissions:` を読んでいる最中かどうかを表す旗
-        BEGIN { in_block = 0; block_indent = 0 }
+        # ブロック形式の `permissions:` を読んでいる最中かどうかを表す旗と、結論を出したかどうかの旗
+        BEGIN { in_block = 0; block_indent = 0; decided = 0 }
         {
             # 判定に使う 1 行分の文字列を作業用の変数へ取り出す
             line = $0
@@ -143,10 +147,10 @@ permissions_grant_beyond_read() {
                         sub(/^[^:]*:[[:space:]]*/, "", value)
                         sub(/[[:space:]]*$/, "", value)
                         # read でも none でもない値は、何らかの書き込み権限を与えているとみなす
-                        if (value != "read" && value != "none") { print "privileged"; exit }
+                        if (value != "read" && value != "none") { print "privileged"; decided = 1; exit }
                     } else {
                         # 想定外の書き方は解釈できないので、安全側（特権）に倒す
-                        print "privileged"; exit
+                        print "privileged"; decided = 1; exit
                     }
                     # この行の処理は済んだので次の行へ進む
                     next
@@ -179,20 +183,23 @@ permissions_grant_beyond_read() {
                         item = items[i]
                         gsub(/^[[:space:]]+|[[:space:]]+$/, "", item)
                         # 想定した「名前: 値」の形でなければ解釈できないので特権に倒す
-                        if (item !~ /^[A-Za-z][A-Za-z0-9_-]*:[[:space:]]*[A-Za-z-]+$/) { print "privileged"; exit }
+                        if (item !~ /^[A-Za-z][A-Za-z0-9_-]*:[[:space:]]*[A-Za-z-]+$/) { print "privileged"; decided = 1; exit }
                         # コロンより後ろを値として取り出す
                         v = item
                         sub(/^[^:]*:[[:space:]]*/, "", v)
                         # read でも none でもなければ書き込み権限を与えているとみなす
-                        if (v != "read" && v != "none") { print "privileged"; exit }
+                        if (v != "read" && v != "none") { print "privileged"; decided = 1; exit }
                     }
                     # フロー形式の全項目が読み取り専用だったので次の行へ進む
                     next
                 }
                 # `write-all` を含め、ここまでで扱えなかった値はすべて特権として扱う
-                print "privileged"; exit
+                print "privileged"; decided = 1; exit
             }
         }
+        # 最後まで read / none 以外が出てこなかったときだけ「読み取り専用」と結論する。
+        # exit で抜けた場合も END は実行されるため、旗で二重出力を防ぐ
+        END { if (!decided) print "read-only" }
     ' "$path"
 }
 
@@ -214,20 +221,17 @@ is_privileged_workflow() {
         fi
     done
 
-    # secret を参照するワークフローは、漏洩すれば影響が出るため特権として扱う。
-    # 拾う形は次の 3 通りで、いずれも「secret がこのワークフローを通る」合図として同じ重みで扱う:
-    #   (1) `${{ secrets.NAME }}` — ドット付きの式参照
-    #   (2) `${{ secrets['NAME'] }}` / `secrets["NAME"]` — 添字形式の式参照（Actions の正式な書き方）
-    #   (3) `secrets:` を鍵に持つ行 — reusable workflow 呼び出しの `secrets: inherit`（呼び出し先へ
-    #       全 secret をそのまま渡す）と、名前を挙げて渡すブロック形式の両方
-    # (2)(3) はドット付き参照だけを探す方式では「参照が無い＝非特権」と誤判定され、
-    # 可変参照の外部ワークフローへ全 secret を流す構成がピン強制をすり抜けた（issue #87）。
-    # (3) は値まで見ずに鍵の存在だけで判定する。`inherit` の綴り一致にすると
-    # 行末コメント（`secrets: inherit  # 説明`）や引用符（`'inherit'`）で再びすり抜けるためで、
-    # 代わりに `run:` の本文にたまたま `secrets:` と書いた場合も特権に倒れる。
-    # 過剰な特権判定はピンを 1 つ余計に要求するだけで済むのに対し、取りこぼしは検査そのものを
-    # 無効化するので、非対称なこの向きに倒す
-    if grep -qE 'secrets\.[A-Za-z_]|secrets\[|^[[:space:]]*secrets:([[:space:]]|$)' "$path"; then
+    # secret がこのワークフローを通るなら、漏洩すれば影響が出るため特権として扱う。
+    # 判定は**書き方を列挙せず、`secrets` という語が現れるかどうか**だけで行う。
+    # 綴りを列挙する方式は、Actions が同じ意味を何通りにも書けるため必ず取りこぼす:
+    # `secrets.NAME` / `secrets['NAME']` / `secrets ["NAME"]` / `toJSON(secrets)` /
+    # `secrets: inherit` / `secrets: 'inherit'` / `"secrets": inherit` / 行末コメント付き……と、
+    # issue #87 とその後のセルフレビューで実際に 2 度、列挙の穴を突かれている。
+    # 語そのものを見れば、どの書き方でも必ず当たり、新しい書き方が増えても追随不要になる。
+    # 代償として、コメントで `secrets` に言及しただけのワークフローも特権に倒れる。
+    # 過剰な特権判定は action のピンを余計に要求するだけで済むのに対し、取りこぼしは
+    # そのワークフローへの FR-9.6(b) 適用を丸ごと止めるので、非対称なこの向きに倒す
+    if grep -qwE 'secrets' "$path"; then
         return 0
     fi
 
@@ -239,8 +243,14 @@ is_privileged_workflow() {
         return 0
     fi
 
-    # `permissions:` の宣言のうち 1 つでも read / none 以外を与えていれば特権として扱う
-    if [[ -n "$(permissions_grant_beyond_read "$path")" ]]; then
+    # `permissions:` の宣言を解析した結論を受け取る
+    local verdict
+    verdict="$(permissions_grant_beyond_read "$path")"
+
+    # **`read-only` と明示されたときだけ**非特権と認める。
+    # `privileged` はもちろん、解析器が異常終了して無出力になった場合や想定外の出力が来た場合も、
+    # 「判定できなかった」として特権に倒す（不明なら拒否＝fail-closed）
+    if [[ "$verdict" != "read-only" ]]; then
         return 0
     fi
 
@@ -485,6 +495,69 @@ check_workflow_file() {
     fi
 }
 
+# 1 つのワークフローについて、特権判定から `uses:` 検査までを一続きに行う関数
+# 第 1 引数: ワークフローファイルのパス
+#
+# 本番の走査ループと回帰テストの**両方がこの 1 本を呼ぶ**ことに意味がある。
+# 判定と検査を別々に書くと、判定の回帰テストが緑のまま「判定結果を検査へ渡す配線」だけが
+# 壊れうる（例: 常に `plain` を渡すよう書き換えても、分類器の単体検査は全件通る）。
+# 経路を 1 本に束ねることで、その配線自体を回帰テストの射程に入れる
+check_workflow_path() {
+    # 検査対象のファイルパスを変数に入れる
+    local path="$1"
+
+    # このファイルが特権かどうかを内容から判定し、適用する規則を決める
+    if is_privileged_workflow "$path"; then
+        check_workflow_file "$path" "privileged"
+    else
+        check_workflow_file "$path" "plain"
+    fi
+}
+
+# 仮のワークフローを実際の検査経路へ通し、違反として数えられるかどうかを確かめる関数
+# 第 1 引数: 期待する結果（enforced = 違反として検出される / accepted = 何も咎められない）
+# 第 2 引数: 表示用の説明 / 第 3 引数: ワークフローの中身
+#
+# なぜ分類器の判定を見るだけでは足りないか: FR-9.6(b) の実効性は
+# 「特権と判定する」→「その中の `uses:` すべてに不変なピンを要求する」の 2 段で成り立つ。
+# 前段だけを固定すると後段を丸ごと削っても回帰テストが緑のままになるため、
+# ここでは `check_workflow_path()` に通し、集計カウンタの増分で結果を観測する。
+# 上流問い合わせを起こさないよう、仮のワークフローには SHA ピンを書かない（可変参照だけを使う）
+assert_pin_enforcement() {
+    # 引数をそれぞれ意味の分かる名前の変数に取り出す
+    local expected="$1" label="$2" body="$3"
+    # 検査ごとに別名のファイルを作るための連番を 1 つ進める
+    FIXTURE_SEQ=$((FIXTURE_SEQ + 1))
+    # 仮のワークフローの置き場所を決める
+    local fixture="${TEST_TMP}/enforce-${FIXTURE_SEQ}.yml"
+    # 渡されたワークフローの中身を仮のファイルへ書き出す
+    printf '%s\n' "$body" > "$fixture"
+
+    # 仮のワークフローの検査結果が本物の集計に混ざらないよう、現在の値を退避する
+    local saved_pass="$PASS" saved_fail="$FAIL"
+    # 本番と同じ経路へ通す（表示は集計だけを見たいので捨てる）
+    check_workflow_path "$fixture" > /dev/null
+    # この仮のワークフローが何件の違反を生んだかを増分から求める
+    local violations=$((FAIL - saved_fail))
+    # 退避しておいた集計を元に戻す
+    PASS="$saved_pass"
+    FAIL="$saved_fail"
+
+    # 違反が 1 件以上あれば「強制された」、0 件なら「受理された」とみなす
+    local actual="accepted"
+    if [[ "$violations" -gt 0 ]]; then
+        actual="enforced"
+    fi
+
+    # 期待どおりかどうかを、他の検査と同じ書式で報告する
+    if [[ "$actual" == "$expected" ]]; then
+        pass "pin enforcement: ${label} → ${expected}"
+    else
+        fail "pin enforcement: ${label} → ${expected}" \
+            "the workflow was ${actual} (${violations} violation(s)); privilege classification and pin enforcement are wired together by check_workflow_path(), so this covers both"
+    fi
+}
+
 # 特権判定そのものを、既知の書き方を並べた仮のワークフローで検査する関数
 # 第 1 引数: 期待する判定（privileged / plain）/ 第 2 引数: 表示用の説明 / 第 3 引数: ワークフローの中身
 #
@@ -710,6 +783,69 @@ jobs:
     steps:
       - uses: actions/checkout@v7'
 
+# --- 分類とピン強制の接続（判定結果が実際に規則へ効いているか） ---
+
+# 特権ワークフロー中の可変タグは違反として検出されなければならない（FR-9.6(b) の中心）
+assert_pin_enforcement enforced 'privileged workflow with a mutable tag' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7'
+
+# 版の指定が無い参照も、固定できていないので違反として検出されなければならない
+assert_pin_enforcement enforced 'privileged workflow with an unversioned action ref' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout'
+
+# コンテナ参照はダイジェスト固定が必要で、タグ参照は違反として検出されなければならない
+assert_pin_enforcement enforced 'privileged workflow with a mutable docker:// ref' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker://alpine:3.20'
+
+# 特権ワークフローに `uses:` が 1 行も無いのは、抽出条件の破損か構成変更なので違反として扱う
+assert_pin_enforcement enforced 'privileged workflow with no uses: at all' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hello'
+
+# リポジトリ内のローカル action は外部から取り込まないため、特権でも咎めない
+assert_pin_enforcement accepted 'privileged workflow using a local action' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/local'
+
+# 非特権ワークフローの可変タグは FR-9.6(b) の対象外なので咎めない（`ci.yml` が実際に依存している挙動）
+assert_pin_enforcement accepted 'plain workflow with a mutable tag' \
+'name: X
+permissions:
+  contents: read
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7'
+
 # 下限リストに挙げた特権ワークフローが実在することを先に確かめる
 # （改名・削除で検査対象ごと消えた場合に「対象なし＝合格」とならないようにする）
 for wf in "${ALWAYS_PRIVILEGED[@]}"; do
@@ -722,14 +858,10 @@ for wf in "${ALWAYS_PRIVILEGED[@]}"; do
     fi
 done
 
-# ワークフロー定義ファイルを 1 つずつ、特権かどうかを内容から判定したうえで検査する
+# ワークフロー定義ファイルを 1 つずつ、実際の検査経路（`check_workflow_path`）に通す
 while IFS= read -r wf_path; do
-    # このファイルが特権かどうかを内容から判定し、適用する規則を決める
-    if is_privileged_workflow "$wf_path"; then
-        check_workflow_file "$wf_path" "privileged"
-    else
-        check_workflow_file "$wf_path" "plain"
-    fi
+    # 特権判定から `uses:` 検査までを、回帰テストと同じ 1 本の経路で実行する
+    check_workflow_path "$wf_path"
 # ワークフロー定義ファイルを名前順に列挙する（実行結果を再現しやすくするため）
 done < <(find "$WORKFLOW_DIR" -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) | sort)
 
