@@ -215,12 +215,19 @@ is_privileged_workflow() {
     done
 
     # secret を参照するワークフローは、漏洩すれば影響が出るため特権として扱う。
-    # `${{ secrets.NAME }}` のドット付き参照に加え、reusable workflow 呼び出しの
-    # `secrets: inherit`（呼び出し先へ全 secret をそのまま渡す）も同じ重みで拾う。
-    # 後者は個々の secret 名がどこにも現れないため、ドット付き参照だけを探す方式では
-    # 「参照が無い＝非特権」と誤判定され、可変参照の外部ワークフローへ全 secret を
-    # 流す構成がピン強制をすり抜けた（issue #87）
-    if grep -qE 'secrets\.[A-Za-z_]|^[[:space:]]*secrets:[[:space:]]*inherit[[:space:]]*$' "$path"; then
+    # 拾う形は次の 3 通りで、いずれも「secret がこのワークフローを通る」合図として同じ重みで扱う:
+    #   (1) `${{ secrets.NAME }}` — ドット付きの式参照
+    #   (2) `${{ secrets['NAME'] }}` / `secrets["NAME"]` — 添字形式の式参照（Actions の正式な書き方）
+    #   (3) `secrets:` を鍵に持つ行 — reusable workflow 呼び出しの `secrets: inherit`（呼び出し先へ
+    #       全 secret をそのまま渡す）と、名前を挙げて渡すブロック形式の両方
+    # (2)(3) はドット付き参照だけを探す方式では「参照が無い＝非特権」と誤判定され、
+    # 可変参照の外部ワークフローへ全 secret を流す構成がピン強制をすり抜けた（issue #87）。
+    # (3) は値まで見ずに鍵の存在だけで判定する。`inherit` の綴り一致にすると
+    # 行末コメント（`secrets: inherit  # 説明`）や引用符（`'inherit'`）で再びすり抜けるためで、
+    # 代わりに `run:` の本文にたまたま `secrets:` と書いた場合も特権に倒れる。
+    # 過剰な特権判定はピンを 1 つ余計に要求するだけで済むのに対し、取りこぼしは検査そのものを
+    # 無効化するので、非対称なこの向きに倒す
+    if grep -qE 'secrets\.[A-Za-z_]|secrets\[|^[[:space:]]*secrets:([[:space:]]|$)' "$path"; then
         return 0
     fi
 
@@ -554,6 +561,51 @@ jobs:
   j:
     uses: some-org/some-repo/.github/workflows/verify.yml@main
     secrets: inherit'
+
+# `secrets: inherit` に行末コメントが付く形（`inherit` の綴り一致では行末が合わず拾えない）
+assert_privilege_classification privileged 'secrets: inherit with a trailing comment' \
+'name: X
+permissions:
+  contents: read
+jobs:
+  j:
+    uses: some-org/some-repo/.github/workflows/verify.yml@main
+    secrets: inherit  # forward everything'
+
+# `secrets: inherit` が引用符で囲まれる形（同上）
+assert_privilege_classification privileged 'secrets: quoted inherit' \
+"name: X
+permissions:
+  contents: read
+jobs:
+  j:
+    uses: some-org/some-repo/.github/workflows/verify.yml@main
+    secrets: 'inherit'"
+
+# 名前を挙げて secret を渡すブロック形式（鍵の存在だけで拾う）
+assert_privilege_classification privileged 'secrets block forwarding named secrets' \
+'name: X
+permissions:
+  contents: read
+jobs:
+  j:
+    uses: some-org/some-repo/.github/workflows/verify.yml@main
+    secrets:
+      TOKEN: placeholder'
+
+# 添字形式の式参照。Actions の正式な書き方だがドット付き参照では拾えない
+# shellcheck disable=SC2016
+assert_privilege_classification privileged "indexed \${{ secrets['NAME'] }} reference" \
+'name: X
+permissions:
+  contents: read
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          token: ${{ secrets['"'"'SOME_TOKEN'"'"'] }}'
 
 # ジョブ単位でだけ書き込みを与える形（ワークフロー全体の宣言は読み取り専用）
 assert_privilege_classification privileged 'job-level write under a read-only workflow default' \
