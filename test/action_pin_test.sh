@@ -553,20 +553,6 @@ split_uses_occurrences() {
 
     # 構造行（ブロックスカラーの本文を除いた行）を出現ごとにばらす
     emit_structural_lines "$path" | awk '
-        # 与えた文字列に、フロー集合を開く括弧（`[` / `{`）が 1 つでもあるかを調べる関数。
-        # カンマを鍵の区切りと認めてよいのは、その手前で集合が開かれているときだけ。
-        #
-        # **開き括弧の有無だけを見て、閉じ括弧と釣り合っているかは見ない**: 引用符は
-        # `emit_structural_lines()` が一律に落とすため、`- {name: "a}b", uses: …}` の `}` が
-        # 素の文字として届き、釣り合いを数えると深さ 0 と誤って**カンマを散文の読点と判定し、
-        # 後ろの本物の参照を丸ごと取り逃がす**（＝「不在＝合格」への逆戻り。実測）。
-        # 開き括弧の有無だけなら、値の中に紛れた閉じ括弧に影響されない。
-        # 逆に散文へ `{` が現れると余分な検査が走りうるが、その場合は赤くなるだけで見逃しは生まない
-        function has_open_bracket(s) {
-            # `[` か `{` が含まれていれば 1、無ければ 0 を返す
-            return (index(s, "[") > 0 || index(s, "{") > 0)
-        }
-
         # コメント本文の先頭語が「版の注記らしい形」かどうかを調べる関数。
         # 引用符が落ちた値の中の `#`（`release #1}` 等）を注記と取り違えないための歯止めで、
         # タグに現れない構造文字（`}` `)` `,` など）を含む語は注記として認めない
@@ -600,32 +586,25 @@ split_uses_occurrences() {
             # 2 個目以降は走査位置が行の途中なので、行頭扱いにすると値の続きを鍵と読みかねない
             at_line_head = 1
             while (1) {
-                # 見つかったかどうかと、鍵の直前にあった区切り文字を初期化する
+                # 見つかったかどうかを初期化する
                 found = 0
-                delim = ""
                 # 行頭に置かれた鍵かどうかを先に見る（該当すれば必ず最も手前の一致になる）
                 if (at_line_head && match(rest, /^[[:space:]]*(-[[:space:]]+)?uses[[:space:]]*:[[:space:]]*/)) found = 1
                 # 行頭でなければ、フロー形式の区切り（`[` / `{` / `,`）の直後に置かれた鍵を探す。
                 # **`[` を入れる**: `steps: [uses: …]`（シーケンスの先頭要素が単一対のマッピング）も
-                # 正しい YAML で実際に実行されるステップになるため、外すと丸ごと検査対象から消える
+                # 正しい YAML で実際に実行されるステップになるため、外すと丸ごと検査対象から消える。
+                # **カンマに「集合の内側か」の条件は付けない**: 一度その条件を入れたところ、
+                # 集合が複数行に跨る書き方（`steps: [` の次の行に `name: a, uses: …`）で
+                # 開き括弧が前の行にあるため区切りと認められず、**参照を丸ごと取り逃がした**（実測）。
+                # 条件を外すと散文の読点で偽の参照を報告しうるが、それは余分に赤くなるだけで
+                # 見逃しは生まない（`]` は集合を閉じる文字なので、こちらは区切りに含めない）
                 if (!found && match(rest, /[[{,][[:space:]]*uses[[:space:]]*:[[:space:]]*/)) {
                     found = 1
-                    # 区切りが `{` と `,` のどちらだったかを控える（カンマだけ追加の条件が要る）
-                    delim = substr(rest, RSTART, 1)
                 }
                 # どちらでも見つからなければ、この行の走査は終わり
                 if (!found) break
                 # 一度探索したら以降は行頭ではない
                 at_line_head = 0
-                # **カンマはフロー集合の内側にあるときだけ区切りと認める**:
-                # `- name: Pin every action, uses: a full commit SHA` のような散文の読点を
-                # 区切りと見なすと、参照 `a` を検出したことにして CI を恒常的に赤くしてしまう
-                if (delim == "," && !has_open_bracket(substr(content, 1, scanned + RSTART - 1))) {
-                    # 鍵ではないので、この区切りの次の文字から探索をやり直す
-                    scanned += RSTART
-                    rest = substr(rest, RSTART + 1)
-                    continue
-                }
                 # マッチの直後から値が始まるので、そこから後ろを取り出す
                 after = substr(rest, RSTART + RLENGTH)
                 # 値の候補をいったん丸ごと受け取る
@@ -1550,9 +1529,27 @@ jobs:
 # フローシーケンスの**先頭要素**に置かれた `uses:` も検査対象にすること。
 # `steps: [uses: …]` は単一対のマッピングとして解釈され、実際に実行されるステップになる。
 # 区切りに `[` を入れないと 1 件も抽出されず、可変タグが指摘 0 件で通る
+# フロー集合が**複数行に跨る**場合も、続きの行にある `uses:` を取り逃がさないこと。
+# カンマに「集合の内側か」の条件を付けると、開き括弧が前の行にあるため区切りと認められず、
+# 未ピンの参照が丸ごと検査から消える（main は検出していた。実測して条件を撤回した）
+assert_pin_enforcement enforced 'mutable tag reached through a comma on a continuation line' \
+'name: X
+permissions: write-all
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/local
+  b:
+    runs-on: ubuntu-latest
+    steps: [
+      name: a, uses: actions/checkout@v7
+    ]'
+
 # 式で組み立てた**動的な参照**も検査対象から外さないこと。`${{ … }}` は実際に動く書き方であり、
 # 版を固定できていないので特権ワークフローでは違反。値の形で絞り込む実装にすると
 # ここが指摘 0 件になり、供給網ピンが黙って無効になる（実測して差し戻した経緯がある）
+# shellcheck disable=SC2016  # YAML の中身をそのまま書くので `${{ }}` は展開させない
 assert_pin_enforcement enforced 'a reference built from an expression is still checked' \
 'name: X
 permissions: write-all
@@ -1588,19 +1585,6 @@ jobs:
   b:
     runs-on: ubuntu-latest
     steps: [uses: actions/checkout@v7]'
-
-# 逆に、フロー集合の**外側**にある読点は区切りではないこと。散文の `, uses:` を区切りと見なすと
-# ありもしない参照を検出したことにして CI を恒常的に赤くする（`post-ci-verify.yml` に同種の文言が入った時点で）
-assert_pin_enforcement accepted 'prose with a comma before a uses key outside any flow collection' \
-'name: X
-permissions: write-all
-jobs:
-  j:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Pin every action, uses: a full commit SHA
-        run: echo ok
-      - uses: ./.github/actions/local'
 
 # 版注記は**参照より後ろのコメント**から取ること。先頭から最初のコメント開始を探すと、
 # 引用符が落ちた値の中の `#1` を拾って `1,` をマーカーと誤読し、存在しないタグを上流へ
