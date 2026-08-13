@@ -567,21 +567,6 @@ split_uses_occurrences() {
             return (index(s, "[") > 0 || index(s, "{") > 0)
         }
 
-        # 取り出した値が「実際に使える action 参照の形」かどうかを調べる関数。
-        # 引用符が落ちた散文（`- name: use {uses: x} syntax` の `x` 等）を参照と report しないための歯止め。
-        # **fail-open にはならない**: GitHub Actions が受け付ける参照はここに挙げた 3 形のいずれかで、
-        # それ以外の綴りはワークフロー自体が実行できないため、取りこぼす「使える action」が存在しない
-        function looks_like_action_ref(v) {
-            # リポジトリ内のローカル action（`./…` / `../…`）
-            if (v ~ /^\.\.?\//) return 1
-            # コンテナ action（`docker://…`）
-            if (v ~ /^docker:\/\//) return 1
-            # `owner/repo[/path][@ref]` の形
-            if (v ~ /^[A-Za-z0-9._-]+\/[A-Za-z0-9._\/-]+(@.+)?$/) return 1
-            # どれにも当たらなければ参照ではない
-            return 0
-        }
-
         # コメント本文の先頭語が「版の注記らしい形」かどうかを調べる関数。
         # 引用符が落ちた値の中の `#`（`release #1}` 等）を注記と取り違えないための歯止めで、
         # タグに現れない構造文字（`}` `)` `,` など）を含む語は注記として認めない
@@ -623,7 +608,7 @@ split_uses_occurrences() {
                 # 行頭でなければ、フロー形式の区切り（`[` / `{` / `,`）の直後に置かれた鍵を探す。
                 # **`[` を入れる**: `steps: [uses: …]`（シーケンスの先頭要素が単一対のマッピング）も
                 # 正しい YAML で実際に実行されるステップになるため、外すと丸ごと検査対象から消える
-                if (!found && match(rest, /[][{,][[:space:]]*uses[[:space:]]*:[[:space:]]*/)) {
+                if (!found && match(rest, /[[{,][[:space:]]*uses[[:space:]]*:[[:space:]]*/)) {
                     found = 1
                     # 区切りが `{` と `,` のどちらだったかを控える（カンマだけ追加の条件が要る）
                     delim = substr(rest, RSTART, 1)
@@ -647,9 +632,12 @@ split_uses_occurrences() {
                 value = after
                 # フロー形式では値の直後に区切り（空白・`,`・`}`・`]`）が続くので、そこまでを値とする
                 sub(/[][[:space:],}].*$/, "", value)
-                # 値が取れ、かつ実際に使える参照の形をしているものだけを控える
-                # （鍵だけで値が無い行と、引用符が落ちた散文はここで落とす）
-                if (value != "" && looks_like_action_ref(value)) {
+                # 値が取れたものだけを控える（鍵だけで値が無い行は対象外）。
+                # **「参照らしい形か」で絞り込まない**: 一度その絞り込みを入れたところ、
+                # `uses: ${{ inputs.action_ref }}` のような**実際に動く動的参照**まで落として
+                # 特権ワークフローで指摘 0 件になった（main は検出していた。実測）。
+                # 散文の取り違えは「余分に赤くなる」だけだが、こちらは見逃しを生む
+                if (value != "") {
                     values[++n] = value
                     # 値の終わりが行の何文字目かを覚えておく（版注記をこの後ろから探すため）
                     value_end = scanned + RSTART + RLENGTH + length(value) - 1
@@ -1562,6 +1550,32 @@ jobs:
 # フローシーケンスの**先頭要素**に置かれた `uses:` も検査対象にすること。
 # `steps: [uses: …]` は単一対のマッピングとして解釈され、実際に実行されるステップになる。
 # 区切りに `[` を入れないと 1 件も抽出されず、可変タグが指摘 0 件で通る
+# 式で組み立てた**動的な参照**も検査対象から外さないこと。`${{ … }}` は実際に動く書き方であり、
+# 版を固定できていないので特権ワークフローでは違反。値の形で絞り込む実装にすると
+# ここが指摘 0 件になり、供給網ピンが黙って無効になる（実測して差し戻した経緯がある）
+assert_pin_enforcement enforced 'a reference built from an expression is still checked' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/local
+      - uses: ${{ inputs.action_ref }}'
+
+# 行末コメントの中の `] uses:` を鍵と読み違えないこと。`]` はフロー集合を**閉じる**文字なので
+# 鍵の直前に来ることはない。区切りの文字集合に紛れ込ませると、散文で偽の参照を報告する
+assert_pin_enforcement accepted 'prose containing a closing bracket before a uses key' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/local
+      - name: see FR-9.6(b)] uses: acme/thing for details
+        run: echo ok'
+
 # 健全な `uses:` は**別のジョブ**に置く（同じ行に足すと `[` を外した退行を隠してしまうため）
 assert_pin_enforcement enforced 'mutable tag as the first entry of a flow sequence' \
 'name: X
@@ -1574,20 +1588,6 @@ jobs:
   b:
     runs-on: ubuntu-latest
     steps: [uses: actions/checkout@v7]'
-
-# 引用符が落ちた散文は、括弧や読点を含んでいても参照として報告しないこと。
-# 位置規則だけでは `- name: "Check {braces}, uses: prose"` の `prose` を拾ってしまうため、
-# 値が実際に使える参照の形（`owner/repo` / `./…` / `docker://…`）であることも求める
-assert_pin_enforcement accepted 'prose with braces and a comma before a uses key' \
-'name: X
-permissions: write-all
-jobs:
-  j:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: ./.github/actions/local
-      - name: "Check {braces}, uses: prose"
-        run: echo ok'
 
 # 逆に、フロー集合の**外側**にある読点は区切りではないこと。散文の `, uses:` を区切りと見なすと
 # ありもしない参照を検出したことにして CI を恒常的に赤くする（`post-ci-verify.yml` に同種の文言が入った時点で）
