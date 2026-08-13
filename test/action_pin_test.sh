@@ -578,21 +578,6 @@ split_uses_occurrences() {
             # コロンより後ろが行の内容
             content = substr($0, pos + 1)
 
-            # バージョンマーカーを行末コメントから取り出す（`v` 接頭辞は付かない上流もあるため任意）。
-            # コメントの開始は「行頭または空白の直後の `#`」とする（YAML のコメント規則。
-            # `release#1` のような値の途中の `#` をコメント開始と読み違えないため）
-            marker = ""
-            if (match(content, /(^|[[:space:]])#/)) {
-                # `#` の直後から後ろをコメント本文として取り出す
-                body = substr(content, RSTART + RLENGTH)
-                # 本文の先頭にある空白を落として、最初の語の頭に合わせる
-                sub(/^[[:space:]]*/, "", body)
-                # **最初の語だけを見る**: `# v1.2.3 (fixes #42)` のように `#` が続くとき、
-                # 貪欲一致では `42)` をマーカーと誤読し、存在しないタグを上流へ問い合わせて
-                # 「タグの綴り誤りでは」と的外れな診断を出してしまう（fail-closed だが原因を指し違える）
-                if (match(body, /^v?[0-9][^[:space:]]*/)) marker = substr(body, RSTART, RLENGTH)
-            }
-
             # 行を先頭から走査し、見つけた `uses:` の値をいったん配列へ集める。
             # **コメントの手前で行を切らない**: 引用符は抽出時に一律で落ちるため、
             # `- {name: release #1, uses: actions/checkout@v1}` の `#` は素の文字として届く。
@@ -638,19 +623,45 @@ split_uses_occurrences() {
                 # フロー形式では値の直後に区切り（空白・`,`・`}`・`]`）が続くので、そこまでを値とする
                 sub(/[][[:space:],}].*$/, "", value)
                 # 値が取れたものだけを控える（鍵だけで値が無い行は対象外）
-                if (value != "") values[++n] = value
+                if (value != "") {
+                    values[++n] = value
+                    # 値の終わりが行の何文字目かを覚えておく（版注記をこの後ろから探すため）
+                    value_end = scanned + RSTART + RLENGTH + length(value) - 1
+                }
                 # 次の `uses:` を探すため、いま処理した位置より後ろへ進める
                 scanned += RSTART + RLENGTH - 1
                 rest = after
             }
 
+            # バージョンマーカーを行末コメントから取り出す（`v` 接頭辞は付かない上流もあるため任意）。
+            # **参照より後ろだけを探す**: 先頭から最初のコメント開始を探すと、引用符が落ちた
+            # `- {name: release #1, uses: …}  # v4` で値の中の `#1` を拾い、`1,` をマーカーと誤読する。
+            # 逆に貪欲に最後の `#` を採ると `# v1.2.3 (fixes #42)` で `42)` を拾う。
+            # 注記は参照に付くものなので、参照の直後から最初のコメント開始を探すのが正しい
+            # **1 行に複数の参照があるときは注記を誰にも渡さない**（`n == 1` の条件）:
+            # どの参照を指す注記か決められないため。全件へ配ると (a) 別々の SHA に同じ版を
+            # 突き合わせて偽の改竄警告を出し、(b) 自分の注記を持たない参照が隣の注記を借りて
+            # 「マーカーが無い」検査をすり抜ける。空のままなら各参照は自分の注記だけで判定され、
+            # 曖昧な書き方は素直に赤くなる（fail-closed）
+            marker = ""
+            if (n == 1) {
+                # 参照の終わりより後ろの部分だけを取り出す
+                tail = substr(content, value_end + 1)
+                # コメントの開始は「行頭または空白の直後の `#`」とする（YAML のコメント規則）
+                if (match(tail, /(^|[[:space:]])#/)) {
+                    # `#` の直後から後ろをコメント本文として取り出す
+                    body = substr(tail, RSTART + RLENGTH)
+                    # 本文の先頭にある空白を落として、最初の語の頭に合わせる
+                    sub(/^[[:space:]]*/, "", body)
+                    # **最初の語だけを見る**: `# v1.2.3 (fixes #42)` の `42)` を拾わないため
+                    if (match(body, /^v?[0-9][^[:space:]]*/)) marker = substr(body, RSTART, RLENGTH)
+                }
+            }
+
             # 集めた値を 1 件ずつ書き出す
+            # （`marker` は上の `n == 1` の中でしか埋まらないので、複数件の行では必ず空になる）
             for (i = 1; i <= n; i++) {
-                # **マーカーは 1 行 1 件のときだけ渡す**: 1 行に複数あると、どの参照を指す注記か
-                # 決められない。全件に配ると (a) 別々の SHA に同じ版を突き合わせて偽の改竄警告を出し、
-                # (b) 自分の注記を持たない参照が隣の注記を借りて「マーカーが無い」検査をすり抜ける。
-                # 空で渡せば各参照が自分の注記だけで判定され、曖昧な書き方は素直に赤くなる（fail-closed）
-                print lineno "\t" values[i] "\t" (n == 1 ? marker : "")
+                print lineno "\t" values[i] "\t" marker
             }
             # 次の行のために、この行で使った配列を空にする
             delete values
@@ -779,6 +790,29 @@ check_workflow_path() {
     fi
 }
 
+# 検査用の仮ワークフローをファイルへ書き出し、そのパスを `FIXTURE_PATH` に置く関数
+# 第 1 引数: ファイル名の接頭辞（どの検査が作ったものか分かるようにする）/ 第 2 引数: ワークフローの中身
+#
+# **3 つの表明関数が同じ前置きを書き写していたのでまとめた**（§6 DRY）。
+# ファイル名は下限リスト `ALWAYS_PRIVILEGED` のどれとも衝突しない形にする必要がある
+# （衝突すると、内容ではなくファイル名で特権と判定されてしまい、検査の意味が変わる）。
+# 1 か所に集めておけば、この制約を満たす場所も 1 か所で済む。
+#
+# **パスを標準出力へ返さずグローバル変数に置く**のが要点: 呼び出し側が `$(write_fixture …)` で
+# 受け取ると本体がサブシェルで走り、連番 `FIXTURE_SEQ` の増加が呼び出し元へ戻らない。
+# その状態では同じ接頭辞の仮ワークフローが毎回同じ 1 ファイルを上書きし、
+# 失敗したケースを調べようとしたときにディスクへ残っているのは別のケースの内容になる（実測）
+write_fixture() {
+    # 引数をそれぞれ意味の分かる名前の変数に取り出す
+    local prefix="$1" body="$2"
+    # 検査ごとに別名のファイルを作るための連番を 1 つ進める
+    FIXTURE_SEQ=$((FIXTURE_SEQ + 1))
+    # 仮のワークフローの置き場所を決めて、呼び出し側から見えるようにする
+    FIXTURE_PATH="${TEST_TMP}/${prefix}-${FIXTURE_SEQ}.yml"
+    # 渡されたワークフローの中身を仮のファイルへ書き出す
+    printf '%s\n' "$body" > "${FIXTURE_PATH}"
+}
+
 # 仮のワークフローを実際の検査経路へ通し、違反として数えられるかどうかを確かめる関数
 # 第 1 引数: 期待する結果（enforced = 違反として検出される / accepted = 何も咎められない）
 # 第 2 引数: 表示用の説明 / 第 3 引数: ワークフローの中身
@@ -788,32 +822,13 @@ check_workflow_path() {
 # 前段だけを固定すると後段を丸ごと削っても回帰テストが緑のままになるため、
 # ここでは `check_workflow_path()` に通し、集計カウンタの増分で結果を観測する。
 # 上流問い合わせを起こさないよう、仮のワークフローには SHA ピンを書かない（可変参照だけを使う）
-# 検査用の仮ワークフローをファイルへ書き出し、そのパスを返す関数
-# 第 1 引数: ファイル名の接頭辞（どの検査が作ったものか分かるようにする）/ 第 2 引数: ワークフローの中身
-#
-# **3 つの表明関数が同じ前置きを書き写していたのでまとめる**（§6 DRY）。
-# ファイル名は下限リスト `ALWAYS_PRIVILEGED` のどれとも衝突しない形にする必要がある
-# （衝突すると、内容ではなくファイル名で特権と判定されてしまい、検査の意味が変わる）。
-# 1 か所に集めておけば、この制約を満たす場所も 1 か所で済む
-write_fixture() {
-    # 引数をそれぞれ意味の分かる名前の変数に取り出す
-    local prefix="$1" body="$2"
-    # 検査ごとに別名のファイルを作るための連番を 1 つ進める
-    FIXTURE_SEQ=$((FIXTURE_SEQ + 1))
-    # 仮のワークフローの置き場所を決める
-    local fixture="${TEST_TMP}/${prefix}-${FIXTURE_SEQ}.yml"
-    # 渡されたワークフローの中身を仮のファイルへ書き出す
-    printf '%s\n' "$body" > "$fixture"
-    # 呼び出し側が使えるよう、書き出したパスを返す
-    printf '%s' "$fixture"
-}
 
 assert_pin_enforcement() {
     # 引数をそれぞれ意味の分かる名前の変数に取り出す
     local expected="$1" label="$2" body="$3"
-    # 仮のワークフローを書き出し、そのパスを受け取る
-    local fixture
-    fixture="$(write_fixture enforce "$body")"
+    # 仮のワークフローを書き出し、そのパスを受け取る（サブシェルにしないため戻り値は使わない）
+    write_fixture enforce "$body"
+    local fixture="${FIXTURE_PATH}"
 
     # 仮のワークフローの検査結果が本物の集計に混ざらないよう、現在の値を退避する
     local saved_pass="$PASS" saved_fail="$FAIL"
@@ -852,8 +867,8 @@ assert_privilege_classification() {
     # 引数をそれぞれ意味の分かる名前の変数に取り出す
     local expected="$1" label="$2" body="$3"
     # 判定にかけるための仮のワークフローを書き出し、そのパスを受け取る
-    local fixture
-    fixture="$(write_fixture fixture "$body")"
+    write_fixture fixture "$body"
+    local fixture="${FIXTURE_PATH}"
 
     # 実際の判定結果を、期待値と同じ語彙（privileged / plain）で受け取る
     local actual="plain"
@@ -882,8 +897,8 @@ assert_split_output() {
     # 引数をそれぞれ意味の分かる名前の変数に取り出す
     local label="$1" expected="$2" body="$3"
     # 仮のワークフローを書き出し、そのパスを受け取る
-    local fixture
-    fixture="$(write_fixture split "$body")"
+    write_fixture split "$body"
+    local fixture="${FIXTURE_PATH}"
 
     # 実際の分解結果を受け取る
     local actual
@@ -1464,6 +1479,19 @@ jobs:
     steps:
       - uses: actions/checkout@1111111111111111111111111111111111111111  # v4'
 
+# 仮ワークフローは検査ごとに別ファイルになること。`$(write_fixture …)` の形で受けると本体が
+# サブシェルで走って連番が呼び出し元へ戻らず、同じ接頭辞のケースが 1 ファイルを上書きし続ける。
+# そうなると、失敗したケースを調べようとしたときにディスクに残っているのは別ケースの内容になる
+write_fixture seqcheck 'name: X'
+SEQCHECK_FIRST="${FIXTURE_PATH}"
+write_fixture seqcheck 'name: Y'
+if [[ "${SEQCHECK_FIRST}" != "${FIXTURE_PATH}" ]]; then
+    pass "fixtures: each case is written to its own file"
+else
+    fail "fixtures: each case is written to its own file" \
+        "both calls wrote ${FIXTURE_PATH}; the sequence counter is not surviving the call, so a failing case's fixture is overwritten by a later one"
+fi
+
 # 値の途中に `#` があっても、その後ろの参照を捨てないこと。引用符は抽出時に一律で落ちるため
 # `- {name: "release #1", uses: …}` の `#` は素の文字として届く。そこで行を切ると
 # **未ピンの可変タグごと検査対象から消える**（「不在＝合格」への逆戻り。実測）
@@ -1489,6 +1517,19 @@ jobs:
       - name: Pin every action, uses: a full commit SHA
         run: echo ok
       - uses: ./.github/actions/local'
+
+# 版注記は**参照より後ろのコメント**から取ること。先頭から最初のコメント開始を探すと、
+# 引用符が落ちた値の中の `#1` を拾って `1,` をマーカーと誤読し、存在しないタグを上流へ
+# 問い合わせて「タグの綴り誤りでは」と的外れな診断を出す（通信も無駄に発生する）
+assert_split_output 'the version marker is taken from the comment that follows the ref' \
+"7"$'\t'"actions/checkout@1111111111111111111111111111111111111111"$'\t'"v4" \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - {name: "release #1", uses: actions/checkout@1111111111111111111111111111111111111111}  # v4'
 
 # 版注記は**コメントの最初の語**だけを見ること。`#` がもう一度出てくる書き方（issue 番号の参照など）で
 # 貪欲一致すると `42)` をマーカーと誤読し、存在しないタグを上流へ問い合わせて
