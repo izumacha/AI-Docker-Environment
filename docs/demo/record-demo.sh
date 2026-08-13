@@ -61,8 +61,11 @@ discard_gif() {
     # GIF が残っていれば削除し、消したことを明示する
     if [ -f "${GIF_FILE}" ]; then
         rm -f "${GIF_FILE}"
-        # 由来ごとに、その時点で確実に言えることだけを報告する
-        case "$1" in
+        # 由来ごとに、その時点で確実に言えることだけを報告する。
+        # **引数が無いときも既定値で受ける**: `set -u` のもとで裸の "$1" を参照すると
+        # unbound variable でその場が止まり、`*)` が吸収するはずの呼び出し側の誤りのうち
+        # 「引数の付け忘れ」だけが吸収されない (改名前は無引数の呼び出しだったので起きやすい)
+        case "${1:-unknown}" in
             produced)
                 log "       今回の実行で生成した ${GIF_FILE} は不完全なため削除しました。"
                 ;;
@@ -244,8 +247,12 @@ if [ -t 0 ] && [ -t 1 ]; then
         # stty size は "行 桁" の順で返すので、その順で取り出して復元に使う
         ORIGINAL_STTY_ROWS="${BASH_REMATCH[1]}"
         ORIGINAL_STTY_COLS="${BASH_REMATCH[2]}"
-        # 終了時に元の桁数・行数へ戻す (一時ファイルの後始末もまとめて行う)
-        trap 'cleanup; stty rows "${ORIGINAL_STTY_ROWS}" cols "${ORIGINAL_STTY_COLS}" 2> /dev/null || true' EXIT
+        # 終了時に元の桁数・行数へ戻す (一時ファイルの後始末もまとめて行う)。
+        # **復元を先に置く**: トラップの本体も `set -e` の対象なので、先に置いた cleanup が
+        # 非ゼロで返る (rm -rf が EACCES など) とトラップはそこで打ち切られ、
+        # 復元コマンドに到達しない。呼び出し元の端末が 120x30 のまま残るという、
+        # この分岐が無くそうとしている状態そのものになる
+        trap 'stty rows "${ORIGINAL_STTY_ROWS}" cols "${ORIGINAL_STTY_COLS}" 2> /dev/null || true; cleanup' EXIT
         # 録画用のサイズへ変更する (失敗したら理由を伝える。黙って無視しない)
         if ! stty cols "${RECORD_COLS}" rows "${RECORD_ROWS}" 2> /dev/null; then
             log "warning: 端末サイズを ${RECORD_COLS}x${RECORD_ROWS} に固定できませんでした。GIF の幅が環境依存になります。"

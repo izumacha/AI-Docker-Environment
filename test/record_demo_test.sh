@@ -135,8 +135,26 @@ sh -c "${command_to_run}" || true
 exit 0
 STUB
 
+# stty スタブ: 端末サイズの取得・変更を横取りし、テスト側から観測できるようにする。
+# 本物を使うと「現在のサイズ」を選べず、winsize 未設定の pty（"0 0" を返す）を再現できない
+cat > "${STUB_BIN}/stty" << 'STUB'
+#!/usr/bin/env bash
+# サイズ取得の呼び出し（stty size）には、テストが指定した「現在のサイズ」を返す
+if [[ "${1:-}" == "size" ]]; then
+    # 空を指定されたときは何も出さない（stty size が値を返さない環境を模す）
+    if [[ -n "${AIDOCK_TEST_STTY_SIZE:-}" ]]; then
+        printf '%s\n' "${AIDOCK_TEST_STTY_SIZE}"
+    fi
+    exit 0
+fi
+# サイズ変更（固定・復元）の呼び出しは、引数をそのまま記録に残す。
+# 記録先が渡されていない実行（端末を持たない既存ケース）では捨てる
+printf '%s\n' "$*" >> "${AIDOCK_TEST_STTY_CAPTURE:-/dev/null}"
+exit 0
+STUB
+
 # 実行権限を与える
-chmod +x "${STUB_BIN}/docker" "${STUB_BIN}/agg" "${STUB_BIN}/asciinema"
+chmod +x "${STUB_BIN}/docker" "${STUB_BIN}/agg" "${STUB_BIN}/asciinema" "${STUB_BIN}/stty"
 
 # --- 擬似リポジトリの用意 -----------------------------------------------------
 
@@ -250,6 +268,43 @@ run_record() {
     set -e
 }
 
+# 録画スクリプトを**擬似端末（pty）の上で**実行する。
+# **なぜ必要か**: 端末サイズを固定する分岐は `[ -t 0 ] && [ -t 1 ]` の内側にあり、
+# 通常の run_record（出力をコマンド置換で受けるので端末ではない）では一度も通らない。
+# その状態では、固定と復元の条件をまるごと消してもテストが緑のまま＝「不在＝合格」になる。
+# script(1) が pty を用意し、その中で終了コードもそのまま返してくれる（-e）。
+# stty はスタブ済みなので、実行している端末のサイズには一切触れない
+run_record_pty() {
+    # コンテナ内スタブへ渡すテストモード
+    local mode="$1"
+    # stty スタブが「現在のサイズ」として報告する値（復元に使えるかどうかを切り替える）
+    local reported_size="$2"
+    # 既存ヘルパーと同じ捕捉ファイル群（毎回まっさらにする）
+    STDIN_CAPTURE="${TEST_TMP}/stdin-capture"
+    : > "${STDIN_CAPTURE}"
+    PWD_CAPTURE="${TEST_TMP}/pwd-capture"
+    : > "${PWD_CAPTURE}"
+    # stty へのサイズ変更要求を受け取るファイル
+    STTY_CAPTURE="${TEST_TMP}/stty-capture"
+    : > "${STTY_CAPTURE}"
+    set +e
+    LAST_OUTPUT="$(
+        cd "${FAKE_REPO}" &&
+            PATH="${STUB_BIN}:${PATH}" AIDOCK_TEST_MODE="${mode}" \
+                AIDOCK_TEST_STDIN_CAPTURE="${STDIN_CAPTURE}" \
+                AIDOCK_TEST_PWD_CAPTURE="${PWD_CAPTURE}" \
+                AIDOCK_TEST_STTY_CAPTURE="${STTY_CAPTURE}" \
+                AIDOCK_TEST_STTY_SIZE="${reported_size}" \
+                script -qec './docs/demo/record-demo.sh' /dev/null 2>&1
+    )"
+    # script(1) は -e で録画スクリプト自身の終了コードをそのまま返す。
+    # **パイプで CR を落とさない**: 挟むと $? がパイプ末尾のものになり、判定がすり替わる
+    LAST_STATUS=$?
+    set -e
+    # pty 経由の出力は行末が CR LF になるので、比較しやすいよう CR だけ落とす
+    LAST_OUTPUT="${LAST_OUTPUT//$'\r'/}"
+}
+
 # --- テスト本体 ---------------------------------------------------------------
 
 printf '# record-demo.sh fail-closed contract\n\n'
@@ -318,6 +373,9 @@ touch "${FAKE_GIF}"
 run_record buildfail
 assert_status 1 "failing build: exits non-zero despite asciinema returning 0"
 assert_missing "${FAKE_GIF}" "failing build: refuses to leave a GIF"
+# 録画対象の失敗も agg へ到達しないので、消えたのは前回の成果物と確定できる
+assert_contains "は .cast と食い違うため削除しました" \
+    "failing build: attributes the discarded GIF to the previous run"
 
 # 5) asciinema 自体の失敗（中断・起動失敗）でも古い GIF を残さない。
 #    set -e で即終了すると後始末に到達しないため、明示的に受けているかを見る。
@@ -327,15 +385,20 @@ run_record asciinemafail
 assert_status 1 "asciinema failure: exits non-zero"
 assert_missing "${FAKE_GIF}" "asciinema failure: discards the stale GIF"
 # 削除した GIF の**由来の説明**も固定する。ここは agg へ到達する前なので、
-# 残っていた GIF は前回の実行のもの（多くはコミット済み）と確定でき、復元の案内が要る
-assert_contains "前回の" "asciinema failure: attributes the discarded GIF to the previous run"
-assert_contains "git restore" "asciinema failure: points at the recovery path for a committed artifact"
+# 残っていた GIF は前回の実行のもの（多くはコミット済み）と確定でき、復元の案内が要る。
+# **stale 固有の文言で照合する**: 「前回の」「git restore」はどちらも unknown の文言にも
+# 含まれるため、それらで照合すると stale が unknown へ退行しても気付けない
+assert_contains "は .cast と食い違うため削除しました" \
+    "asciinema failure: attributes the discarded GIF to the previous run"
 
 # 6) 状態ファイルが書かれなかった場合（録画対象を起動できなかった）も fail-closed
 touch "${FAKE_GIF}"
 run_record nostatus
 assert_status 1 "missing status file: exits non-zero"
 assert_contains "終了コードを取得できませんでした" "missing status file: distinguishes it from a failed step"
+# ここも agg へ到達していないので、消えたのは前回の成果物と確定できる
+assert_contains "は .cast と食い違うため削除しました" \
+    "missing status file: attributes the discarded GIF to the previous run"
 assert_missing "${FAKE_GIF}" "missing status file: discards the stale GIF"
 
 # 7) GIF 変換の失敗でも、書きかけの GIF を残さない
@@ -352,6 +415,8 @@ run_record biggif
 assert_status 1 "oversized GIF: exits non-zero"
 assert_contains "上限" "oversized GIF: names the cap"
 assert_missing "${FAKE_GIF}" "oversized GIF: refuses to leave the oversized artifact"
+# 上限超過も agg 正常終了後なので、今回書かれたファイルと確定できる
+assert_contains "今回の実行で生成した" "oversized GIF: attributes the discarded GIF to this run"
 
 # 9) agg が 0 で終わっても中身が壊れていれば成果物にしない（上限だけでなく下限も見る）
 touch "${FAKE_GIF}"
@@ -366,11 +431,39 @@ touch "${FAKE_GIF}"
 run_record notagif
 assert_status 1 "non-GIF output: exits non-zero"
 assert_missing "${FAKE_GIF}" "non-GIF output: refuses to leave the bogus artifact"
+# agg は 0 で終わっているので、消えたのは今回書かれたファイルと確定できる
+assert_contains "今回の実行で生成した" "non-GIF output: attributes the discarded GIF to this run"
 
 # 10) Docker デーモンへ到達できなければ、録画を始める前に案内して止まる
 run_record nodaemon
 assert_status 1 "unreachable Docker daemon: exits non-zero"
 assert_contains "デーモンを起動してから" "unreachable Docker daemon: gives an actionable message"
+
+# 12) 端末がある環境での端末サイズの扱い。
+#     ここまでのケースはすべて端末を持たないため、固定と復元の分岐は一度も通っていない
+#     （その状態では分岐をまるごと消してもテストは緑のまま＝「不在＝合格」）。
+#     pty を用意して両方の枝を通す。stty はスタブなので実端末には触れない。
+#     **script(1) が無ければ検査できないので、黙って飛ばさず失敗にする**（不在＝合格を作らない）
+if command -v script > /dev/null 2>&1; then
+    # 12a) 復元に使えるサイズを返す端末: 録画用に固定し、終了時に元へ戻す
+    run_record_pty ok "24 80"
+    assert_status 0 "restorable terminal: exits 0"
+    assert_file_contains "${STTY_CAPTURE}" "cols 120 rows 30" \
+        "restorable terminal: pins the recording size so the GIF width is reproducible"
+    assert_file_contains "${STTY_CAPTURE}" "rows 24 cols 80" \
+        "restorable terminal: restores the caller's original size on exit"
+
+    # 12b) winsize が未設定の pty（stty size が "0 0" を返す）: 戻せないので変更もしない。
+    #      非空かどうかだけで判定していると、ここで `stty rows 0 cols 0` を実行してしまう
+    run_record_pty ok "0 0"
+    assert_status 0 "unusable terminal size: exits 0"
+    assert_contains "復元できる形で取得できないため端末サイズを固定しません" \
+        "unusable terminal size: says why the width will be environment-dependent"
+    assert_file_empty "${STTY_CAPTURE}" \
+        "unusable terminal size: makes no resize it could not undo"
+else
+    report 1 "script(1) is available to exercise the terminal-size branches"
+fi
 
 # --- summary ----------------------------------------------------------------
 # 集計と終了コードの決定は共有ハーネスに任せる
