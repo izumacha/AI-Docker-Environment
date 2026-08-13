@@ -244,7 +244,10 @@ if [ -t 0 ] && [ -t 1 ]; then
         # 一次の保証は `cleanup` が失敗を返さないこと (下の cleanup() を参照。
         # そこが崩れると終了コードも乗っ取られるため、テストが exit 0 を表明している) で、
         # この順序はそれが将来崩れたときに端末だけは戻すための二重の備え
-        trap 'stty rows "${ORIGINAL_STTY_ROWS}" cols "${ORIGINAL_STTY_COLS}" 2> /dev/null || true; cleanup' EXIT
+        # 復元に失敗したら知らせる (§6)。**トラップ自体は失敗させない**: log は 0 を返すので
+        # 終了コードを乗っ取らず、後続の cleanup にも到達する。黙って握り潰すと、
+        # 呼び出し元の端末が 120x30 のまま戻らないのに何の手掛かりも残らない
+        trap 'stty rows "${ORIGINAL_STTY_ROWS}" cols "${ORIGINAL_STTY_COLS}" 2> /dev/null || log "warning: 端末サイズを ${ORIGINAL_STTY_ROWS}x${ORIGINAL_STTY_COLS} へ戻せませんでした。stty size で確認してください。"; cleanup' EXIT
         # 録画用のサイズへ変更する (失敗したら理由を伝える。黙って無視しない)
         if ! stty cols "${RECORD_COLS}" rows "${RECORD_ROWS}" 2> /dev/null; then
             log "warning: 端末サイズを ${RECORD_COLS}x${RECORD_ROWS} に固定できませんでした。GIF の幅が環境依存になります。"
@@ -296,6 +299,11 @@ log "GIF へ変換します → ${GIF_FILE}"
 # 日本語グリフを持たず、CJK を含めると豆腐 (□) になって最重要の一行が読めなくなるため
 # agg も `|| { ... }` で受ける: 途中で失敗すると書きかけの GIF がそのまま残り、
 # 一見もっともらしい .cast と並んでコミットされてしまう
+# **agg を呼ぶ前に一時ファイルを消す**: 名前が固定なので、前回の実行が途中で殺された
+# (SIGKILL / OOM) 場合や後始末に失敗した場合に中身が残りうる。消さずに走らせると、
+# agg が 0 で終わりながら出力に触れなかったときに**その残骸が全検査を通って成果物になる** —
+# 一時ファイル化で無くしたはずの「古い GIF が新しい .cast と対になる」状態が復活する
+rm -f "${GIF_TMP_FILE}"
 if ! agg --font-size 16 "${CAST_FILE}" "${GIF_TMP_FILE}"; then
     log "error: GIF への変換に失敗しました。"
     discard_stale_gif
@@ -334,6 +342,9 @@ fi
 # 「${GIF_FILE} が存在する = 全検査を通った今回の GIF」という不変条件が保たれる
 if ! mv "${GIF_TMP_FILE}" "${GIF_FILE}"; then
     log "error: 生成した GIF を ${GIF_FILE} へ移動できませんでした。"
+    # ここも .cast を上書きした後の失敗なので、他の失敗経路と同じく前回の GIF を残さない
+    # (残すと、新しい .cast と古い .gif が並んだままコミットされうる)
+    discard_stale_gif
     exit 1
 fi
 

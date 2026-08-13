@@ -5,3 +5,5 @@ compose.override.yaml
 compose.override.yml
 *.log
 .DS_Store
+# デモ録画の変換用一時ファイル（record-demo.sh が全検査を通ったときだけ .gif へ移す）
+docs/demo/aidock-demo.gif.tmp

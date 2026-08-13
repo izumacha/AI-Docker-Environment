@@ -167,11 +167,30 @@ printf '%s\n' "$*" >> "${AIDOCK_TEST_STTY_CAPTURE:-/dev/null}"
 if [[ "${AIDOCK_TEST_STTY_RESIZE_FAILS:-}" == "fail" ]]; then
     exit 1
 fi
+# 復元だけが拒否される状況（録画中に多重化端末を切り離した等）を模す。
+# 固定は "cols … rows …"、復元は "rows … cols …" の順で呼ばれるので先頭語で見分ける
+if [[ "${AIDOCK_TEST_STTY_RESIZE_FAILS:-}" == "failrestore" && "${1:-}" == "rows" ]]; then
+    exit 1
+fi
 exit 0
 STUB
 
-# 本物の rm の場所を、PATH をスタブで汚す前に控えておく（スタブから委譲するため）
+# 本物の rm / mv の場所を、PATH をスタブで汚す前に控えておく（スタブから委譲するため）
 REAL_RM="$(command -v rm)"
+REAL_MV="$(command -v mv)"
+
+# mv スタブ: 成果物への移動だけを失敗させられるようにする。
+# 移動が失敗する状況（docs/demo が読み取り専用・EACCES 等）でも、上書き済みの .cast と
+# 古い .gif が並んだまま残らないことを見るため
+cat > "${STUB_BIN}/mv" << STUB
+#!/usr/bin/env bash
+# 成果物への移動を試みたときだけ失敗を返す
+if [[ "\${AIDOCK_TEST_MODE:-ok}" == "mvfail" && "\$*" == *"aidock-demo.gif" ]]; then
+    exit 1
+fi
+# それ以外は本物の mv にそのまま任せる
+exec "${REAL_MV}" "\$@"
+STUB
 
 # rm スタブ: 既定では本物へそのまま委譲し、cleanupfail モードのときだけ
 # **作業ディレクトリの削除だけ**を失敗させる。EXIT トラップ内で cleanup が非ゼロを返す
@@ -190,7 +209,7 @@ exec "${REAL_RM}" "\$@"
 STUB
 
 # 実行権限を与える
-chmod +x "${STUB_BIN}/docker" "${STUB_BIN}/agg" "${STUB_BIN}/asciinema" "${STUB_BIN}/stty" "${STUB_BIN}/rm"
+chmod +x "${STUB_BIN}/docker" "${STUB_BIN}/agg" "${STUB_BIN}/asciinema" "${STUB_BIN}/stty" "${STUB_BIN}/rm" "${STUB_BIN}/mv"
 
 # --- 擬似リポジトリの用意 -----------------------------------------------------
 
@@ -213,6 +232,7 @@ FAKE_GIF_TMP="${FAKE_GIF}.tmp"
 #   rootuser  … agent へ降格できていない（gosu 降格の退行 / SEC-7・AC-3）
 #   buildfail … build が失敗する
 #   cleanupfail … 一時ファイルの後始末（rm -rf）が失敗する（コンテナ内の挙動は ok と同じ）
+#   mvfail    … 生成した GIF を成果物の位置へ移動できない（コンテナ内の挙動は ok と同じ）
 cat > "${FAKE_REPO}/bin/aidock" << 'STUB'
 #!/usr/bin/env bash
 set -uo pipefail
@@ -479,6 +499,17 @@ run_record emptygif
 assert_status 1 "empty GIF: exits non-zero"
 assert_missing "${FAKE_GIF}" "empty GIF: refuses to leave the empty artifact"
 
+# 9c) 前回の実行が残した一時ファイルを、今回の成果物として昇格させない。
+#     一時ファイルの名前は固定なので、SIGKILL / OOM や後始末の失敗で中身が残りうる。
+#     agg を呼ぶ前に消していないと、agg が 0 で終わりながら書かなかったときに
+#     **その残骸が全検査を通って .gif になる**（一時ファイル化で無くしたはずの状態）
+printf 'GIF89a-stale-tmp' > "${FAKE_GIF_TMP}"
+touch "${FAKE_GIF}"
+run_record aggnowrite
+assert_status 1 "leftover temporary GIF: is not promoted into the artifact"
+assert_missing "${FAKE_GIF}" "leftover temporary GIF: leaves no artifact paired with the new .cast"
+assert_missing "${FAKE_GIF_TMP}" "leftover temporary GIF: is cleaned up rather than kept"
+
 # 9b) agg が 0 で終わりながら**出力に一切触れない**場合。出力先へ直接書かせていると、
 #     前回のコミット済み GIF がそのまま検査を通り、上書き済みの .cast と食い違ったまま
 #     「完了」と報告される（一時ファイル経由なら「空」として弾かれる）
@@ -491,6 +522,14 @@ touch "${FAKE_GIF}"
 run_record notagif
 assert_status 1 "non-GIF output: exits non-zero"
 assert_missing "${FAKE_GIF}" "non-GIF output: refuses to leave the bogus artifact"
+
+# 9d) 成果物への移動が失敗した場合も、前回の GIF を残さない。
+#     ここも .cast を上書きした後なので、残すと新しい .cast と古い .gif が並ぶ
+touch "${FAKE_GIF}"
+run_record mvfail
+assert_status 1 "failing mv: exits non-zero"
+assert_missing "${FAKE_GIF}" "failing mv: does not leave the previous GIF beside the new .cast"
+assert_missing "${FAKE_GIF_TMP}" "failing mv: leaves no temporary GIF behind"
 
 # 10) Docker デーモンへ到達できなければ、録画を始める前に案内して止まる
 run_record nodaemon
@@ -551,6 +590,12 @@ if command -v script > /dev/null 2>&1; then
         "stdout redirected away from the terminal: declines to pin the size"
     assert_file_empty "${STTY_CAPTURE}" \
         "stdout redirected away from the terminal: touches no terminal size at all"
+    # 11f) 復元だけが拒否された場合も黙らない（§6 エラーを握り潰さない）。
+    #      ここを `|| true` で受けると、端末が 120x30 のまま戻らないのに手掛かりが残らない
+    run_record_pty ok "24 80" failrestore
+    assert_status 0 "refused restore: the recording itself still succeeds"
+    assert_contains "へ戻せませんでした" \
+        "refused restore: tells the operator their terminal was left resized"
 else
     report 1 "script(1) is available to exercise the terminal-size branches"
 fi
