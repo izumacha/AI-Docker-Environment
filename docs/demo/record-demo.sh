@@ -30,6 +30,13 @@ DEMO_DIR="${REPO_ROOT}/docs/demo"
 CAST_FILE="${DEMO_DIR}/aidock-demo.cast"
 # README に貼る GIF の出力先
 GIF_FILE="${DEMO_DIR}/aidock-demo.gif"
+# agg に書かせる一時ファイル。**成果物のパスへ直接書かせない**: 直接書かせると、agg が
+# 終了コード 0 のまま出力に触れなかった場合 (壊れた cast を読み飛ばした等) に、
+# 前回のコミット済み GIF がそのまま検査を通り、上書き済みの .cast と食い違ったまま
+# 「完了」と報告されてしまう。一時ファイルへ書かせて全部の検査を通ったものだけを
+# 置き換えれば、「そこにある = 今回の実行が作った」が構造的に保証される。
+# 同じディレクトリに置くのは、置き換えを同一ファイルシステム内の mv (原子的) にするため
+GIF_TMP_FILE="${GIF_FILE}.tmp"
 # GIF の上限サイズ (CLAUDE.md §15 の「10MB 以下」を名前付き定数にする)
 GIF_MAX_BYTES=$((10 * 1024 * 1024))
 # 録画する端末の桁数・行数。GIF の幅は「桁数 × フォント送り幅」で決まるため、
@@ -46,37 +53,14 @@ log() { printf '%s\n' "$*" >&2; }
 # 置き換わる一方、GIF は前回成功時のものが残るため、`git status` には .cast だけが
 # 変更として現れ、無関係な GIF と一緒にコミットされてしまう
 #
-# **削除対象が「前回のコミット済み成果物」か「今回 agg が書いたもの」かで文言を分ける**:
-# どちらも同じ文で報告すると、数秒前に自分が作った未コミットのファイルに対して
-# `git restore` を案内することになる。操作者は「コミット済みの成果物が消された」と誤解し、
-# `git restore` で古い GIF を復活させて .cast と食い違わせる (この関数が防ぎたい状態そのもの)。
-#
-# 由来は**呼び出し側が第 1 引数で明示する**。呼び出し側だけが「agg まで到達したか」
-# 「agg が正常終了したか」を知っているためで、グローバルな旗を持ち回るより取り違えにくい:
-#   stale    … 前回の実行の成果物 (多くはコミット済み)。git restore で戻せる
-#   produced … 今回の実行で agg が正常に書き出したもの。git には無いので復元を案内しない
-#   unknown  … agg が失敗した後。書きかけかもしれないし、出力を開く前に落ちて前回のものが
-#              残っているだけかもしれない。**断定できないので断定しない**
-discard_gif() {
-    # GIF が残っていれば削除し、消したことを明示する
+# **消すのは常に「前回の実行の成果物」だけ**: 今回 agg が書いたものは一時ファイル
+# (GIF_TMP_FILE) にしか存在せず、全検査を通ったときにだけ成果物のパスへ移す。
+# そのため「未コミットのファイルに git restore を案内する」取り違えが起こりえない
+discard_stale_gif() {
+    # 前回の GIF が残っていれば削除し、消したことを明示する (git restore で戻せる)
     if [ -f "${GIF_FILE}" ]; then
         rm -f "${GIF_FILE}"
-        # 由来ごとに、その時点で確実に言えることだけを報告する。
-        # **引数が無いときも既定値で受ける**: `set -u` のもとで裸の "$1" を参照すると
-        # unbound variable でその場が止まり、`*)` が吸収するはずの呼び出し側の誤りのうち
-        # 「引数の付け忘れ」だけが吸収されない (改名前は無引数の呼び出しだったので起きやすい)
-        case "${1:-unknown}" in
-            produced)
-                log "       今回の実行で生成した ${GIF_FILE} は不完全なため削除しました。"
-                ;;
-            stale)
-                log "       前回の ${GIF_FILE} は .cast と食い違うため削除しました (git restore で復元できます)。"
-                ;;
-            *)
-                # unknown と、呼び出し側の綴り間違い。**過大な主張をしない側へ倒す**
-                log "       ${GIF_FILE} を削除しました (今回の書きかけか前回の成果物かは判別できません。コミット済みだった場合は git restore で復元できます)。"
-                ;;
-        esac
+        log "       前回の ${GIF_FILE} は .cast と食い違うため削除しました (git restore で復元できます)。"
     fi
 }
 
@@ -109,8 +93,15 @@ STATUS_FILE="$(mktemp /tmp/aidock-demo-status.XXXXXX)"
 # 一時ファイル類の後始末。**1 か所にまとめる**: trap を 2 度張る (端末サイズを戻す版とそうでない版)
 # ので、削除対象をそれぞれに書き写すと、後で足した一時ファイルが片方だけ消し忘れられる
 cleanup() {
-    # 作業ディレクトリと一時ファイルをまとめて消す
-    rm -rf "${DEMO_WORKSPACE}" "${STEPS_FILE}" "${STATUS_FILE}"
+    # 作業ディレクトリと一時ファイル (agg の書き出し先を含む) をまとめて消す。
+    # **後始末の失敗で終了コードを乗っ取らせない**: この関数は EXIT トラップから呼ばれ、
+    # bash はトラップ内で最後に実行したコマンドの終了コードをスクリプトの終了コードにする。
+    # 素の rm のままだと、成功した録画が「完了」と報告した直後に exit 1 で終わり、
+    # `record-demo.sh && git add docs/demo` が黙って成果物を取り込まなくなる
+    if ! rm -rf "${DEMO_WORKSPACE}" "${STEPS_FILE}" "${STATUS_FILE}" "${GIF_TMP_FILE}"; then
+        # 握り潰さず知らせる (§6)。録画の成否とは無関係なので終了コードは変えない
+        log "warning: 一時ファイルの後始末に失敗しました (${DEMO_WORKSPACE} などが残っています)。"
+    fi
 }
 # スクリプト終了時に必ず片付ける (端末サイズを変えた場合は後段でトラップを張り直す)
 trap cleanup EXIT
@@ -277,7 +268,7 @@ if ! asciinema rec --overwrite --idle-time-limit 2 \
     --command "bash -c \"bash '${STEPS_FILE}'; echo \\\$? > '${STATUS_FILE}'\"" \
     "${CAST_FILE}"; then
     log "error: asciinema による録画自体が失敗しました (中断・起動失敗など)。"
-    discard_gif stale
+    discard_stale_gif
     exit 1
 fi
 
@@ -288,14 +279,14 @@ if [ -z "${STEPS_STATUS}" ]; then
     # ステップ本体ではなく、録画コマンドの起動自体が失敗した可能性が高いケース
     log "error: 録画対象のコマンドの終了コードを取得できませんでした。"
     log "       asciinema が --command を起動できたか (シェルの互換性・PATH) を確認してください。"
-    discard_gif stale
+    discard_stale_gif
     exit 1
 fi
 if [ "${STEPS_STATUS}" != "0" ]; then
     log "error: 録画対象のコマンドが失敗しました (exit ${STEPS_STATUS})。"
     log "       ${CAST_FILE} に失敗時の出力が残っているので原因を確認してください。"
     log "       GIF は生成しません (壊れた録画を README に貼らないため)。"
-    discard_gif stale
+    discard_stale_gif
     exit 1
 fi
 
@@ -304,9 +295,10 @@ log "GIF へ変換します → ${GIF_FILE}"
 # 日本語グリフを持たず、CJK を含めると豆腐 (□) になって最重要の一行が読めなくなるため
 # agg も `|| { ... }` で受ける: 途中で失敗すると書きかけの GIF がそのまま残り、
 # 一見もっともらしい .cast と並んでコミットされてしまう
-if ! agg --font-size 16 "${CAST_FILE}" "${GIF_FILE}"; then
+# 前回の成果物はこの時点で .cast と食い違っているので、変換の成否によらず先に片付ける
+discard_stale_gif
+if ! agg --font-size 16 "${CAST_FILE}" "${GIF_TMP_FILE}"; then
     log "error: GIF への変換に失敗しました。"
-    discard_gif unknown
     exit 1
 fi
 
@@ -316,25 +308,29 @@ fi
 # **中身が GIF であることを先に確かめる**: agg が 0 で終わりながら空ファイルや
 # 壊れた出力を残すことがある (書き込み中断・ディスク不足など)。上限だけを見ていると
 # 0 バイトは «上限以下» として素通りし、README に死んだサムネイルが貼られてしまう
-if [ ! -s "${GIF_FILE}" ]; then
+if [ ! -s "${GIF_TMP_FILE}" ]; then
     log "error: 生成された GIF が空です。agg の出力を確認してください。"
-    discard_gif produced
     exit 1
 fi
 # GIF のシグネチャ (GIF87a / GIF89a の先頭 4 バイト) を確認する
-if [ "$(head -c 4 "${GIF_FILE}")" != "GIF8" ]; then
+if [ "$(head -c 4 "${GIF_TMP_FILE}")" != "GIF8" ]; then
     log "error: 生成されたファイルが GIF ではありません。agg の出力を確認してください。"
-    discard_gif produced
     exit 1
 fi
-GIF_SIZE="$(stat -c %s "${GIF_FILE}")"
+GIF_SIZE="$(stat -c %s "${GIF_TMP_FILE}")"
 if [ "${GIF_SIZE}" -gt "${GIF_MAX_BYTES}" ]; then
     # **警告で済ませない**: 他の不備 (agg の失敗・ステップの失敗) では GIF を消しているのに
     # ここだけ残すと、`record-demo.sh && git add docs/demo` で上限超過の GIF がそのまま
     # コミットされる。基準を満たさない成果物は置いていかない (§15 / fail-closed)
     log "error: GIF が上限 $((GIF_MAX_BYTES / 1024 / 1024))MB を超えています (${GIF_SIZE} bytes)。"
     log "       --idle-time-limit や解像度を調整して録り直してください。"
-    discard_gif produced
+    exit 1
+fi
+
+# ここまで通ったものだけを成果物の位置へ移す。**移動を最後に置く**ことで、
+# 「${GIF_FILE} が存在する = 全検査を通った今回の GIF」という不変条件が保たれる
+if ! mv "${GIF_TMP_FILE}" "${GIF_FILE}"; then
+    log "error: 生成した GIF を ${GIF_FILE} へ移動できませんでした。"
     exit 1
 fi
 

@@ -98,6 +98,11 @@ if [[ "${AIDOCK_TEST_MODE:-ok}" == "biggif" ]]; then
     truncate -s 11M "${out}"
     exit 0
 fi
+# 0 で終わりながら**出力に一切触れない**ケースを模す（壊れた cast を読み飛ばした等）。
+# 出力先へ直接書かせていると、前回のコミット済み GIF がそのまま検査を通ってしまう
+if [[ "${AIDOCK_TEST_MODE:-ok}" == "aggnowrite" ]]; then
+    exit 0
+fi
 # 通常はそれらしいダミー内容を書く
 printf 'GIF89a-stub' > "${out}"
 STUB
@@ -175,6 +180,9 @@ cat > "${STUB_BIN}/rm" << STUB
 #!/usr/bin/env bash
 # デモ用の作業ディレクトリを消そうとしたときだけ失敗を返す
 if [[ "\${AIDOCK_TEST_MODE:-ok}" == "cleanupfail" && "\$*" == *"aidock-demo-workspace"* ]]; then
+    # **消したうえで**失敗を返す: 後始末の失敗だけを模したいので、
+    # スタブ自身が /tmp に一時ファイルを積み残さないようにする
+    "${REAL_RM}" "\$@" || true
     exit 1
 fi
 # それ以外は本物の rm にそのまま任せる
@@ -194,6 +202,9 @@ mkdir -p "${FAKE_REPO}/docs/demo" "${FAKE_REPO}/bin"
 cp "${RECORD_SCRIPT}" "${FAKE_REPO}/docs/demo/record-demo.sh"
 # 生成物の置き場所（アサーションで使う）
 FAKE_GIF="${FAKE_REPO}/docs/demo/aidock-demo.gif"
+# agg に書かせる一時ファイル。**どの経路でも残してはいけない**:
+# 残ると `git add docs/demo` で中途半端な出力がそのままコミットされうる
+FAKE_GIF_TMP="${FAKE_GIF}.tmp"
 
 # bin/aidock スタブを書き出す。AIDOCK_TEST_MODE でコンテナ内の挙動を切り替える:
 #   ok        … 遮断されており許可ホストへ到達できる（正常なサンドボックス）
@@ -351,6 +362,7 @@ run_record ok
 assert_status 0 "healthy sandbox: exits 0"
 assert_exists "${FAKE_GIF}" "healthy sandbox: writes the GIF"
 assert_contains "example.com blocked" "healthy sandbox: records the default-deny proof"
+assert_missing "${FAKE_GIF_TMP}" "healthy sandbox: leaves no half-written temporary GIF behind"
 
 # 1b) コンテナへ流す標準入力は **ASCII のみ**であること。
 #     実機ではここが TTY にエコーされて録画に写るため、日本語を流すと agg の既定フォントで
@@ -420,12 +432,11 @@ touch "${FAKE_GIF}"
 run_record asciinemafail
 assert_status 1 "asciinema failure: exits non-zero"
 assert_missing "${FAKE_GIF}" "asciinema failure: discards the stale GIF"
-# 削除した GIF の**由来の説明**も固定する。ここは agg へ到達する前なので、
-# 残っていた GIF は前回の実行のもの（多くはコミット済み）と確定でき、復元の案内が要る。
-# **stale 固有の文言で照合する**: 「前回の」「git restore」はどちらも unknown の文言にも
-# 含まれるため、それらで照合すると stale が unknown へ退行しても気付けない
+# 削除した GIF の**説明**も固定する。消えるのは常に前回の実行の成果物なので、
+# 「.cast と食い違うため削除した」「git restore で戻せる」と言い切れる
 assert_contains "は .cast と食い違うため削除しました" \
     "asciinema failure: attributes the discarded GIF to the previous run"
+assert_contains "git restore" "asciinema failure: points at the recovery path"
 
 # 6) 状態ファイルが書かれなかった場合（録画対象を起動できなかった）も fail-closed
 touch "${FAKE_GIF}"
@@ -442,33 +453,33 @@ touch "${FAKE_GIF}"
 run_record aggfail
 assert_status 1 "agg failure: exits non-zero"
 assert_missing "${FAKE_GIF}" "agg failure: discards the partial GIF"
-# agg が失敗したときは、残っていたのが書きかけか前回の成果物か**判別できない**。
-# ここで「今回生成した」と断定すると、コミット済みの成果物を消したのに復元の案内を伏せてしまう
-assert_contains "判別できません" "agg failure: does not claim to know the discarded GIF's origin"
+assert_missing "${FAKE_GIF_TMP}" "agg failure: leaves no half-written temporary GIF behind"
 
 # 8) 上限を超える GIF は成果物として残さない（§15 の 10MB 基準）
 run_record biggif
 assert_status 1 "oversized GIF: exits non-zero"
 assert_contains "上限" "oversized GIF: names the cap"
+assert_missing "${FAKE_GIF_TMP}" "oversized GIF: leaves no half-written temporary GIF behind"
 assert_missing "${FAKE_GIF}" "oversized GIF: refuses to leave the oversized artifact"
-# 上限超過も agg 正常終了後なので、今回書かれたファイルと確定できる
-assert_contains "今回の実行で生成した" "oversized GIF: attributes the discarded GIF to this run"
 
 # 9) agg が 0 で終わっても中身が壊れていれば成果物にしない（上限だけでなく下限も見る）
 touch "${FAKE_GIF}"
 run_record emptygif
 assert_status 1 "empty GIF: exits non-zero"
 assert_missing "${FAKE_GIF}" "empty GIF: refuses to leave the empty artifact"
-# agg が正常終了した後に消すのは今回書かれたファイルと確定できる。git には無いので、
-# `git restore` を案内すると操作者が古い GIF を復活させて .cast と食い違わせてしまう
-assert_contains "今回の実行で生成した" "empty GIF: attributes the discarded GIF to this run"
+
+# 9b) agg が 0 で終わりながら**出力に一切触れない**場合。出力先へ直接書かせていると、
+#     前回のコミット済み GIF がそのまま検査を通り、上書き済みの .cast と食い違ったまま
+#     「完了」と報告される（一時ファイル経由なら「空」として弾かれる）
+touch "${FAKE_GIF}"
+run_record aggnowrite
+assert_status 1 "agg that never writes: exits non-zero instead of blessing the previous GIF"
+assert_missing "${FAKE_GIF}" "agg that never writes: does not leave the stale GIF paired with the new .cast"
 
 touch "${FAKE_GIF}"
 run_record notagif
 assert_status 1 "non-GIF output: exits non-zero"
 assert_missing "${FAKE_GIF}" "non-GIF output: refuses to leave the bogus artifact"
-# agg は 0 で終わっているので、消えたのは今回書かれたファイルと確定できる
-assert_contains "今回の実行で生成した" "non-GIF output: attributes the discarded GIF to this run"
 
 # 10) Docker デーモンへ到達できなければ、録画を始める前に案内して止まる
 run_record nodaemon
@@ -504,6 +515,12 @@ if command -v script > /dev/null 2>&1; then
     run_record_pty cleanupfail "24 80"
     assert_file_contains "${STTY_CAPTURE}" "rows 24 cols 80" \
         "failing cleanup: still restores the caller's terminal size"
+    # **後始末の失敗で終了コードを乗っ取らせない**: bash はトラップ内で最後に実行した
+    # コマンドの終了コードをスクリプトの終了コードにするため、素の rm のままだと
+    # 「完了」と報告した直後に exit 1 で終わり、`record-demo.sh && git add` が黙って空振りする
+    assert_status 0 "failing cleanup: a successful recording still exits 0"
+    assert_contains "一時ファイルの後始末に失敗しました" \
+        "failing cleanup: reports the cleanup failure instead of swallowing it"
 
     # 11d) サイズ変更が拒否されたら黙って続けない（§6 エラーを握り潰さない）。
     #      ここを `|| true` で受けると、幅が固定できていないのに固定した前提で録画が進む
