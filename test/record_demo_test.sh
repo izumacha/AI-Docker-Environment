@@ -498,8 +498,11 @@ touch "${FAKE_GIF}"
 run_record emptygif
 assert_status 1 "empty GIF: exits non-zero"
 assert_missing "${FAKE_GIF}" "empty GIF: refuses to leave the empty artifact"
+assert_missing "${FAKE_GIF_TMP}" "empty GIF: leaves no half-written temporary GIF behind"
 
-# 9c) 前回の実行が残した一時ファイルを、今回の成果物として昇格させない。
+# 9b) agg が 0 で終わりながら**出力に一切触れない**場合に、前回の実行が残した一時ファイルを
+#     今回の成果物として昇格させない（出力先へ直接書かせていれば前回の .gif が、
+#     一時ファイルを消さずに走らせれば前回の .tmp が、それぞれ検査を通って成果物になる）。
 #     一時ファイルの名前は固定なので、SIGKILL / OOM や後始末の失敗で中身が残りうる。
 #     agg を呼ぶ前に消していないと、agg が 0 で終わりながら書かなかったときに
 #     **その残骸が全検査を通って .gif になる**（一時ファイル化で無くしたはずの状態）
@@ -510,18 +513,23 @@ assert_status 1 "leftover temporary GIF: is not promoted into the artifact"
 assert_missing "${FAKE_GIF}" "leftover temporary GIF: leaves no artifact paired with the new .cast"
 assert_missing "${FAKE_GIF_TMP}" "leftover temporary GIF: is cleaned up rather than kept"
 
-# 9b) agg が 0 で終わりながら**出力に一切触れない**場合。出力先へ直接書かせていると、
-#     前回のコミット済み GIF がそのまま検査を通り、上書き済みの .cast と食い違ったまま
-#     「完了」と報告される（一時ファイル経由なら「空」として弾かれる）
-touch "${FAKE_GIF}"
-run_record aggnowrite
-assert_status 1 "agg that never writes: exits non-zero instead of blessing the previous GIF"
-assert_missing "${FAKE_GIF}" "agg that never writes: does not leave the stale GIF paired with the new .cast"
 
 touch "${FAKE_GIF}"
 run_record notagif
 assert_status 1 "non-GIF output: exits non-zero"
 assert_missing "${FAKE_GIF}" "non-GIF output: refuses to leave the bogus artifact"
+assert_missing "${FAKE_GIF_TMP}" "non-GIF output: leaves no half-written temporary GIF behind"
+
+# 9c) 一時ファイルのパスを消せない場合（同じ名前のディレクトリが残っている等）も、
+#     .cast を上書きした後の失敗なので前回の GIF を残さない。素の `rm -f` のままだと
+#     set -e がここで止め、他の失敗経路と違って古い .gif が新しい .cast と対のまま残る
+mkdir -p "${FAKE_GIF_TMP}/undeletable-by-rm-f"
+touch "${FAKE_GIF}"
+run_record ok
+assert_status 1 "undeletable temporary path: exits non-zero"
+assert_contains "一時ファイル" "undeletable temporary path: names what it could not remove"
+assert_missing "${FAKE_GIF}" "undeletable temporary path: does not leave the previous GIF beside the new .cast"
+rm -rf "${FAKE_GIF_TMP}"
 
 # 9d) 成果物への移動が失敗した場合も、前回の GIF を残さない。
 #     ここも .cast を上書きした後なので、残すと新しい .cast と古い .gif が並ぶ
@@ -590,6 +598,12 @@ if command -v script > /dev/null 2>&1; then
         "stdout redirected away from the terminal: declines to pin the size"
     assert_file_empty "${STTY_CAPTURE}" \
         "stdout redirected away from the terminal: touches no terminal size at all"
+    # 11g) pty 経由でも**失敗が失敗として伝わる**こと。これが無いと、起動を `script -qec` から
+    #      `script -qc`（終了コードを伝えない）へ変えても全ケースが緑のままになり、
+    #      11a〜11f の assert_status がまとめて空振りする
+    run_record_pty leaky "24 80"
+    assert_status 1 "pty runs propagate a failing exit status (not just a passing one)"
+
     # 11f) 復元だけが拒否された場合も黙らない（§6 エラーを握り潰さない）。
     #      ここを `|| true` で受けると、端末が 120x30 のまま戻らないのに手掛かりが残らない
     run_record_pty ok "24 80" failrestore
@@ -598,6 +612,19 @@ if command -v script > /dev/null 2>&1; then
         "refused restore: tells the operator their terminal was left resized"
 else
     report 1 "script(1) is available to exercise the terminal-size branches"
+fi
+
+# 12) 一時ファイル名の**一元管理**: スクリプトは `${GIF_FILE}.tmp` から導く一方、
+#     .gitignore はその名前を直書きしている。成果物名を変えたときに .gitignore だけが
+#     取り残されると、中断した実行の書きかけが `git add docs/demo` でコミットされうる
+# shellcheck disable=SC2016  # sed のパターンには ${DEMO_DIR} という**文字列そのもの**を渡す
+ARTIFACT_BASENAME="$(sed -n 's|^GIF_FILE="${DEMO_DIR}/\(.*\)"$|\1|p' "${RECORD_SCRIPT}")"
+# **抽出に失敗したら合格に倒さない**: 空のまま照合すると grep -F "" が何にでも当たる
+if [ -n "${ARTIFACT_BASENAME}" ]; then
+    assert_file_contains "${REPO_ROOT}/.gitignore" "docs/demo/${ARTIFACT_BASENAME}.tmp" \
+        "the temporary artifact name the script derives is the one .gitignore ignores"
+else
+    report 1 "the artifact name can be read out of record-demo.sh (GIF_FILE)"
 fi
 
 # --- summary ----------------------------------------------------------------

@@ -59,10 +59,17 @@ jobs:
         run: bash test/entrypoint_test.sh
 
       - name: record-demo.sh fail-closed unit tests
-        # Hermetic, Docker-free: docker / asciinema / agg / bin/aidock are all
-        # PATH stubs, so this asserts the recording contract (propagate the
-        # recorded command's exit status, never leave a GIF for a failed run,
-        # treat the egress checks as assertions) without building an image.
+        # Hermetic, Docker-free: docker / asciinema / agg / stty / rm / mv /
+        # bin/aidock are all PATH stubs, so this asserts the recording contract
+        # (propagate the recorded command's exit status, never leave a GIF or a
+        # half-written temp file for a failed run, treat the egress checks AND
+        # the gosu drop as assertions) without building an image.
+        #
+        # Prerequisite beyond coreutils: script(1) from util-linux, used to give
+        # the terminal-size branches a real pty. It ships with ubuntu-latest; on
+        # a slim image install bsdextrautils (Debian 11+) or util-linux. A
+        # missing script(1) is reported as a FAIL, not skipped, so this step
+        # cannot go green without having exercised those branches.
         run: bash test/record_demo_test.sh
 
       - name: hadolint (Dockerfile)

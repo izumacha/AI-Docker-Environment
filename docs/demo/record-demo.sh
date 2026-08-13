@@ -303,7 +303,15 @@ log "GIF へ変換します → ${GIF_FILE}"
 # (SIGKILL / OOM) 場合や後始末に失敗した場合に中身が残りうる。消さずに走らせると、
 # agg が 0 で終わりながら出力に触れなかったときに**その残骸が全検査を通って成果物になる** —
 # 一時ファイル化で無くしたはずの「古い GIF が新しい .cast と対になる」状態が復活する
-rm -f "${GIF_TMP_FILE}"
+# **この rm も失敗しうる**: 同じパスにディレクトリが残っている / docs/demo が EACCES など。
+# 素で書くと set -e がここでスクリプトを終わらせ、他の失敗経路と違って
+# 前回の GIF を残したまま (= 上書き済みの .cast と対のまま) 止まってしまう
+if ! rm -f "${GIF_TMP_FILE}"; then
+    log "error: 変換用の一時ファイル ${GIF_TMP_FILE} を消せませんでした。"
+    log "       同じ名前のディレクトリが残っていないか、書き込み権限があるかを確認してください。"
+    discard_stale_gif
+    exit 1
+fi
 if ! agg --font-size 16 "${CAST_FILE}" "${GIF_TMP_FILE}"; then
     log "error: GIF への変換に失敗しました。"
     discard_stale_gif
