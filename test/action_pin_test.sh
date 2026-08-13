@@ -525,25 +525,162 @@ verify_marker_against_pin() {
     fi
 }
 
-# 1 行の `uses:` を検査する関数
-# 第 1 引数: ワークフローのファイル名 / 第 2 引数: 行番号 / 第 3 引数: 行の内容
-# 第 4 引数: その行が特権ワークフローのものなら "privileged"、それ以外は "plain"
+# 構造行を「`uses:` の出現ごとに 1 件」へばらして書き出す関数
+# 第 1 引数: 検査対象のファイルパス
+#
+# **1 行に `uses:` は何個でも書ける**。フロー形式なら `steps: [{uses: a}, {uses: b}]` と 1 行に
+# 並べられるし、行末コメントに `# 以前は uses: … だった` と書くこともできる。にもかかわらず
+# 消費側は「1 行 = 参照 1 個」を前提に貪欲一致（`.*uses:`）で 1 個だけ取り出していたため、
+# **最後の 1 個以外が検査対象から丸ごと外れていた**（特権ワークフローに未ピンの可変タグを置き、
+# 同じ行の後ろにローカル action を並べると指摘 0 件で通ることを実測）。
+# 出現ごとにばらしてから渡すことで、消費側は 1 個だけを見ればよくなる。
+#
+# **行末コメントは値の探索対象から外す**: 構造としての `uses:` はコメントより前にしか置けない。
+# バージョンマーカーはコメント側にあるので、切り離したうえで**1 件しかない行に限り**付けて渡す。
+#
+# **鍵として置ける位置だけを見る**（「空白の後ろならどこでも」にしない）: 引用符は
+# `emit_structural_lines()` が一律に落とすため、`- name: Verify that every workflow uses: a pinned SHA`
+# のような**値の中の散文**が素の文字列として届く。空白の後ろを一律に鍵と見なすと、これを参照
+# `a` と読んで違反を報告し、特権ワークフロー（`post-ci-verify.yml`）に同種の文言が入った時点で
+# CI が恒常的に赤くなる。鍵になれるのは行頭（字下げと `- ` を挟んでよい）か、フロー集合の内側にある
+# `{` / `,` の直後だけ（集合の外のカンマは散文の読点なので区切りと認めない）。
+#
+# 出力は「行番号 <TAB> 参照 <TAB> マーカー」。**値の切り出しをここだけに持たせる**ため、
+# 消費側は受け取った値をそのまま使う（両方で切り出すと、鍵の表記ゆれへの対応が片方だけ古くなる）
+split_uses_occurrences() {
+    # 検査対象のファイルパスを変数に入れる
+    local path="$1"
+
+    # 構造行（ブロックスカラーの本文を除いた行）を出現ごとにばらす
+    emit_structural_lines "$path" | awk '
+        # コメント本文の先頭語が「版の注記らしい形」かどうかを調べる関数。
+        # 引用符が落ちた値の中の `#`（`release #1}` 等）を注記と取り違えないための歯止めで、
+        # タグに現れない構造文字（`}` `)` `,` など）を含む語は注記として認めない
+        function looks_like_marker(w) {
+            # まずタグに使える文字だけでできているかを見る（構造文字を含む語は注記ではない）
+            if (w !~ /^v?[0-9][0-9A-Za-z._+-]*$/) return 0
+            # さらに `v` 始まりか、版らしい区切りのドットを含むことを求める。
+            # これが無いと `# bump #12 -> v5` の `12` のような issue 番号を版と誤読し、
+            # 存在しないタグを上流へ問い合わせて原因を指し違えた診断を出す
+            return (w ~ /^v/ || index(w, ".") > 0)
+        }
+        {
+            # 「行番号:行の内容」の形なので、最初のコロンで 2 つに分ける
+            pos = index($0, ":")
+            # コロンより前が行番号
+            lineno = substr($0, 1, pos - 1)
+            # コロンより後ろが行の内容
+            content = substr($0, pos + 1)
+
+            # 行を先頭から走査し、見つけた `uses:` の値をいったん配列へ集める。
+            # **コメントの手前で行を切らない**: 引用符は抽出時に一律で落ちるため、
+            # `- {name: release #1, uses: actions/checkout@v1}` の `#` は素の文字として届く。
+            # そこで切ると後ろの本物の参照ごと捨ててしまい、未ピンの可変タグが検査から消える
+            # （＝このファイルが繰り返し塞いできた「不在＝合格」に戻る）。
+            # コメント中の `uses:` は下の位置規則（行頭 / 集合内の `{` `,` の直後）で自然に除かれる
+            n = 0
+            rest = content
+            # `rest` より前にある文字数（絶対位置を求めるために持ち歩く）
+            scanned = 0
+            # 行頭の形（字下げ＋任意の `- `）を許すのは**最初の 1 回だけ**。
+            # 2 個目以降は走査位置が行の途中なので、行頭扱いにすると値の続きを鍵と読みかねない
+            at_line_head = 1
+            while (1) {
+                # 見つかったかどうかを初期化する
+                found = 0
+                # 行頭に置かれた鍵かどうかを先に見る（該当すれば必ず最も手前の一致になる）
+                if (at_line_head && match(rest, /^[[:space:]]*(-[[:space:]]+)?uses[[:space:]]*:[[:space:]]*/)) found = 1
+                # 行頭でなければ、フロー形式の区切り（`[` / `{` / `,`）の直後に置かれた鍵を探す。
+                # **`[` を入れる**: `steps: [uses: …]`（シーケンスの先頭要素が単一対のマッピング）も
+                # 正しい YAML で実際に実行されるステップになるため、外すと丸ごと検査対象から消える。
+                # **カンマに「集合の内側か」の条件は付けない**: 一度その条件を入れたところ、
+                # 集合が複数行に跨る書き方（`steps: [` の次の行に `name: a, uses: …`）で
+                # 開き括弧が前の行にあるため区切りと認められず、**参照を丸ごと取り逃がした**（実測）。
+                # 条件を外すと散文の読点で偽の参照を報告しうるが、それは余分に赤くなるだけで
+                # 見逃しは生まない（`]` は集合を閉じる文字なので、こちらは区切りに含めない）
+                if (!found && match(rest, /[[{,][[:space:]]*uses[[:space:]]*:[[:space:]]*/)) {
+                    found = 1
+                }
+                # どちらでも見つからなければ、この行の走査は終わり
+                if (!found) break
+                # 一度探索したら以降は行頭ではない
+                at_line_head = 0
+                # マッチの直後から値が始まるので、そこから後ろを取り出す
+                after = substr(rest, RSTART + RLENGTH)
+                # 値の候補をいったん丸ごと受け取る
+                value = after
+                # フロー形式では値の直後に区切り（空白・`,`・`}`・`]`）が続くので、そこまでを値とする
+                sub(/[][[:space:],}].*$/, "", value)
+                # 値が取れたものだけを控える（鍵だけで値が無い行は対象外）。
+                # **「参照らしい形か」で絞り込まない**: 一度その絞り込みを入れたところ、
+                # `uses: ${{ inputs.action_ref }}` のような**実際に動く動的参照**まで落として
+                # 特権ワークフローで指摘 0 件になった（main は検出していた。実測）。
+                # 散文の取り違えは「余分に赤くなる」だけだが、こちらは見逃しを生む
+                if (value != "") {
+                    values[++n] = value
+                    # 値の終わりが行の何文字目かを覚えておく（版注記をこの後ろから探すため）
+                    value_end = scanned + RSTART + RLENGTH + length(value) - 1
+                }
+                # 次の `uses:` を探すため、いま処理した位置より後ろへ進める
+                scanned += RSTART + RLENGTH - 1
+                rest = after
+            }
+
+            # バージョンマーカーを行末コメントから取り出す（`v` 接頭辞は付かない上流もあるため任意）。
+            # **参照より後ろだけを探す**: 先頭から最初のコメント開始を探すと、引用符が落ちた
+            # `- {name: release #1, uses: …}  # v4` で値の中の `#1` を拾い、`1,` をマーカーと誤読する。
+            # 逆に貪欲に最後の `#` を採ると `# v1.2.3 (fixes #42)` で `42)` を拾う。
+            # 注記は参照に付くものなので、参照の直後から最初のコメント開始を探すのが正しい
+            # **1 行に複数の参照があるときは注記を誰にも渡さない**（`n == 1` の条件）:
+            # どの参照を指す注記か決められないため。全件へ配ると (a) 別々の SHA に同じ版を
+            # 突き合わせて偽の改竄警告を出し、(b) 自分の注記を持たない参照が隣の注記を借りて
+            # 「マーカーが無い」検査をすり抜ける。空のままなら各参照は自分の注記だけで判定され、
+            # 曖昧な書き方は素直に赤くなる（fail-closed）
+            marker = ""
+            if (n == 1) {
+                # 参照の終わりより後ろの部分だけを取り出す
+                tail = substr(content, value_end + 1)
+                # 参照より後ろに現れる `#` を順に見て、**最初に「版らしい語」が続くもの**を注記とする。
+                # 1 つ目で打ち切らないのは、引用符が落ちた `, name: release #1}  # v4` のように
+                # 値の中の `#` が先に来ることがあるため（そこで打ち切ると `1}` を注記と誤読する）。
+                # 逆に最後まで貪欲に採ると `# v1.2.3 (fixes #42)` で `42)` を拾うので、
+                # 「版らしい形か」で選ぶ。どれも該当しなければ注記なし＝マーカー必須検査で赤くなる
+                while (match(tail, /(^|[[:space:]])#/)) {
+                    # `#` の直後から後ろをコメント本文の候補として取り出す
+                    body = substr(tail, RSTART + RLENGTH)
+                    # 候補の先頭にある空白を落として、最初の語の頭に合わせる
+                    sub(/^[[:space:]]*/, "", body)
+                    # 最初の語（次の空白まで）を切り出す
+                    word = body
+                    sub(/[[:space:]].*$/, "", word)
+                    # 版らしい形ならそれを注記として採用し、探索を終える
+                    if (looks_like_marker(word)) { marker = word; break }
+                    # そうでなければ、この `#` の次の文字から探索を続ける
+                    tail = body
+                }
+            }
+
+            # 集めた値を 1 件ずつ書き出す
+            # （`marker` は上の `n == 1` の中でしか埋まらないので、複数件の行では必ず空になる）
+            for (i = 1; i <= n; i++) {
+                print lineno "\t" values[i] "\t" marker
+            }
+            # 次の行のために、この行で使った配列を空にする
+            delete values
+        }
+    '
+}
+
+# `uses:` 1 件を検査する関数
+# 第 1 引数: ワークフローのファイル名 / 第 2 引数: 行番号
+# 第 3 引数: 参照文字列 / 第 4 引数: バージョンマーカー（無ければ空文字列）
+# 第 5 引数: その行が特権ワークフローのものなら "privileged"、それ以外は "plain"
+#
+# 値の切り出しは `split_uses_occurrences()` が済ませてあるので、ここでは**受け取った値をそのまま使う**
 check_uses_line() {
     # 引数をそれぞれ意味の分かる名前の変数に取り出す
-    local wf_name="$1" lineno="$2" content="$3" scope="$4"
-    local ref action pinned marker label
-
-    # `uses:` の値（参照文字列の全体）を取り出す。
-    # 先頭に空白を足してから「最後の `uses:` の直前までを捨てる」ことで、
-    # 手順の先頭（`- uses: …`）とフローマッピングの中（`- {uses: …}`）を同じ 1 本の式で扱える
-    ref="$(printf ' %s' "$content" | sed -E 's/.*[[:space:]{,]uses[[:space:]]*:[[:space:]]*//')"
-    # フロー形式では値の直後に区切り（`}` `]` `,`）が続くので、そこまでを値とする
-    ref="$(printf '%s' "$ref" | sed -E 's/[][[:space:],}].*$//')"
-    # YAML では値を引用符で囲めるため、URL に混入しないよう `'` と `"` を取り除く
-    ref="${ref//\'/}"
-    ref="${ref//\"/}"
-    # 行末のコメントに書かれたバージョンマーカーを取り出す（`v` 接頭辞は付かない上流もあるため任意とする）
-    marker="$(printf '%s' "$content" | sed -nE 's/.*#[[:space:]]*(v?[0-9][^[:space:]]*).*/\1/p')"
+    local wf_name="$1" lineno="$2" ref="$3" marker="$4" scope="$5"
+    local action pinned label
     # 表示用に「ファイル名:行番号 の参照」という短いラベルを組み立てる
     label="${wf_name}:${lineno} ${ref%%@*}"
 
@@ -610,28 +747,23 @@ check_workflow_file() {
     wf_name="$(basename "$path")"
     # そのファイルで `uses:` 行が 1 つでも見つかったかを記録する
     local seen=0
+    # 読み取りループが 1 件ずつ受け取る 3 列（関数の外へ漏らさないよう先に宣言する）
+    local lineno ref marker
 
-    # `uses:` 行を行番号付きで 1 行ずつ読み取って検査する。
+    # `uses:` を 1 件ずつ行番号付きで読み取って検査する。
     # ここでは参照の形（`@` の有無・`docker://`・ローカル参照）で絞り込まない。
     # 絞り込むと「該当形式でない＝検査対象なし＝合格」という取りこぼしが生まれるため。
-    # YAML では手順の先頭要素が `- uses:` と書かれることもあるため、行頭の `- ` も許容する
-    while IFS= read -r entry; do
-        # 「行番号:行の内容」の形なので、まず行番号を取り出す
-        local lineno="${entry%%:*}"
-        # 続けて実際の行の内容を取り出す
-        local content="${entry#*:}"
-        # `uses:` 行を 1 件見つけたことを記録する
+    # 「行番号 <TAB> 参照 <TAB> マーカー」の 3 列で渡ってくるので、タブ区切りで受け取る
+    while IFS=$'\t' read -r lineno ref marker; do
+        # `uses:` を 1 件見つけたことを記録する
         seen=1
-        # 取り出した 1 行を検査する
-        check_uses_line "$wf_name" "$lineno" "$content" "$scope"
-    # 抽出元は `emit_structural_lines`（ブロックスカラーの本文を除いた構造行）。
-    # 行番号付きで渡ってくるので、`uses:` 行だけを行番号ごと選び出す
-    # 引用符は抽出側で落とされているので、鍵は `uses` の形に揃っている。
-    # 手順の先頭（`- uses:`）に加えて、フローマッピングの中（`- {uses: …}` / `{a: b, uses: …}`）も拾い、
-    # `uses : …` のようにコロンの前に空白を挟む書き方（YAML では正しい）も許容する
-    # — 鍵の表記ゆれは特権判定側で 3 度取りこぼしており、強制側だけ 1 通りに絞る理由が無い
-    done < <(emit_structural_lines "$path" \
-        | grep -E '^[0-9]+:([[:space:]]*(-[[:space:]]+)?|.*[{,][[:space:]]*)uses[[:space:]]*:[[:space:]]*[^[:space:]]' || true)
+        # 取り出した 1 件を検査する
+        check_uses_line "$wf_name" "$lineno" "$ref" "$marker" "$scope"
+    # 抽出は `split_uses_occurrences` に任せる（構造行の抽出 → 出現ごとの分解までを 1 本で行う）。
+    # **選別条件をここに書き写さない**: 以前はこの位置の `grep` と消費側の取り出し式が
+    # 「何を `uses:` と見なすか」を二重に持っており、片方だけが 1 行複数の出現に対応できていなかった。
+    # 単一の参照元にまとめることで、鍵の表記ゆれへの対応が片方だけ古くなる事故を防ぐ（§6 一元管理）
+    done < <(split_uses_occurrences "$path")
 
     # 特権ワークフローに `uses:` が 1 行も無いのは、抽出条件の破損か構成変更を意味するため失敗にする
     # （検査対象が消えたことを「合格」と読み替えないための歯止め）
@@ -660,6 +792,29 @@ check_workflow_path() {
     fi
 }
 
+# 検査用の仮ワークフローをファイルへ書き出し、そのパスを `FIXTURE_PATH` に置く関数
+# 第 1 引数: ファイル名の接頭辞（どの検査が作ったものか分かるようにする）/ 第 2 引数: ワークフローの中身
+#
+# **3 つの表明関数が同じ前置きを書き写していたのでまとめた**（§6 DRY）。
+# ファイル名は下限リスト `ALWAYS_PRIVILEGED` のどれとも衝突しない形にする必要がある
+# （衝突すると、内容ではなくファイル名で特権と判定されてしまい、検査の意味が変わる）。
+# 1 か所に集めておけば、この制約を満たす場所も 1 か所で済む。
+#
+# **パスを標準出力へ返さずグローバル変数に置く**のが要点: 呼び出し側が `$(write_fixture …)` で
+# 受け取ると本体がサブシェルで走り、連番 `FIXTURE_SEQ` の増加が呼び出し元へ戻らない。
+# その状態では同じ接頭辞の仮ワークフローが毎回同じ 1 ファイルを上書きし、
+# 失敗したケースを調べようとしたときにディスクへ残っているのは別のケースの内容になる（実測）
+write_fixture() {
+    # 引数をそれぞれ意味の分かる名前の変数に取り出す
+    local prefix="$1" body="$2"
+    # 検査ごとに別名のファイルを作るための連番を 1 つ進める
+    FIXTURE_SEQ=$((FIXTURE_SEQ + 1))
+    # 仮のワークフローの置き場所を決めて、呼び出し側から見えるようにする
+    FIXTURE_PATH="${TEST_TMP}/${prefix}-${FIXTURE_SEQ}.yml"
+    # 渡されたワークフローの中身を仮のファイルへ書き出す
+    printf '%s\n' "$body" > "${FIXTURE_PATH}"
+}
+
 # 仮のワークフローを実際の検査経路へ通し、違反として数えられるかどうかを確かめる関数
 # 第 1 引数: 期待する結果（enforced = 違反として検出される / accepted = 何も咎められない）
 # 第 2 引数: 表示用の説明 / 第 3 引数: ワークフローの中身
@@ -669,15 +824,13 @@ check_workflow_path() {
 # 前段だけを固定すると後段を丸ごと削っても回帰テストが緑のままになるため、
 # ここでは `check_workflow_path()` に通し、集計カウンタの増分で結果を観測する。
 # 上流問い合わせを起こさないよう、仮のワークフローには SHA ピンを書かない（可変参照だけを使う）
+
 assert_pin_enforcement() {
     # 引数をそれぞれ意味の分かる名前の変数に取り出す
     local expected="$1" label="$2" body="$3"
-    # 検査ごとに別名のファイルを作るための連番を 1 つ進める
-    FIXTURE_SEQ=$((FIXTURE_SEQ + 1))
-    # 仮のワークフローの置き場所を決める
-    local fixture="${TEST_TMP}/enforce-${FIXTURE_SEQ}.yml"
-    # 渡されたワークフローの中身を仮のファイルへ書き出す
-    printf '%s\n' "$body" > "$fixture"
+    # 仮のワークフローを書き出し、そのパスを受け取る（サブシェルにしないため戻り値は使わない）
+    write_fixture enforce "$body"
+    local fixture="${FIXTURE_PATH}"
 
     # 仮のワークフローの検査結果が本物の集計に混ざらないよう、現在の値を退避する
     local saved_pass="$PASS" saved_fail="$FAIL"
@@ -715,13 +868,9 @@ assert_pin_enforcement() {
 assert_privilege_classification() {
     # 引数をそれぞれ意味の分かる名前の変数に取り出す
     local expected="$1" label="$2" body="$3"
-    # 検査ごとに別名のファイルを作るための連番を 1 つ進める
-    FIXTURE_SEQ=$((FIXTURE_SEQ + 1))
-    # 判定にかけるための仮のワークフローの置き場所を決める
-    # （下限リスト `ALWAYS_PRIVILEGED` のファイル名と衝突しない名前にして、内容だけで判定させる）
-    local fixture="${TEST_TMP}/fixture-${FIXTURE_SEQ}.yml"
-    # 渡されたワークフローの中身を仮のファイルへ書き出す
-    printf '%s\n' "$body" > "$fixture"
+    # 判定にかけるための仮のワークフローを書き出し、そのパスを受け取る
+    write_fixture fixture "$body"
+    local fixture="${FIXTURE_PATH}"
 
     # 実際の判定結果を、期待値と同じ語彙（privileged / plain）で受け取る
     local actual="plain"
@@ -735,6 +884,34 @@ assert_privilege_classification() {
     else
         fail "privilege classifier: ${label} → ${expected}" \
             "classified as '${actual}'; a workflow misread as 'plain' has its mutable action refs skipped entirely, so FR-9.6(b) stops applying to it"
+    fi
+}
+
+# `split_uses_occurrences()` の出力そのものを固定する関数
+# 第 1 引数: 表示用の説明 / 第 2 引数: 期待する出力（「行番号 <TAB> 参照 <TAB> マーカー」の並び）
+# 第 3 引数: 仮のワークフローの中身
+#
+# **違反件数だけでは見分けられない性質があるため、出力を直接見る**: 版注記をどの参照へ配るかを
+# 間違えても「何かしら違反になる」点は変わらず、`assert_pin_enforcement` では素通りしてしまう。
+# 配り方を誤ると偽の改竄警告や注記の借用（マーカー必須検査のすり抜け）が起きるうえ、
+# 本来不要な `git ls-remote` を呼んでハーメティックであるべき検査に通信を持ち込む
+assert_split_output() {
+    # 引数をそれぞれ意味の分かる名前の変数に取り出す
+    local label="$1" expected="$2" body="$3"
+    # 仮のワークフローを書き出し、そのパスを受け取る
+    write_fixture split "$body"
+    local fixture="${FIXTURE_PATH}"
+
+    # 実際の分解結果を受け取る
+    local actual
+    actual="$(split_uses_occurrences "$fixture")"
+
+    # 期待どおりかどうかを、他の検査と同じ書式で報告する（タブは見えないので矢印に置き換えて示す）
+    if [[ "$actual" == "$expected" ]]; then
+        pass "uses: splitting: ${label}"
+    else
+        fail "uses: splitting: ${label}" \
+            "expected «${expected//$'\t'/→}» but got «${actual//$'\t'/→}»"
     fi
 }
 
@@ -1130,6 +1307,7 @@ jobs:
   j:
     runs-on: ubuntu-latest
     steps:
+      - uses: ./.github/actions/local
       - uses: actions/checkout@v7'
 
 # 版の指定が無い参照も、固定できていないので違反として検出されなければならない
@@ -1140,6 +1318,7 @@ jobs:
   j:
     runs-on: ubuntu-latest
     steps:
+      - uses: ./.github/actions/local
       - uses: actions/checkout'
 
 # コンテナ参照はダイジェスト固定が必要で、タグ参照は違反として検出されなければならない
@@ -1150,6 +1329,7 @@ jobs:
   j:
     runs-on: ubuntu-latest
     steps:
+      - uses: ./.github/actions/local
       - uses: docker://alpine:3.20'
 
 # 特権ワークフローに `uses:` が 1 行も無いのは、抽出条件の破損か構成変更なので違反として扱う
@@ -1246,6 +1426,240 @@ jobs:
     steps:
       - uses: ./.github/actions/local
       - uses : actions/checkout@v7'
+
+# 1 行に `uses:` が複数あるとき、**最後の 1 個以外が検査から外れない**こと。
+# 抽出が貪欲一致（`.*uses:`）だった頃は最後の 1 個しか見ておらず、後ろにローカル action を
+# 並べるだけで前の可変タグが指摘 0 件で通っていた（実測。特権ワークフローで供給網ピンが無効化される）
+assert_pin_enforcement enforced 'mutable tag before another uses on the same flow-sequence line' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps: [{uses: actions/checkout@v7}, {uses: ./.github/actions/local}]'
+
+# 同じ穴のうち、**行末コメントに `uses:` と書かれている**場合。
+# 構造としての `uses:` はコメントより前にしか置けないので、値の探索対象から外す必要がある
+assert_pin_enforcement enforced 'mutable tag whose trailing comment also mentions a uses key' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7  # 以前は uses: ./.github/actions/local だった'
+
+# 1 行に並んだ複数の参照が**どちらも**検査されること（前だけ見て後ろを落とす逆向きの取りこぼし防止）
+assert_pin_enforcement enforced 'mutable tag after another uses on the same flow-sequence line' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps: [{uses: ./.github/actions/local}, {uses: actions/checkout@v7}]'
+
+# **値の中の散文を参照と読み違えない**こと。引用符は構造行の抽出時に一律で落とされるため、
+# `- name: "… workflow uses: a pinned SHA"` は素の文字列として届く。鍵になれる位置（行頭・`{` / `,` の直後）
+# ではなく「空白の後ろならどこでも」で拾うと、これを参照 `a` と読んで違反を報告し、
+# 特権ワークフローに同種の文言が入った時点で CI が恒常的に赤くなる（実測）
+assert_pin_enforcement accepted 'prose mentioning a uses key inside a quoted value' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: "Verify that every workflow uses: a pinned SHA"
+        run: echo ok
+      - uses: ./.github/actions/local'
+
+# 1 行 1 件のときは、行末の版注記をその参照のものとして渡す（従来どおりの正常系）
+assert_split_output 'a single ref keeps its own trailing version marker' \
+"7"$'\t'"actions/checkout@1111111111111111111111111111111111111111"$'\t'"v4" \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@1111111111111111111111111111111111111111  # v4'
+
+# 仮ワークフローは検査ごとに別ファイルになること。`$(write_fixture …)` の形で受けると本体が
+# サブシェルで走って連番が呼び出し元へ戻らず、同じ接頭辞のケースが 1 ファイルを上書きし続ける。
+# そうなると、失敗したケースを調べようとしたときにディスクに残っているのは別ケースの内容になる
+write_fixture seqcheck 'name: X'
+SEQCHECK_FIRST="${FIXTURE_PATH}"
+write_fixture seqcheck 'name: Y'
+if [[ "${SEQCHECK_FIRST}" != "${FIXTURE_PATH}" ]]; then
+    pass "fixtures: each case is written to its own file"
+else
+    fail "fixtures: each case is written to its own file" \
+        "both calls wrote ${FIXTURE_PATH}; the sequence counter is not surviving the call, so a failing case's fixture is overwritten by a later one"
+fi
+
+# 値の途中に `#` があっても、その後ろの参照を捨てないこと。引用符は抽出時に一律で落ちるため
+# `- {name: "release #1", uses: …}` の `#` は素の文字として届く。そこで行を切ると
+# **未ピンの可変タグごと検査対象から消える**（「不在＝合格」への逆戻り。実測）
+assert_pin_enforcement enforced 'mutable tag after a hash character inside a value' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/local
+      - {name: "release #1", uses: actions/checkout@v7}'
+
+# 値の中に閉じ括弧が紛れていても、後ろの参照を取り逃がさないこと。引用符が落ちるため
+# `- {name: "a}b", uses: …}` の `}` は素の文字として届く。括弧の釣り合いを数えると深さ 0 と誤り、
+# カンマを散文の読点と判定して**未ピンの参照ごと検査から消える**（「不在＝合格」への逆戻り。実測）
+# **健全な `uses:` を 1 行足しておく**のが要点: これが無いと参照を取り逃がしたときに
+# 「特権ワークフローに `uses:` が 1 つも無い」歯止め（`seen == 0`）の方が先に鳴ってしまい、
+# 取りこぼしを入れても違反件数が 1 のままでこの表明が素通りする（実測）
+assert_pin_enforcement enforced 'mutable tag after a closing brace inside a value' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/local
+      - {name: "a}b", uses: actions/checkout@v7}'
+
+# フローシーケンスの**先頭要素**に置かれた `uses:` も検査対象にすること。
+# `steps: [uses: …]` は単一対のマッピングとして解釈され、実際に実行されるステップになる。
+# 区切りに `[` を入れないと 1 件も抽出されず、可変タグが指摘 0 件で通る
+# フロー集合が**複数行に跨る**場合も、続きの行にある `uses:` を取り逃がさないこと。
+# カンマに「集合の内側か」の条件を付けると、開き括弧が前の行にあるため区切りと認められず、
+# 未ピンの参照が丸ごと検査から消える（main は検出していた。実測して条件を撤回した）
+assert_pin_enforcement enforced 'mutable tag reached through a comma on a continuation line' \
+'name: X
+permissions: write-all
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/local
+  b:
+    runs-on: ubuntu-latest
+    steps: [
+      name: a, uses: actions/checkout@v7
+    ]'
+
+# 式で組み立てた**動的な参照**も検査対象から外さないこと。`${{ … }}` は実際に動く書き方であり、
+# 版を固定できていないので特権ワークフローでは違反。値の形で絞り込む実装にすると
+# ここが指摘 0 件になり、供給網ピンが黙って無効になる（実測して差し戻した経緯がある）
+# shellcheck disable=SC2016  # YAML の中身をそのまま書くので `${{ }}` は展開させない
+assert_pin_enforcement enforced 'a reference built from an expression is still checked' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/local
+      - uses: ${{ inputs.action_ref }}'
+
+# 行末コメントの中の `] uses:` を鍵と読み違えないこと。`]` はフロー集合を**閉じる**文字なので
+# 鍵の直前に来ることはない。区切りの文字集合に紛れ込ませると、散文で偽の参照を報告する
+assert_pin_enforcement accepted 'prose containing a closing bracket before a uses key' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/local
+      - name: see FR-9.6(b)] uses: acme/thing for details
+        run: echo ok'
+
+# 健全な `uses:` は**別のジョブ**に置く（同じ行に足すと `[` を外した退行を隠してしまうため）
+assert_pin_enforcement enforced 'mutable tag as the first entry of a flow sequence' \
+'name: X
+permissions: write-all
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/local
+  b:
+    runs-on: ubuntu-latest
+    steps: [uses: actions/checkout@v7]'
+
+# 版注記は**参照より後ろのコメント**から取ること。先頭から最初のコメント開始を探すと、
+# 引用符が落ちた値の中の `#1` を拾って `1,` をマーカーと誤読し、存在しないタグを上流へ
+# 問い合わせて「タグの綴り誤りでは」と的外れな診断を出す（通信も無駄に発生する）
+assert_split_output 'the version marker is taken from the comment that follows the ref' \
+"7"$'\t'"actions/checkout@1111111111111111111111111111111111111111"$'\t'"v4" \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - {name: "release #1", uses: actions/checkout@1111111111111111111111111111111111111111}  # v4'
+
+# 参照より後ろに値の中の `#` が現れても、それを注記と取り違えないこと。
+# `- {uses: …, name: "release #1"}  # v4` では `#1}` が先に現れるので、
+# 最初の `#` で打ち切ると `1}` を注記と誤読し、存在しないタグを上流へ問い合わせる
+assert_split_output 'a hash inside a value after the ref does not steal the version marker' \
+"7"$'\t'"actions/checkout@1111111111111111111111111111111111111111"$'\t'"v4" \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - {uses: actions/checkout@1111111111111111111111111111111111111111, name: "release #1"}  # v4'
+
+# 裸の数字列は版注記として認めないこと。`# bump #12 -> v5` の `12` を版と読むと、
+# 存在しないタグを上流へ問い合わせて「綴り誤りでは」と原因を指し違えた診断を出す。
+# 注記として認めないので「マーカーが無い」として赤くなる（＝注記の書き方を直せ、という正しい指摘）
+assert_split_output 'a bare issue number is not accepted as a version marker' \
+"7"$'\t'"e/f@1111111111111111111111111111111111111111"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: e/f@1111111111111111111111111111111111111111  # bump #12 -> v5'
+
+# 版注記は**コメントの最初の語**だけを見ること。`#` がもう一度出てくる書き方（issue 番号の参照など）で
+# 貪欲一致すると `42)` をマーカーと誤読し、存在しないタグを上流へ問い合わせて
+# 「タグの綴り誤りでは」と原因を指し違えた診断を出す（fail-closed だが誤診で、通信も無駄に発生する）
+assert_split_output 'a version marker followed by another hash is read as the first word only' \
+"7"$'\t'"actions/checkout@1111111111111111111111111111111111111111"$'\t'"v1.2.3" \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@1111111111111111111111111111111111111111  # v1.2.3 (fixes #42)'
+
+# 1 行に複数の参照があるとき、**行末の版注記を全件へ配らない**こと。
+# 配ると (a) 別々の SHA に同じ版を突き合わせて偽の改竄警告を出し、
+# (b) 自分の注記を持たない参照が隣の注記を借りて「マーカーが無い」検査をすり抜ける。
+# どちらを指す注記か決められない以上、各参照は注記なしとして扱う（fail-closed）
+assert_split_output 'two refs on one line do not share the single trailing marker' \
+"6"$'\t'"a/b@1111111111111111111111111111111111111111"$'\t'"
+6"$'\t'"c/d@2222222222222222222222222222222222222222"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps: [{uses: a/b@1111111111111111111111111111111111111111}, {uses: c/d@2222222222222222222222222222222222222222}]  # v1.2.3'
+
+# 注記を配らない結果として、各参照は「マーカーが無い」として素直に赤くなる（通信も発生しない）
+assert_pin_enforcement enforced 'one trailing version marker shared by two refs on the same line' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps: [{uses: a/b@1111111111111111111111111111111111111111}, {uses: c/d@2222222222222222222222222222222222222222}]  # v1.2.3'
 
 # 非特権ワークフローの可変タグは FR-9.6(b) の対象外なので咎めない（`ci.yml` が実際に依存している挙動）
 assert_pin_enforcement accepted 'plain workflow with a mutable tag' \

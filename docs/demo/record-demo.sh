@@ -337,7 +337,14 @@ if [ "$(head -c 4 "${GIF_TMP_FILE}")" != "GIF8" ]; then
     discard_stale_gif
     exit 1
 fi
-GIF_SIZE="$(stat -c %s "${GIF_TMP_FILE}")"
+# サイズの取得も**素で書かない**: 他の検査 (rm / agg / mv) と同じく失敗しうるのに、
+# 素の代入だと `set -e` がここでスクリプトを終わらせ、後始末に到達しないまま
+# **前回の GIF が上書き済みの .cast と対のまま残る** (他のどの失敗経路とも違う振る舞いになる)
+if ! GIF_SIZE="$(stat -c %s "${GIF_TMP_FILE}")"; then
+    log "error: 生成した GIF のサイズを取得できませんでした (${GIF_TMP_FILE})。"
+    discard_stale_gif
+    exit 1
+fi
 if [ "${GIF_SIZE}" -gt "${GIF_MAX_BYTES}" ]; then
     # **警告で済ませない**: 他の不備 (agg の失敗・ステップの失敗) では GIF を消しているのに
     # ここだけ残すと、`record-demo.sh && git add docs/demo` で上限超過の GIF がそのまま
