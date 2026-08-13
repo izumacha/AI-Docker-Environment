@@ -9,10 +9,12 @@
 # plumbing (or reverts to relying on `set -e` after asciinema) would once again
 # report "完了" for a broken recording. docs/requirements.md's revision history
 # records that this script already shipped that exact fail-open once. Second,
-# the two checks inside the recording are assertions, not decoration: a
-# reachable example.com (default-deny egress broken) or an unreachable
-# api.anthropic.com (allowlist/DNS regression) must abort the run rather than
-# produce a GIF that advertises a sandbox which no longer isolates anything.
+# the three checks inside the recording are assertions, not decoration: a
+# reachable example.com (default-deny egress broken), an unreachable
+# api.anthropic.com (allowlist/DNS regression), or a `whoami` that is not
+# `agent` (the gosu drop is gone -- SEC-7 / AC-3) must abort the run rather
+# than produce a GIF that advertises a sandbox which no longer isolates
+# anything.
 #
 # Neither property is covered by CI today: the type-check job only lints the
 # script with shellcheck and `bash -n`, which is precisely the "absence ==
@@ -276,6 +278,16 @@ assert_file_contains "${STDIN_CAPTURE}" "exit" "container stdin ends the shell w
 assert_file_contains "${PWD_CAPTURE}" "/tmp/aidock-demo-workspace." \
     "aidock shell runs from the neutral demo workspace, not the operator's cwd"
 
+# 1d) 端末が無い環境では「幅が環境依存になる」と警告する。
+#     この警告が出ること自体が、端末サイズを固定する分岐が生きている証拠でもある
+#     （テストは端末を持たないので必ずこちらの経路を通る）。
+#     **サイズ固定を諦める分岐は 2 つある**ので、端末が無い側だけに現れる文言で照合する
+#     （もう一方は「現在の端末サイズを復元できる形で取得できないため…固定しません」）。
+#     ここで見ているのは正常系 (case 1) の出力なので、この 1 件のために
+#     録画を丸ごともう一度回す必要はない
+assert_contains "標準入力または標準出力が端末ではないため端末サイズを固定できません" \
+    "no terminal: warns that the GIF width is environment-dependent"
+
 # 2) default-deny の退行: 許可外ホストへ到達できたら失敗し、直前の実行で出来た GIF も残さない
 run_record leaky
 assert_status 1 "reachable example.com: exits non-zero"
@@ -314,6 +326,10 @@ touch "${FAKE_GIF}"
 run_record asciinemafail
 assert_status 1 "asciinema failure: exits non-zero"
 assert_missing "${FAKE_GIF}" "asciinema failure: discards the stale GIF"
+# 削除した GIF の**由来の説明**も固定する。ここは agg へ到達する前なので、
+# 残っていた GIF は前回の実行のもの（多くはコミット済み）と確定でき、復元の案内が要る
+assert_contains "前回の" "asciinema failure: attributes the discarded GIF to the previous run"
+assert_contains "git restore" "asciinema failure: points at the recovery path for a committed artifact"
 
 # 6) 状態ファイルが書かれなかった場合（録画対象を起動できなかった）も fail-closed
 touch "${FAKE_GIF}"
@@ -327,6 +343,9 @@ touch "${FAKE_GIF}"
 run_record aggfail
 assert_status 1 "agg failure: exits non-zero"
 assert_missing "${FAKE_GIF}" "agg failure: discards the partial GIF"
+# agg が失敗したときは、残っていたのが書きかけか前回の成果物か**判別できない**。
+# ここで「今回生成した」と断定すると、コミット済みの成果物を消したのに復元の案内を伏せてしまう
+assert_contains "判別できません" "agg failure: does not claim to know the discarded GIF's origin"
 
 # 8) 上限を超える GIF は成果物として残さない（§15 の 10MB 基準）
 run_record biggif
@@ -339,6 +358,9 @@ touch "${FAKE_GIF}"
 run_record emptygif
 assert_status 1 "empty GIF: exits non-zero"
 assert_missing "${FAKE_GIF}" "empty GIF: refuses to leave the empty artifact"
+# agg が正常終了した後に消すのは今回書かれたファイルと確定できる。git には無いので、
+# `git restore` を案内すると操作者が古い GIF を復活させて .cast と食い違わせてしまう
+assert_contains "今回の実行で生成した" "empty GIF: attributes the discarded GIF to this run"
 
 touch "${FAKE_GIF}"
 run_record notagif
@@ -349,12 +371,6 @@ assert_missing "${FAKE_GIF}" "non-GIF output: refuses to leave the bogus artifac
 run_record nodaemon
 assert_status 1 "unreachable Docker daemon: exits non-zero"
 assert_contains "デーモンを起動してから" "unreachable Docker daemon: gives an actionable message"
-
-# 11) 端末が無い環境では「幅が環境依存になる」と警告する。
-#     この警告が出るということは端末サイズを固定する分岐が生きている証拠でもある
-#     （テストは端末を持たないので、必ずこちらの経路を通る）
-run_record ok
-assert_contains "端末サイズを固定できません" "no terminal: warns that the GIF width is environment-dependent"
 
 # --- summary ----------------------------------------------------------------
 # 集計と終了コードの決定は共有ハーネスに任せる
