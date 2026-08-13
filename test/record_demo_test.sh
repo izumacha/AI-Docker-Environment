@@ -26,6 +26,13 @@
 # stub whose container-side behaviour is switchable per test case, mirroring
 # how test/guard_test.sh stubs docker/getent and test/entrypoint_test.sh stubs
 # gosu.
+#
+# Prerequisite beyond coreutils: `script(1)` (util-linux; packaged as
+# bsdextrautils on Debian 11+, present on ubuntu-latest). The terminal-size
+# branches live behind `[ -t 0 ] && [ -t 1 ]`, so they need a real pty to be
+# reachable at all. A missing `script` is reported as a FAIL rather than
+# skipped -- a silent skip would restore exactly the "absence == pass" hole
+# those cases exist to close.
 
 # エラー発生時に即座に停止し、未定義変数の参照もエラーにする（安全なスクリプト実行の基本設定）
 set -euo pipefail
@@ -150,11 +157,32 @@ fi
 # サイズ変更（固定・復元）の呼び出しは、引数をそのまま記録に残す。
 # 記録先が渡されていない実行（端末を持たない既存ケース）では捨てる
 printf '%s\n' "$*" >> "${AIDOCK_TEST_STTY_CAPTURE:-/dev/null}"
+# サイズ変更が拒否される環境（ioctl を通さないコンテナ・多重化端末など）を模す。
+# 記録は先に残す: 「試したが失敗した」ことと「試していない」ことを取り違えないため
+if [[ "${AIDOCK_TEST_STTY_RESIZE_FAILS:-}" == "fail" ]]; then
+    exit 1
+fi
 exit 0
 STUB
 
+# 本物の rm の場所を、PATH をスタブで汚す前に控えておく（スタブから委譲するため）
+REAL_RM="$(command -v rm)"
+
+# rm スタブ: 既定では本物へそのまま委譲し、cleanupfail モードのときだけ
+# **作業ディレクトリの削除だけ**を失敗させる。EXIT トラップ内で cleanup が非ゼロを返す
+# 状況（rm -rf が EACCES 等）を作り、それでも端末サイズの復元に到達することを見るため
+cat > "${STUB_BIN}/rm" << STUB
+#!/usr/bin/env bash
+# デモ用の作業ディレクトリを消そうとしたときだけ失敗を返す
+if [[ "\${AIDOCK_TEST_MODE:-ok}" == "cleanupfail" && "\$*" == *"aidock-demo-workspace"* ]]; then
+    exit 1
+fi
+# それ以外は本物の rm にそのまま任せる
+exec "${REAL_RM}" "\$@"
+STUB
+
 # 実行権限を与える
-chmod +x "${STUB_BIN}/docker" "${STUB_BIN}/agg" "${STUB_BIN}/asciinema" "${STUB_BIN}/stty"
+chmod +x "${STUB_BIN}/docker" "${STUB_BIN}/agg" "${STUB_BIN}/asciinema" "${STUB_BIN}/stty" "${STUB_BIN}/rm"
 
 # --- 擬似リポジトリの用意 -----------------------------------------------------
 
@@ -173,6 +201,7 @@ FAKE_GIF="${FAKE_REPO}/docs/demo/aidock-demo.gif"
 #   blocked   … 許可ホストへ到達できない（許可リスト / DNS の退行）
 #   rootuser  … agent へ降格できていない（gosu 降格の退行 / SEC-7・AC-3）
 #   buildfail … build が失敗する
+#   cleanupfail … 一時ファイルの後始末（rm -rf）が失敗する（コンテナ内の挙動は ok と同じ）
 cat > "${FAKE_REPO}/bin/aidock" << 'STUB'
 #!/usr/bin/env bash
 set -uo pipefail
@@ -244,10 +273,16 @@ chmod +x "${FAKE_REPO}/bin/aidock"
 
 # --- 実行ヘルパー -------------------------------------------------------------
 
-# 録画スクリプトを指定のテストモードで実行し、終了コードと出力を記録する
-run_record() {
+# 録画スクリプトを 1 回実行し、終了コード・出力・各種捕捉ファイルを用意する共通の土台。
+# **入口を 2 つに分けても中身は書き写さない**: 端末の有無だけが違う 2 通りの起動方法が要る
+# 一方で、捕捉ファイルや環境変数は共通なので、書き写すと後から足した捕捉ファイルが
+# 片方だけ更新されず、もう片方のケースが前回の内容を見たまま緑になる（§6 DRY）。
+# 第 1 引数がテストモード、第 2 引数以降が「録画スクリプトをどう起動するか」
+run_record_with() {
     # コンテナ内スタブへ渡すテストモード
     local mode="$1"
+    # 残りの引数（起動コマンド）を "$@" として使えるよう、モードを取り除く
+    shift
     # 検査スクリプトの場所は record-demo.sh が export する AIDOCK_DEMO_WORKSPACE で
     # スタブ側へ伝わるので、ここでは何も渡さない
     # コンテナへ流し込まれた標準入力を受け取るファイル（毎回まっさらにする）
@@ -256,35 +291,7 @@ run_record() {
     # aidock shell を起動したときのカレントディレクトリを受け取るファイル
     PWD_CAPTURE="${TEST_TMP}/pwd-capture"
     : > "${PWD_CAPTURE}"
-    set +e
-    LAST_OUTPUT="$(
-        cd "${FAKE_REPO}" &&
-            PATH="${STUB_BIN}:${PATH}" AIDOCK_TEST_MODE="${mode}" \
-                AIDOCK_TEST_STDIN_CAPTURE="${STDIN_CAPTURE}" \
-                AIDOCK_TEST_PWD_CAPTURE="${PWD_CAPTURE}" \
-                ./docs/demo/record-demo.sh 2>&1
-    )"
-    LAST_STATUS=$?
-    set -e
-}
-
-# 録画スクリプトを**擬似端末（pty）の上で**実行する。
-# **なぜ必要か**: 端末サイズを固定する分岐は `[ -t 0 ] && [ -t 1 ]` の内側にあり、
-# 通常の run_record（出力をコマンド置換で受けるので端末ではない）では一度も通らない。
-# その状態では、固定と復元の条件をまるごと消してもテストが緑のまま＝「不在＝合格」になる。
-# script(1) が pty を用意し、その中で終了コードもそのまま返してくれる（-e）。
-# stty はスタブ済みなので、実行している端末のサイズには一切触れない
-run_record_pty() {
-    # コンテナ内スタブへ渡すテストモード
-    local mode="$1"
-    # stty スタブが「現在のサイズ」として報告する値（復元に使えるかどうかを切り替える）
-    local reported_size="$2"
-    # 既存ヘルパーと同じ捕捉ファイル群（毎回まっさらにする）
-    STDIN_CAPTURE="${TEST_TMP}/stdin-capture"
-    : > "${STDIN_CAPTURE}"
-    PWD_CAPTURE="${TEST_TMP}/pwd-capture"
-    : > "${PWD_CAPTURE}"
-    # stty へのサイズ変更要求を受け取るファイル
+    # stty へのサイズ変更要求（固定・復元）を受け取るファイル
     STTY_CAPTURE="${TEST_TMP}/stty-capture"
     : > "${STTY_CAPTURE}"
     set +e
@@ -294,15 +301,44 @@ run_record_pty() {
                 AIDOCK_TEST_STDIN_CAPTURE="${STDIN_CAPTURE}" \
                 AIDOCK_TEST_PWD_CAPTURE="${PWD_CAPTURE}" \
                 AIDOCK_TEST_STTY_CAPTURE="${STTY_CAPTURE}" \
-                AIDOCK_TEST_STTY_SIZE="${reported_size}" \
-                script -qec './docs/demo/record-demo.sh' /dev/null 2>&1
+                "$@" 2>&1
     )"
-    # script(1) は -e で録画スクリプト自身の終了コードをそのまま返す。
-    # **パイプで CR を落とさない**: 挟むと $? がパイプ末尾のものになり、判定がすり替わる
+    # **パイプを挟まない**: 挟むと $? がパイプ末尾のものになり、判定がすり替わる
     LAST_STATUS=$?
     set -e
-    # pty 経由の出力は行末が CR LF になるので、比較しやすいよう CR だけ落とす
+    # pty 経由の実行では行末が CR LF になるので、比較しやすいよう CR だけ落とす
+    # （端末を使わない実行では何も変わらない）
     LAST_OUTPUT="${LAST_OUTPUT//$'\r'/}"
+}
+
+# stty スタブへ渡す設定。**export しておく**: 起動コマンドが script(1) を挟むため、
+# 呼び出し行の環境変数の前置きでは（sh -c の内側で走る）録画スクリプトまで届かない
+export AIDOCK_TEST_STTY_SIZE=""
+export AIDOCK_TEST_STTY_RESIZE_FAILS=""
+
+# 録画スクリプトを**端末を持たない状態で**実行する（既定の入口）
+run_record() {
+    # 起動はそのまま。stty スタブの振る舞いは使わないので既定値に戻しておく
+    AIDOCK_TEST_STTY_SIZE=""
+    AIDOCK_TEST_STTY_RESIZE_FAILS=""
+    run_record_with "$1" ./docs/demo/record-demo.sh
+}
+
+# 録画スクリプトを**擬似端末（pty）の上で**実行する。
+# **なぜ必要か**: 端末サイズを固定する分岐は `[ -t 0 ] && [ -t 1 ]` の内側にあり、
+# 通常の run_record（出力をコマンド置換で受けるので端末ではない）では一度も通らない。
+# その状態では、固定と復元の条件をまるごと消してもテストが緑のまま＝「不在＝合格」になる。
+# script(1) が pty を用意し、その中で終了コードもそのまま返してくれる（-e）。
+# stty はスタブ済みなので、実行している端末のサイズには一切触れない。
+#   第 2 引数: stty スタブが「現在のサイズ」として報告する値（空なら取得失敗を模す）
+#   第 3 引数: 省略可。'fail' ならサイズ変更の呼び出しを失敗させる
+#   第 4 引数: 省略可。録画スクリプトに付けるリダイレクト（標準出力だけ端末から外す等）
+run_record_pty() {
+    # stty スタブへ「現在のサイズ」と「変更が失敗するか」を伝える
+    AIDOCK_TEST_STTY_SIZE="$2"
+    AIDOCK_TEST_STTY_RESIZE_FAILS="${3:-}"
+    # script(1) には起動するコマンドを 1 つの文字列で渡す（相対パスなので引用は不要）
+    run_record_with "$1" script -qec "./docs/demo/record-demo.sh ${4:-}" /dev/null
 }
 
 # --- テスト本体 ---------------------------------------------------------------
@@ -439,13 +475,13 @@ run_record nodaemon
 assert_status 1 "unreachable Docker daemon: exits non-zero"
 assert_contains "デーモンを起動してから" "unreachable Docker daemon: gives an actionable message"
 
-# 12) 端末がある環境での端末サイズの扱い。
+# 11) 端末がある環境での端末サイズの扱い。
 #     ここまでのケースはすべて端末を持たないため、固定と復元の分岐は一度も通っていない
 #     （その状態では分岐をまるごと消してもテストは緑のまま＝「不在＝合格」）。
-#     pty を用意して両方の枝を通す。stty はスタブなので実端末には触れない。
+#     pty を用意して各枝を通す。stty はスタブなので実端末には触れない。
 #     **script(1) が無ければ検査できないので、黙って飛ばさず失敗にする**（不在＝合格を作らない）
 if command -v script > /dev/null 2>&1; then
-    # 12a) 復元に使えるサイズを返す端末: 録画用に固定し、終了時に元へ戻す
+    # 11a) 復元に使えるサイズを返す端末: 録画用に固定し、終了時に元へ戻す
     run_record_pty ok "24 80"
     assert_status 0 "restorable terminal: exits 0"
     assert_file_contains "${STTY_CAPTURE}" "cols 120 rows 30" \
@@ -453,7 +489,7 @@ if command -v script > /dev/null 2>&1; then
     assert_file_contains "${STTY_CAPTURE}" "rows 24 cols 80" \
         "restorable terminal: restores the caller's original size on exit"
 
-    # 12b) winsize が未設定の pty（stty size が "0 0" を返す）: 戻せないので変更もしない。
+    # 11b) winsize が未設定の pty（stty size が "0 0" を返す）: 戻せないので変更もしない。
     #      非空かどうかだけで判定していると、ここで `stty rows 0 cols 0` を実行してしまう
     run_record_pty ok "0 0"
     assert_status 0 "unusable terminal size: exits 0"
@@ -461,6 +497,29 @@ if command -v script > /dev/null 2>&1; then
         "unusable terminal size: says why the width will be environment-dependent"
     assert_file_empty "${STTY_CAPTURE}" \
         "unusable terminal size: makes no resize it could not undo"
+
+    # 11c) 後始末が失敗しても端末サイズは元へ戻す。
+    #      **トラップの本体も `set -e` の対象**なので、cleanup を先に置くと rm -rf が
+    #      非ゼロで返った時点でトラップが打ち切られ、復元に到達しない（端末が 120x30 のまま残る）
+    run_record_pty cleanupfail "24 80"
+    assert_file_contains "${STTY_CAPTURE}" "rows 24 cols 80" \
+        "failing cleanup: still restores the caller's terminal size"
+
+    # 11d) サイズ変更が拒否されたら黙って続けない（§6 エラーを握り潰さない）。
+    #      ここを `|| true` で受けると、幅が固定できていないのに固定した前提で録画が進む
+    run_record_pty ok "24 80" fail
+    assert_contains "に固定できませんでした" \
+        "refused resize: warns instead of silently recording at an unknown width"
+
+    # 11e) 標準出力だけ端末から外した場合も固定しない。
+    #      **asciinema が録画データへ書く端末サイズは fd 1 から読む**ため、fd 0 だけを見て
+    #      分岐すると stty は成功する一方で録画は既定の 80x24 になり、
+    #      「固定した」と報告しながら幅が変わる（判定を `&&` から `||` に緩めるとこうなる）
+    run_record_pty ok "24 80" "" "> /dev/null"
+    assert_contains "標準入力または標準出力が端末ではないため端末サイズを固定できません" \
+        "stdout redirected away from the terminal: declines to pin the size"
+    assert_file_empty "${STTY_CAPTURE}" \
+        "stdout redirected away from the terminal: touches no terminal size at all"
 else
     report 1 "script(1) is available to exercise the terminal-size branches"
 fi
