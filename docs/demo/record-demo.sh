@@ -239,10 +239,11 @@ if [ -t 0 ] && [ -t 1 ]; then
         ORIGINAL_STTY_ROWS="${BASH_REMATCH[1]}"
         ORIGINAL_STTY_COLS="${BASH_REMATCH[2]}"
         # 終了時に元の桁数・行数へ戻す (一時ファイルの後始末もまとめて行う)。
-        # **復元を先に置く**: トラップの本体も `set -e` の対象なので、先に置いた cleanup が
-        # 非ゼロで返る (rm -rf が EACCES など) とトラップはそこで打ち切られ、
-        # 復元コマンドに到達しない。呼び出し元の端末が 120x30 のまま残るという、
-        # この分岐が無くそうとしている状態そのものになる
+        # **復元を先に置く**: トラップの本体も `set -e` の対象なので、先に置いた後始末が
+        # 非ゼロで返るとトラップはそこで打ち切られ、復元に到達しない。
+        # 一次の保証は `cleanup` が失敗を返さないこと (下の cleanup() を参照。
+        # そこが崩れると終了コードも乗っ取られるため、テストが exit 0 を表明している) で、
+        # この順序はそれが将来崩れたときに端末だけは戻すための二重の備え
         trap 'stty rows "${ORIGINAL_STTY_ROWS}" cols "${ORIGINAL_STTY_COLS}" 2> /dev/null || true; cleanup' EXIT
         # 録画用のサイズへ変更する (失敗したら理由を伝える。黙って無視しない)
         if ! stty cols "${RECORD_COLS}" rows "${RECORD_ROWS}" 2> /dev/null; then
@@ -295,10 +296,9 @@ log "GIF へ変換します → ${GIF_FILE}"
 # 日本語グリフを持たず、CJK を含めると豆腐 (□) になって最重要の一行が読めなくなるため
 # agg も `|| { ... }` で受ける: 途中で失敗すると書きかけの GIF がそのまま残り、
 # 一見もっともらしい .cast と並んでコミットされてしまう
-# 前回の成果物はこの時点で .cast と食い違っているので、変換の成否によらず先に片付ける
-discard_stale_gif
 if ! agg --font-size 16 "${CAST_FILE}" "${GIF_TMP_FILE}"; then
     log "error: GIF への変換に失敗しました。"
+    discard_stale_gif
     exit 1
 fi
 
@@ -310,11 +310,13 @@ fi
 # 0 バイトは «上限以下» として素通りし、README に死んだサムネイルが貼られてしまう
 if [ ! -s "${GIF_TMP_FILE}" ]; then
     log "error: 生成された GIF が空です。agg の出力を確認してください。"
+    discard_stale_gif
     exit 1
 fi
 # GIF のシグネチャ (GIF87a / GIF89a の先頭 4 バイト) を確認する
 if [ "$(head -c 4 "${GIF_TMP_FILE}")" != "GIF8" ]; then
     log "error: 生成されたファイルが GIF ではありません。agg の出力を確認してください。"
+    discard_stale_gif
     exit 1
 fi
 GIF_SIZE="$(stat -c %s "${GIF_TMP_FILE}")"
@@ -324,6 +326,7 @@ if [ "${GIF_SIZE}" -gt "${GIF_MAX_BYTES}" ]; then
     # コミットされる。基準を満たさない成果物は置いていかない (§15 / fail-closed)
     log "error: GIF が上限 $((GIF_MAX_BYTES / 1024 / 1024))MB を超えています (${GIF_SIZE} bytes)。"
     log "       --idle-time-limit や解像度を調整して録り直してください。"
+    discard_stale_gif
     exit 1
 fi
 

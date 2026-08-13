@@ -363,6 +363,15 @@ assert_status 0 "healthy sandbox: exits 0"
 assert_exists "${FAKE_GIF}" "healthy sandbox: writes the GIF"
 assert_contains "example.com blocked" "healthy sandbox: records the default-deny proof"
 assert_missing "${FAKE_GIF_TMP}" "healthy sandbox: leaves no half-written temporary GIF behind"
+# **成功時に削除の案内を出さない**: 前回の成果物が残っている状態で成功すると、
+# 「git restore で復元できます」と案内された直後に新しい GIF が出来上がる。
+# 案内に従うと古い GIF が新しい .cast と対になり、この仕組みが防ぎたい状態そのものになる
+touch "${FAKE_GIF}"
+run_record ok
+assert_status 0 "healthy sandbox with a previous GIF present: exits 0"
+assert_exists "${FAKE_GIF}" "healthy sandbox with a previous GIF present: replaces it with the new one"
+assert_not_contains "git restore" \
+    "healthy sandbox with a previous GIF present: gives no recovery advice for an artifact it just regenerated"
 
 # 1b) コンテナへ流す標準入力は **ASCII のみ**であること。
 #     実機ではここが TTY にエコーされて録画に写るため、日本語を流すと agg の既定フォントで
@@ -455,7 +464,9 @@ assert_status 1 "agg failure: exits non-zero"
 assert_missing "${FAKE_GIF}" "agg failure: discards the partial GIF"
 assert_missing "${FAKE_GIF_TMP}" "agg failure: leaves no half-written temporary GIF behind"
 
-# 8) 上限を超える GIF は成果物として残さない（§15 の 10MB 基準）
+# 8) 上限を超える GIF は成果物として残さない（§15 の 10MB 基準）。
+#    直前のケースが GIF を消しているので事前状態を作る（3 / 4 と同じ理由）
+touch "${FAKE_GIF}"
 run_record biggif
 assert_status 1 "oversized GIF: exits non-zero"
 assert_contains "上限" "oversized GIF: names the cap"
@@ -527,6 +538,9 @@ if command -v script > /dev/null 2>&1; then
     run_record_pty ok "24 80" fail
     assert_contains "に固定できませんでした" \
         "refused resize: warns instead of silently recording at an unknown width"
+    # 幅が固定できないことは録画の失敗ではない。ここを致命傷にすると、resize ioctl を
+    # 通さない端末（多重化端末・制限付きコンテナ）では一切録画できなくなる
+    assert_status 0 "refused resize: still completes the recording"
 
     # 11e) 標準出力だけ端末から外した場合も固定しない。
     #      **asciinema が録画データへ書く端末サイズは fd 1 から読む**ため、fd 0 だけを見て
