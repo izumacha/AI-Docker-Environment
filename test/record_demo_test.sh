@@ -175,9 +175,23 @@ fi
 exit 0
 STUB
 
-# 本物の rm / mv の場所を、PATH をスタブで汚す前に控えておく（スタブから委譲するため）
+# 本物の rm / mv / stat の場所を、PATH をスタブで汚す前に控えておく（スタブから委譲するため）
 REAL_RM="$(command -v rm)"
 REAL_MV="$(command -v mv)"
+REAL_STAT="$(command -v stat)"
+
+# stat スタブ: 生成した GIF のサイズ取得だけを失敗させられるようにする。
+# サイズ取得は他の検査（rm / agg / mv）と同じく失敗しうるのに素の代入で書かれていると、
+# `set -e` がその場でスクリプトを終わらせ、**前回の GIF が上書き済みの .cast と対のまま残る**
+cat > "${STUB_BIN}/stat" << STUB
+#!/usr/bin/env bash
+# 生成した GIF のサイズを問い合わせたときだけ失敗を返す
+if [[ "\${AIDOCK_TEST_MODE:-ok}" == "statfail" && "\$*" == *"aidock-demo.gif.tmp" ]]; then
+    exit 1
+fi
+# それ以外は本物の stat にそのまま任せる
+exec "${REAL_STAT}" "\$@"
+STUB
 
 # mv スタブ: 成果物への移動だけを失敗させられるようにする。
 # 移動が失敗する状況（docs/demo が読み取り専用・EACCES 等）でも、上書き済みの .cast と
@@ -209,7 +223,7 @@ exec "${REAL_RM}" "\$@"
 STUB
 
 # 実行権限を与える
-chmod +x "${STUB_BIN}/docker" "${STUB_BIN}/agg" "${STUB_BIN}/asciinema" "${STUB_BIN}/stty" "${STUB_BIN}/rm" "${STUB_BIN}/mv"
+chmod +x "${STUB_BIN}/docker" "${STUB_BIN}/agg" "${STUB_BIN}/asciinema" "${STUB_BIN}/stty" "${STUB_BIN}/rm" "${STUB_BIN}/mv" "${STUB_BIN}/stat"
 
 # --- 擬似リポジトリの用意 -----------------------------------------------------
 
@@ -233,6 +247,7 @@ FAKE_GIF_TMP="${FAKE_GIF}.tmp"
 #   buildfail … build が失敗する
 #   cleanupfail … 一時ファイルの後始末（rm -rf）が失敗する（コンテナ内の挙動は ok と同じ）
 #   mvfail    … 生成した GIF を成果物の位置へ移動できない（コンテナ内の挙動は ok と同じ）
+#   statfail  … 生成した GIF のサイズを取得できない（コンテナ内の挙動は ok と同じ）
 cat > "${FAKE_REPO}/bin/aidock" << 'STUB'
 #!/usr/bin/env bash
 set -uo pipefail
@@ -530,6 +545,16 @@ assert_status 1 "undeletable temporary path: exits non-zero"
 assert_contains "一時ファイル" "undeletable temporary path: names what it could not remove"
 assert_missing "${FAKE_GIF}" "undeletable temporary path: does not leave the previous GIF beside the new .cast"
 rm -rf "${FAKE_GIF_TMP}"
+
+# 9c-2) サイズの取得が失敗した場合も、前回の GIF を残さない。
+#     素の代入（`GIF_SIZE="$(stat …)"`）のままだと `set -e` がここでスクリプトを終わらせ、
+#     後始末に到達しないまま古い .gif が新しい .cast と対で残る（他の失敗経路と振る舞いが食い違う）
+touch "${FAKE_GIF}"
+run_record statfail
+assert_status 1 "failing stat: exits non-zero"
+assert_contains "サイズを取得できませんでした" "failing stat: names what it could not read"
+assert_missing "${FAKE_GIF}" "failing stat: does not leave the previous GIF beside the new .cast"
+assert_missing "${FAKE_GIF_TMP}" "failing stat: leaves no temporary GIF behind"
 
 # 9d) 成果物への移動が失敗した場合も、前回の GIF を残さない。
 #     ここも .cast を上書きした後なので、残すと新しい .cast と古い .gif が並ぶ
