@@ -553,22 +553,26 @@ split_uses_occurrences() {
 
     # 構造行（ブロックスカラーの本文を除いた行）を出現ごとにばらす
     emit_structural_lines "$path" | awk '
-        # 与えた文字列の中で「まだ閉じていないフロー集合（`[` / `{`）」がいくつあるかを数える関数。
-        # カンマを鍵の区切りと認めてよいのは、この深さが 1 以上のとき（＝集合の内側）だけ
-        function open_depth(s,   i, c, d) {
-            # 深さを 0 から数え始める
-            d = 0
-            # 先頭から 1 文字ずつ見ていく
-            for (i = 1; i <= length(s); i++) {
-                # いま見ている 1 文字を取り出す
-                c = substr(s, i, 1)
-                # 開き括弧なら深さを 1 つ増やす
-                if (c == "[" || c == "{") d++
-                # 閉じ括弧なら深さを 1 つ減らす
-                else if (c == "]" || c == "}") d--
-            }
-            # 数え終わった深さを返す
-            return d
+        # 与えた文字列に、フロー集合を開く括弧（`[` / `{`）が 1 つでもあるかを調べる関数。
+        # カンマを鍵の区切りと認めてよいのは、その手前で集合が開かれているときだけ。
+        #
+        # **開き括弧の有無だけを見て、閉じ括弧と釣り合っているかは見ない**: 引用符は
+        # `emit_structural_lines()` が一律に落とすため、`- {name: "a}b", uses: …}` の `}` が
+        # 素の文字として届き、釣り合いを数えると深さ 0 と誤って**カンマを散文の読点と判定し、
+        # 後ろの本物の参照を丸ごと取り逃がす**（＝「不在＝合格」への逆戻り。実測）。
+        # 開き括弧の有無だけなら、値の中に紛れた閉じ括弧に影響されない。
+        # 逆に散文へ `{` が現れると余分な検査が走りうるが、その場合は赤くなるだけで見逃しは生まない
+        function has_open_bracket(s) {
+            # `[` か `{` が含まれていれば 1、無ければ 0 を返す
+            return (index(s, "[") > 0 || index(s, "{") > 0)
+        }
+
+        # コメント本文の先頭語が「版の注記らしい形」かどうかを調べる関数。
+        # 引用符が落ちた値の中の `#`（`release #1}` 等）を注記と取り違えないための歯止めで、
+        # タグに現れない構造文字（`}` `)` `,` など）を含む語は注記として認めない
+        function looks_like_marker(w) {
+            # 数字始まり（`v` が付いてもよい）で、以降がタグに使える文字だけなら 1
+            return (w ~ /^v?[0-9][0-9A-Za-z._+-]*$/)
         }
         {
             # 「行番号:行の内容」の形なので、最初のコロンで 2 つに分ける
@@ -610,7 +614,7 @@ split_uses_occurrences() {
                 # **カンマはフロー集合の内側にあるときだけ区切りと認める**:
                 # `- name: Pin every action, uses: a full commit SHA` のような散文の読点を
                 # 区切りと見なすと、参照 `a` を検出したことにして CI を恒常的に赤くしてしまう
-                if (delim == "," && open_depth(substr(content, 1, scanned + RSTART - 1)) <= 0) {
+                if (delim == "," && !has_open_bracket(substr(content, 1, scanned + RSTART - 1))) {
                     # 鍵ではないので、この区切りの次の文字から探索をやり直す
                     scanned += RSTART
                     rest = substr(rest, RSTART + 1)
@@ -647,14 +651,23 @@ split_uses_occurrences() {
             if (n == 1) {
                 # 参照の終わりより後ろの部分だけを取り出す
                 tail = substr(content, value_end + 1)
-                # コメントの開始は「行頭または空白の直後の `#`」とする（YAML のコメント規則）
-                if (match(tail, /(^|[[:space:]])#/)) {
-                    # `#` の直後から後ろをコメント本文として取り出す
+                # 参照より後ろに現れる `#` を順に見て、**最初に「版らしい語」が続くもの**を注記とする。
+                # 1 つ目で打ち切らないのは、引用符が落ちた `, name: release #1}  # v4` のように
+                # 値の中の `#` が先に来ることがあるため（そこで打ち切ると `1}` を注記と誤読する）。
+                # 逆に最後まで貪欲に採ると `# v1.2.3 (fixes #42)` で `42)` を拾うので、
+                # 「版らしい形か」で選ぶ。どれも該当しなければ注記なし＝マーカー必須検査で赤くなる
+                while (match(tail, /(^|[[:space:]])#/)) {
+                    # `#` の直後から後ろをコメント本文の候補として取り出す
                     body = substr(tail, RSTART + RLENGTH)
-                    # 本文の先頭にある空白を落として、最初の語の頭に合わせる
+                    # 候補の先頭にある空白を落として、最初の語の頭に合わせる
                     sub(/^[[:space:]]*/, "", body)
-                    # **最初の語だけを見る**: `# v1.2.3 (fixes #42)` の `42)` を拾わないため
-                    if (match(body, /^v?[0-9][^[:space:]]*/)) marker = substr(body, RSTART, RLENGTH)
+                    # 最初の語（次の空白まで）を切り出す
+                    word = body
+                    sub(/[[:space:]].*$/, "", word)
+                    # 版らしい形ならそれを注記として採用し、探索を終える
+                    if (looks_like_marker(word)) { marker = word; break }
+                    # そうでなければ、この `#` の次の文字から探索を続ける
+                    tail = body
                 }
             }
 
@@ -1305,6 +1318,7 @@ jobs:
   j:
     runs-on: ubuntu-latest
     steps:
+      - uses: ./.github/actions/local
       - uses: actions/checkout@v7'
 
 # 版の指定が無い参照も、固定できていないので違反として検出されなければならない
@@ -1315,6 +1329,7 @@ jobs:
   j:
     runs-on: ubuntu-latest
     steps:
+      - uses: ./.github/actions/local
       - uses: actions/checkout'
 
 # コンテナ参照はダイジェスト固定が必要で、タグ参照は違反として検出されなければならない
@@ -1325,6 +1340,7 @@ jobs:
   j:
     runs-on: ubuntu-latest
     steps:
+      - uses: ./.github/actions/local
       - uses: docker://alpine:3.20'
 
 # 特権ワークフローに `uses:` が 1 行も無いのは、抽出条件の破損か構成変更なので違反として扱う
@@ -1373,6 +1389,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: ./.github/actions/local
+      - uses: ./.github/actions/local
       - if: >-
           github.event_name == '"'"'push'"'"'
         uses: actions/checkout@v7'
@@ -1385,6 +1402,7 @@ jobs:
   j:
     runs-on: ubuntu-latest
     steps:
+      - uses: ./.github/actions/local
       - uses: ./.github/actions/local
       - "uses": actions/checkout@v7'
 
@@ -1419,6 +1437,7 @@ jobs:
   j:
     runs-on: ubuntu-latest
     steps:
+      - uses: ./.github/actions/local
       - uses: ./.github/actions/local
       - uses : actions/checkout@v7'
 
@@ -1505,6 +1524,22 @@ jobs:
       - uses: ./.github/actions/local
       - {name: "release #1", uses: actions/checkout@v7}'
 
+# 値の中に閉じ括弧が紛れていても、後ろの参照を取り逃がさないこと。引用符が落ちるため
+# `- {name: "a}b", uses: …}` の `}` は素の文字として届く。括弧の釣り合いを数えると深さ 0 と誤り、
+# カンマを散文の読点と判定して**未ピンの参照ごと検査から消える**（「不在＝合格」への逆戻り。実測）
+# **健全な `uses:` を 1 行足しておく**のが要点: これが無いと参照を取り逃がしたときに
+# 「特権ワークフローに `uses:` が 1 つも無い」歯止め（`seen == 0`）の方が先に鳴ってしまい、
+# 取りこぼしを入れても違反件数が 1 のままでこの表明が素通りする（実測）
+assert_pin_enforcement enforced 'mutable tag after a closing brace inside a value' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/local
+      - {name: "a}b", uses: actions/checkout@v7}'
+
 # 逆に、フロー集合の**外側**にある読点は区切りではないこと。散文の `, uses:` を区切りと見なすと
 # ありもしない参照を検出したことにして CI を恒常的に赤くする（`post-ci-verify.yml` に同種の文言が入った時点で）
 assert_pin_enforcement accepted 'prose with a comma before a uses key outside any flow collection' \
@@ -1530,6 +1565,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - {name: "release #1", uses: actions/checkout@1111111111111111111111111111111111111111}  # v4'
+
+# 参照より後ろに値の中の `#` が現れても、それを注記と取り違えないこと。
+# `- {uses: …, name: "release #1"}  # v4` では `#1}` が先に現れるので、
+# 最初の `#` で打ち切ると `1}` を注記と誤読し、存在しないタグを上流へ問い合わせる
+assert_split_output 'a hash inside a value after the ref does not steal the version marker' \
+"7"$'\t'"actions/checkout@1111111111111111111111111111111111111111"$'\t'"v4" \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - {uses: actions/checkout@1111111111111111111111111111111111111111, name: "release #1"}  # v4'
 
 # 版注記は**コメントの最初の語**だけを見ること。`#` がもう一度出てくる書き方（issue 番号の参照など）で
 # 貪欲一致すると `42)` をマーカーと誤読し、存在しないタグを上流へ問い合わせて
