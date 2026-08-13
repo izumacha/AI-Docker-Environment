@@ -525,25 +525,83 @@ verify_marker_against_pin() {
     fi
 }
 
-# 1 行の `uses:` を検査する関数
-# 第 1 引数: ワークフローのファイル名 / 第 2 引数: 行番号 / 第 3 引数: 行の内容
+# 構造行を「`uses:` の出現ごとに 1 件」へばらして書き出す関数
+# 第 1 引数: 検査対象のファイルパス
+#
+# **1 行に `uses:` は何個でも書ける**。フロー形式なら `steps: [{uses: a}, {uses: b}]` と 1 行に
+# 並べられるし、行末コメントに `# 以前は uses: … だった` と書くこともできる。にもかかわらず
+# 消費側は「1 行 = 参照 1 個」を前提に貪欲一致（`.*uses:`）で 1 個だけ取り出していたため、
+# **最後の 1 個以外が検査対象から丸ごと外れていた**（特権ワークフローに未ピンの可変タグを置き、
+# 同じ行の後ろにローカル action を並べると指摘 0 件で通ることを実測）。
+# 出現ごとにばらしてから渡すことで、消費側は 1 個だけを見ればよくなる。
+#
+# **行末コメントは値の探索対象から外す**: 構造としての `uses:` はコメントより前にしか置けない。
+# ただしバージョンマーカーはコメント側にあるので、切り離したうえで各件に付け直して渡す
+split_uses_occurrences() {
+    # 検査対象のファイルパスを変数に入れる
+    local path="$1"
+
+    # 構造行（ブロックスカラーの本文を除いた行）を出現ごとにばらす
+    emit_structural_lines "$path" | awk '
+        {
+            # 「行番号:行の内容」の形なので、最初のコロンで 2 つに分ける
+            pos = index($0, ":")
+            # コロンより前が行番号
+            lineno = substr($0, 1, pos - 1)
+            # コロンより後ろが行の内容
+            content = substr($0, pos + 1)
+            # 行末コメント（最初の `#` 以降）の開始位置を調べる
+            hash = index(content, "#")
+            # コメントがあれば本体とコメントに分け、無ければコメントは空にする
+            if (hash > 0) { code = substr(content, 1, hash - 1); comment = substr(content, hash) }
+            else { code = content; comment = "" }
+            # 本体を先頭から順に走査し、見つけた `uses:` を 1 件ずつ書き出す
+            rest = code
+            # 鍵の直前は行頭・空白・`{`・`,` のいずれか（YAML で `uses` が鍵になれる位置）。
+            # `uses : …` のようにコロンの前へ空白を挟む書き方も YAML では正しいので許容する
+            while (match(rest, /(^|[[:space:]]|[{,])uses[[:space:]]*:[[:space:]]*/)) {
+                # マッチの直後から値が始まるので、そこから後ろを取り出す
+                after = substr(rest, RSTART + RLENGTH)
+                # 値の候補をいったん丸ごと受け取る
+                value = after
+                # フロー形式では値の直後に区切り（空白・`,`・`}`・`]`）が続くので、そこまでを値とする
+                sub(/[][[:space:],}].*$/, "", value)
+                # 値が取れたものだけを 1 件として書き出す（鍵だけで値が無い行は対象外）
+                # 消費側が扱いやすいよう「行番号: uses: 値  コメント」の形に組み直す
+                if (value != "") print lineno ": uses: " value "  " comment
+                # 次の `uses:` を探すため、いま処理した位置より後ろへ進める
+                rest = after
+            }
+        }
+    '
+}
+
+# `uses:` 1 件を検査する関数
+# 第 1 引数: ワークフローのファイル名 / 第 2 引数: 行番号
+# 第 3 引数: `split_uses_occurrences` が書き出した 1 件分の内容（`uses:` をちょうど 1 個含む）
 # 第 4 引数: その行が特権ワークフローのものなら "privileged"、それ以外は "plain"
 check_uses_line() {
     # 引数をそれぞれ意味の分かる名前の変数に取り出す
     local wf_name="$1" lineno="$2" content="$3" scope="$4"
-    local ref action pinned marker label
+    local ref action pinned marker label code comment
 
+    # **値を探す前に行末コメントを切り離す**: コメントに `uses:` と書かれていると
+    # 値の取り出しがそちらへ引っ張られ、実際の参照が検査されないまま通ってしまう
+    # 最初の `#` より前を本体とする
+    code="${content%%#*}"
+    # 本体を取り除いた残りがコメント（`#` を含む。コメントが無ければ空文字列）
+    comment="${content#"${code}"}"
     # `uses:` の値（参照文字列の全体）を取り出す。
-    # 先頭に空白を足してから「最後の `uses:` の直前までを捨てる」ことで、
+    # 先頭に空白を足してから「`uses:` の直前までを捨てる」ことで、
     # 手順の先頭（`- uses: …`）とフローマッピングの中（`- {uses: …}`）を同じ 1 本の式で扱える
-    ref="$(printf ' %s' "$content" | sed -E 's/.*[[:space:]{,]uses[[:space:]]*:[[:space:]]*//')"
+    ref="$(printf ' %s' "$code" | sed -E 's/.*[[:space:]{,]uses[[:space:]]*:[[:space:]]*//')"
     # フロー形式では値の直後に区切り（`}` `]` `,`）が続くので、そこまでを値とする
     ref="$(printf '%s' "$ref" | sed -E 's/[][[:space:],}].*$//')"
-    # YAML では値を引用符で囲めるため、URL に混入しないよう `'` と `"` を取り除く
-    ref="${ref//\'/}"
-    ref="${ref//\"/}"
-    # 行末のコメントに書かれたバージョンマーカーを取り出す（`v` 接頭辞は付かない上流もあるため任意とする）
-    marker="$(printf '%s' "$content" | sed -nE 's/.*#[[:space:]]*(v?[0-9][^[:space:]]*).*/\1/p')"
+    # バージョンマーカーはコメント側から取り出す（`v` 接頭辞は付かない上流もあるため任意とする）。
+    # **コメントの最初の語だけを見る**: 行末に `# v1.2.3 (fixes #42)` のように `#` が続くと、
+    # 貪欲一致では `42)` をマーカーと誤読し、存在しないタグを上流へ問い合わせて
+    # 「タグの綴り誤りでは」と的外れな診断を出してしまう（fail-closed だが原因を指し違える）
+    marker="$(printf '%s' "$comment" | sed -nE 's/^[^#]*#[[:space:]]*(v?[0-9][^[:space:]]*).*/\1/p')"
     # 表示用に「ファイル名:行番号 の参照」という短いラベルを組み立てる
     label="${wf_name}:${lineno} ${ref%%@*}"
 
@@ -611,27 +669,23 @@ check_workflow_file() {
     # そのファイルで `uses:` 行が 1 つでも見つかったかを記録する
     local seen=0
 
-    # `uses:` 行を行番号付きで 1 行ずつ読み取って検査する。
+    # `uses:` を 1 件ずつ行番号付きで読み取って検査する。
     # ここでは参照の形（`@` の有無・`docker://`・ローカル参照）で絞り込まない。
     # 絞り込むと「該当形式でない＝検査対象なし＝合格」という取りこぼしが生まれるため。
-    # YAML では手順の先頭要素が `- uses:` と書かれることもあるため、行頭の `- ` も許容する
     while IFS= read -r entry; do
-        # 「行番号:行の内容」の形なので、まず行番号を取り出す
+        # 「行番号:内容」の形なので、まず行番号を取り出す
         local lineno="${entry%%:*}"
-        # 続けて実際の行の内容を取り出す
+        # 続けて実際の内容を取り出す
         local content="${entry#*:}"
-        # `uses:` 行を 1 件見つけたことを記録する
+        # `uses:` を 1 件見つけたことを記録する
         seen=1
-        # 取り出した 1 行を検査する
+        # 取り出した 1 件を検査する
         check_uses_line "$wf_name" "$lineno" "$content" "$scope"
-    # 抽出元は `emit_structural_lines`（ブロックスカラーの本文を除いた構造行）。
-    # 行番号付きで渡ってくるので、`uses:` 行だけを行番号ごと選び出す
-    # 引用符は抽出側で落とされているので、鍵は `uses` の形に揃っている。
-    # 手順の先頭（`- uses:`）に加えて、フローマッピングの中（`- {uses: …}` / `{a: b, uses: …}`）も拾い、
-    # `uses : …` のようにコロンの前に空白を挟む書き方（YAML では正しい）も許容する
-    # — 鍵の表記ゆれは特権判定側で 3 度取りこぼしており、強制側だけ 1 通りに絞る理由が無い
-    done < <(emit_structural_lines "$path" \
-        | grep -E '^[0-9]+:([[:space:]]*(-[[:space:]]+)?|.*[{,][[:space:]]*)uses[[:space:]]*:[[:space:]]*[^[:space:]]' || true)
+    # 抽出は `split_uses_occurrences` に任せる（構造行の抽出 → 出現ごとの分解までを 1 本で行う）。
+    # **選別条件をここに書き写さない**: 以前はこの位置の `grep` と消費側の取り出し式が
+    # 「何を `uses:` と見なすか」を二重に持っており、片方だけが 1 行複数の出現に対応できていなかった。
+    # 単一の参照元にまとめることで、鍵の表記ゆれへの対応が片方だけ古くなる事故を防ぐ（§6 一元管理）
+    done < <(split_uses_occurrences "$path")
 
     # 特権ワークフローに `uses:` が 1 行も無いのは、抽出条件の破損か構成変更を意味するため失敗にする
     # （検査対象が消えたことを「合格」と読み替えないための歯止め）
@@ -1246,6 +1300,37 @@ jobs:
     steps:
       - uses: ./.github/actions/local
       - uses : actions/checkout@v7'
+
+# 1 行に `uses:` が複数あるとき、**最後の 1 個以外が検査から外れない**こと。
+# 抽出が貪欲一致（`.*uses:`）だった頃は最後の 1 個しか見ておらず、後ろにローカル action を
+# 並べるだけで前の可変タグが指摘 0 件で通っていた（実測。特権ワークフローで供給網ピンが無効化される）
+assert_pin_enforcement enforced 'mutable tag before another uses on the same flow-sequence line' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps: [{uses: actions/checkout@v7}, {uses: ./.github/actions/local}]'
+
+# 同じ穴のうち、**行末コメントに `uses:` と書かれている**場合。
+# 構造としての `uses:` はコメントより前にしか置けないので、値の探索対象から外す必要がある
+assert_pin_enforcement enforced 'mutable tag whose trailing comment also mentions a uses key' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7  # 以前は uses: ./.github/actions/local だった'
+
+# 1 行に並んだ複数の参照が**どちらも**検査されること（前だけ見て後ろを落とす逆向きの取りこぼし防止）
+assert_pin_enforcement enforced 'mutable tag after another uses on the same flow-sequence line' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps: [{uses: ./.github/actions/local}, {uses: actions/checkout@v7}]'
 
 # 非特権ワークフローの可変タグは FR-9.6(b) の対象外なので咎めない（`ci.yml` が実際に依存している挙動）
 assert_pin_enforcement accepted 'plain workflow with a mutable tag' \
