@@ -573,8 +573,9 @@ if command -v script > /dev/null 2>&1; then
     run_record_pty cleanupfail "24 80"
     assert_file_contains "${STTY_CAPTURE}" "rows 24 cols 80" \
         "failing cleanup: still restores the caller's terminal size"
-    # **後始末の失敗で終了コードを乗っ取らせない**: bash はトラップ内で最後に実行した
-    # コマンドの終了コードをスクリプトの終了コードにするため、素の rm のままだと
+    # **後始末の失敗で終了コードを乗っ取らせない**: 直上と同じ理由で**トラップの本体も
+    # `set -e` の対象**なので、非ゼロを返すコマンドがあるとそこでトラップが打ち切られ、
+    # その終了コードがスクリプトの終了コードになる。素の rm のままだと
     # 「完了」と報告した直後に exit 1 で終わり、`record-demo.sh && git add` が黙って空振りする
     assert_status 0 "failing cleanup: a successful recording still exits 0"
     assert_contains "一時ファイルの後始末に失敗しました" \

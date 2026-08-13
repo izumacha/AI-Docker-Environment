@@ -95,7 +95,9 @@ STATUS_FILE="$(mktemp /tmp/aidock-demo-status.XXXXXX)"
 cleanup() {
     # 作業ディレクトリと一時ファイル (agg の書き出し先を含む) をまとめて消す。
     # **後始末の失敗で終了コードを乗っ取らせない**: この関数は EXIT トラップから呼ばれ、
-    # bash はトラップ内で最後に実行したコマンドの終了コードをスクリプトの終了コードにする。
+    # **トラップの本体も `set -e` の対象**なので、非ゼロを返すコマンドがあるとそこで
+    # トラップが打ち切られ、その終了コードがスクリプトの終了コードになる
+    # (`set -e` が無ければ元の終了コードは保たれる。bash 5.2 で両方を実測して確認)。
     # 素の rm のままだと、成功した録画が「完了」と報告した直後に exit 1 で終わり、
     # `record-demo.sh && git add docs/demo` が黙って成果物を取り込まなくなる
     if ! rm -rf "${DEMO_WORKSPACE}" "${STEPS_FILE}" "${STATUS_FILE}" "${GIF_TMP_FILE}"; then
