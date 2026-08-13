@@ -542,7 +542,8 @@ verify_marker_against_pin() {
 # `emit_structural_lines()` が一律に落とすため、`- name: Verify that every workflow uses: a pinned SHA`
 # のような**値の中の散文**が素の文字列として届く。空白の後ろを一律に鍵と見なすと、これを参照
 # `a` と読んで違反を報告し、特権ワークフロー（`post-ci-verify.yml`）に同種の文言が入った時点で
-# CI が恒常的に赤くなる。鍵になれるのは行頭（字下げと `- ` を挟んでよい）か `{` / `,` の直後だけ。
+# CI が恒常的に赤くなる。鍵になれるのは行頭（字下げと `- ` を挟んでよい）か、フロー集合の内側にある
+# `{` / `,` の直後だけ（集合の外のカンマは散文の読点なので区切りと認めない）。
 #
 # 出力は「行番号 <TAB> 参照 <TAB> マーカー」。**値の切り出しをここだけに持たせる**ため、
 # 消費側は受け取った値をそのまま使う（両方で切り出すと、鍵の表記ゆれへの対応が片方だけ古くなる）
@@ -552,6 +553,23 @@ split_uses_occurrences() {
 
     # 構造行（ブロックスカラーの本文を除いた行）を出現ごとにばらす
     emit_structural_lines "$path" | awk '
+        # 与えた文字列の中で「まだ閉じていないフロー集合（`[` / `{`）」がいくつあるかを数える関数。
+        # カンマを鍵の区切りと認めてよいのは、この深さが 1 以上のとき（＝集合の内側）だけ
+        function open_depth(s,   i, c, d) {
+            # 深さを 0 から数え始める
+            d = 0
+            # 先頭から 1 文字ずつ見ていく
+            for (i = 1; i <= length(s); i++) {
+                # いま見ている 1 文字を取り出す
+                c = substr(s, i, 1)
+                # 開き括弧なら深さを 1 つ増やす
+                if (c == "[" || c == "{") d++
+                # 閉じ括弧なら深さを 1 つ減らす
+                else if (c == "]" || c == "}") d--
+            }
+            # 数え終わった深さを返す
+            return d
+        }
         {
             # 「行番号:行の内容」の形なので、最初のコロンで 2 つに分ける
             pos = index($0, ":")
@@ -559,39 +577,60 @@ split_uses_occurrences() {
             lineno = substr($0, 1, pos - 1)
             # コロンより後ろが行の内容
             content = substr($0, pos + 1)
-            # 行末コメント（最初の `#` 以降）の開始位置を調べる
-            hash = index(content, "#")
-            # コメントがあれば本体とコメントに分け、無ければコメントは空にする
-            if (hash > 0) { code = substr(content, 1, hash - 1); comment = substr(content, hash) }
-            else { code = content; comment = "" }
 
-            # コメントからバージョンマーカーを取り出す（`v` 接頭辞は付かない上流もあるため任意）。
-            # **コメントの最初の語だけを見る**: `# v1.2.3 (fixes #42)` のように `#` が続くとき、
-            # 貪欲一致では `42)` をマーカーと誤読し、存在しないタグを上流へ問い合わせて
-            # 「タグの綴り誤りでは」と的外れな診断を出してしまう（fail-closed だが原因を指し違える）
+            # バージョンマーカーを行末コメントから取り出す（`v` 接頭辞は付かない上流もあるため任意）。
+            # コメントの開始は「行頭または空白の直後の `#`」とする（YAML のコメント規則。
+            # `release#1` のような値の途中の `#` をコメント開始と読み違えないため）
             marker = ""
-            if (comment != "") {
-                # 先頭の `#` と続く空白を落として、コメント本文の先頭に合わせる
-                body = comment
-                sub(/^#[[:space:]]*/, "", body)
-                # 先頭の語が版らしい形（数字始まり。`v` が付いてもよい）のときだけマーカーとする
+            if (match(content, /(^|[[:space:]])#/)) {
+                # `#` の直後から後ろをコメント本文として取り出す
+                body = substr(content, RSTART + RLENGTH)
+                # 本文の先頭にある空白を落として、最初の語の頭に合わせる
+                sub(/^[[:space:]]*/, "", body)
+                # **最初の語だけを見る**: `# v1.2.3 (fixes #42)` のように `#` が続くとき、
+                # 貪欲一致では `42)` をマーカーと誤読し、存在しないタグを上流へ問い合わせて
+                # 「タグの綴り誤りでは」と的外れな診断を出してしまう（fail-closed だが原因を指し違える）
                 if (match(body, /^v?[0-9][^[:space:]]*/)) marker = substr(body, RSTART, RLENGTH)
             }
 
-            # 本体を先頭から順に走査し、見つけた `uses:` の値をいったん配列へ集める
+            # 行を先頭から走査し、見つけた `uses:` の値をいったん配列へ集める。
+            # **コメントの手前で行を切らない**: 引用符は抽出時に一律で落ちるため、
+            # `- {name: release #1, uses: actions/checkout@v1}` の `#` は素の文字として届く。
+            # そこで切ると後ろの本物の参照ごと捨ててしまい、未ピンの可変タグが検査から消える
+            # （＝このファイルが繰り返し塞いできた「不在＝合格」に戻る）。
+            # コメント中の `uses:` は下の位置規則（行頭 / 集合内の `{` `,` の直後）で自然に除かれる
             n = 0
-            rest = code
+            rest = content
+            # `rest` より前にある文字数（絶対位置を求めるために持ち歩く）
+            scanned = 0
             # 行頭の形（字下げ＋任意の `- `）を許すのは**最初の 1 回だけ**。
             # 2 個目以降は走査位置が行の途中なので、行頭扱いにすると値の続きを鍵と読みかねない
             at_line_head = 1
             while (1) {
-                # 行頭に置かれた鍵かどうかを先に見る（該当すれば必ず最も手前の一致になる）
+                # 見つかったかどうかと、鍵の直前にあった区切り文字を初期化する
                 found = 0
+                delim = ""
+                # 行頭に置かれた鍵かどうかを先に見る（該当すれば必ず最も手前の一致になる）
                 if (at_line_head && match(rest, /^[[:space:]]*(-[[:space:]]+)?uses[[:space:]]*:[[:space:]]*/)) found = 1
                 # 行頭でなければ、フロー形式の区切り（`{` / `,`）の直後に置かれた鍵を探す
-                if (!found && match(rest, /[{,][[:space:]]*uses[[:space:]]*:[[:space:]]*/)) found = 1
+                if (!found && match(rest, /[{,][[:space:]]*uses[[:space:]]*:[[:space:]]*/)) {
+                    found = 1
+                    # 区切りが `{` と `,` のどちらだったかを控える（カンマだけ追加の条件が要る）
+                    delim = substr(rest, RSTART, 1)
+                }
                 # どちらでも見つからなければ、この行の走査は終わり
                 if (!found) break
+                # 一度探索したら以降は行頭ではない
+                at_line_head = 0
+                # **カンマはフロー集合の内側にあるときだけ区切りと認める**:
+                # `- name: Pin every action, uses: a full commit SHA` のような散文の読点を
+                # 区切りと見なすと、参照 `a` を検出したことにして CI を恒常的に赤くしてしまう
+                if (delim == "," && open_depth(substr(content, 1, scanned + RSTART - 1)) <= 0) {
+                    # 鍵ではないので、この区切りの次の文字から探索をやり直す
+                    scanned += RSTART
+                    rest = substr(rest, RSTART + 1)
+                    continue
+                }
                 # マッチの直後から値が始まるので、そこから後ろを取り出す
                 after = substr(rest, RSTART + RLENGTH)
                 # 値の候補をいったん丸ごと受け取る
@@ -601,9 +640,8 @@ split_uses_occurrences() {
                 # 値が取れたものだけを控える（鍵だけで値が無い行は対象外）
                 if (value != "") values[++n] = value
                 # 次の `uses:` を探すため、いま処理した位置より後ろへ進める
+                scanned += RSTART + RLENGTH - 1
                 rest = after
-                # 一度でも進んだら以降は行頭ではない
-                at_line_head = 0
             }
 
             # 集めた値を 1 件ずつ書き出す
@@ -750,15 +788,32 @@ check_workflow_path() {
 # 前段だけを固定すると後段を丸ごと削っても回帰テストが緑のままになるため、
 # ここでは `check_workflow_path()` に通し、集計カウンタの増分で結果を観測する。
 # 上流問い合わせを起こさないよう、仮のワークフローには SHA ピンを書かない（可変参照だけを使う）
-assert_pin_enforcement() {
+# 検査用の仮ワークフローをファイルへ書き出し、そのパスを返す関数
+# 第 1 引数: ファイル名の接頭辞（どの検査が作ったものか分かるようにする）/ 第 2 引数: ワークフローの中身
+#
+# **3 つの表明関数が同じ前置きを書き写していたのでまとめる**（§6 DRY）。
+# ファイル名は下限リスト `ALWAYS_PRIVILEGED` のどれとも衝突しない形にする必要がある
+# （衝突すると、内容ではなくファイル名で特権と判定されてしまい、検査の意味が変わる）。
+# 1 か所に集めておけば、この制約を満たす場所も 1 か所で済む
+write_fixture() {
     # 引数をそれぞれ意味の分かる名前の変数に取り出す
-    local expected="$1" label="$2" body="$3"
+    local prefix="$1" body="$2"
     # 検査ごとに別名のファイルを作るための連番を 1 つ進める
     FIXTURE_SEQ=$((FIXTURE_SEQ + 1))
     # 仮のワークフローの置き場所を決める
-    local fixture="${TEST_TMP}/enforce-${FIXTURE_SEQ}.yml"
+    local fixture="${TEST_TMP}/${prefix}-${FIXTURE_SEQ}.yml"
     # 渡されたワークフローの中身を仮のファイルへ書き出す
     printf '%s\n' "$body" > "$fixture"
+    # 呼び出し側が使えるよう、書き出したパスを返す
+    printf '%s' "$fixture"
+}
+
+assert_pin_enforcement() {
+    # 引数をそれぞれ意味の分かる名前の変数に取り出す
+    local expected="$1" label="$2" body="$3"
+    # 仮のワークフローを書き出し、そのパスを受け取る
+    local fixture
+    fixture="$(write_fixture enforce "$body")"
 
     # 仮のワークフローの検査結果が本物の集計に混ざらないよう、現在の値を退避する
     local saved_pass="$PASS" saved_fail="$FAIL"
@@ -796,13 +851,9 @@ assert_pin_enforcement() {
 assert_privilege_classification() {
     # 引数をそれぞれ意味の分かる名前の変数に取り出す
     local expected="$1" label="$2" body="$3"
-    # 検査ごとに別名のファイルを作るための連番を 1 つ進める
-    FIXTURE_SEQ=$((FIXTURE_SEQ + 1))
-    # 判定にかけるための仮のワークフローの置き場所を決める
-    # （下限リスト `ALWAYS_PRIVILEGED` のファイル名と衝突しない名前にして、内容だけで判定させる）
-    local fixture="${TEST_TMP}/fixture-${FIXTURE_SEQ}.yml"
-    # 渡されたワークフローの中身を仮のファイルへ書き出す
-    printf '%s\n' "$body" > "$fixture"
+    # 判定にかけるための仮のワークフローを書き出し、そのパスを受け取る
+    local fixture
+    fixture="$(write_fixture fixture "$body")"
 
     # 実際の判定結果を、期待値と同じ語彙（privileged / plain）で受け取る
     local actual="plain"
@@ -830,12 +881,9 @@ assert_privilege_classification() {
 assert_split_output() {
     # 引数をそれぞれ意味の分かる名前の変数に取り出す
     local label="$1" expected="$2" body="$3"
-    # 検査ごとに別名のファイルを作るための連番を 1 つ進める
-    FIXTURE_SEQ=$((FIXTURE_SEQ + 1))
-    # 仮のワークフローの置き場所を決める
-    local fixture="${TEST_TMP}/split-${FIXTURE_SEQ}.yml"
-    # 渡されたワークフローの中身を仮のファイルへ書き出す
-    printf '%s\n' "$body" > "$fixture"
+    # 仮のワークフローを書き出し、そのパスを受け取る
+    local fixture
+    fixture="$(write_fixture split "$body")"
 
     # 実際の分解結果を受け取る
     local actual
@@ -1415,6 +1463,32 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@1111111111111111111111111111111111111111  # v4'
+
+# 値の途中に `#` があっても、その後ろの参照を捨てないこと。引用符は抽出時に一律で落ちるため
+# `- {name: "release #1", uses: …}` の `#` は素の文字として届く。そこで行を切ると
+# **未ピンの可変タグごと検査対象から消える**（「不在＝合格」への逆戻り。実測）
+assert_pin_enforcement enforced 'mutable tag after a hash character inside a value' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/local
+      - {name: "release #1", uses: actions/checkout@v7}'
+
+# 逆に、フロー集合の**外側**にある読点は区切りではないこと。散文の `, uses:` を区切りと見なすと
+# ありもしない参照を検出したことにして CI を恒常的に赤くする（`post-ci-verify.yml` に同種の文言が入った時点で）
+assert_pin_enforcement accepted 'prose with a comma before a uses key outside any flow collection' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Pin every action, uses: a full commit SHA
+        run: echo ok
+      - uses: ./.github/actions/local'
 
 # 版注記は**コメントの最初の語**だけを見ること。`#` がもう一度出てくる書き方（issue 番号の参照など）で
 # 貪欲一致すると `42)` をマーカーと誤読し、存在しないタグを上流へ問い合わせて
