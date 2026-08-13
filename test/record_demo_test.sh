@@ -151,6 +151,7 @@ FAKE_GIF="${FAKE_REPO}/docs/demo/aidock-demo.gif"
 #   ok        … 遮断されており許可ホストへ到達できる（正常なサンドボックス）
 #   leaky     … 許可外ホストへ到達できてしまう（default-deny の退行）
 #   blocked   … 許可ホストへ到達できない（許可リスト / DNS の退行）
+#   rootuser  … agent へ降格できていない（gosu 降格の退行 / SEC-7・AC-3）
 #   buildfail … build が失敗する
 cat > "${FAKE_REPO}/bin/aidock" << 'STUB'
 #!/usr/bin/env bash
@@ -172,11 +173,12 @@ if [[ "${1:-}" == "shell" ]]; then
     # 標準入力に流れてきた内容を保存する（テスト側が中身と文字集合を検証するため）。
     # 実機ではここが TTY にエコーされて録画へ写るので、ASCII だけであることが重要
     cat > "${AIDOCK_TEST_STDIN_CAPTURE}"
-    # マウント相当: ワークスペースに置かれた検査スクリプトを、curl だけ差し替えて実行する
+    # マウント相当: ワークスペースに置かれた検査スクリプトを、コンテナ側の挙動を
+    # 決める 2 つのコマンド（curl / whoami）だけ差し替えて実行する
     checks="${AIDOCK_DEMO_WORKSPACE}/aidock-demo-checks.sh"
-    # curl スタブを置くディレクトリを作る
-    curl_dir="$(mktemp -d)"
-    cat > "${curl_dir}/curl" << 'CURL'
+    # スタブを置くディレクトリを作る
+    stub_dir="$(mktemp -d)"
+    cat > "${stub_dir}/curl" << 'CURL'
 #!/usr/bin/env bash
 # 引数の中に example.com が含まれるかで、どちらの確認かを判別する
 for arg in "$@"; do
@@ -196,11 +198,24 @@ for arg in "$@"; do
 done
 exit 0
 CURL
-    chmod +x "${curl_dir}/curl"
-    # ls / whoami は本物を使い、curl だけスタブを優先させる
-    PATH="${curl_dir}:${PATH}" bash "${checks}"
+    # whoami スタブ: コンテナ内のユーザーを模す。**本物を使えない**理由は、
+    # このテスト自身が root で走る環境（CI のコンテナなど）だと本物の whoami が
+    # 常に root を返し、正常系まで降格の退行として落ちてしまうため
+    cat > "${stub_dir}/whoami" << 'WHOAMI'
+#!/usr/bin/env bash
+# rootuser モードでは gosu 降格が失われた状態を模して root を返す
+if [[ "${AIDOCK_TEST_MODE:-ok}" == "rootuser" ]]; then
+    echo 'root'
+    exit 0
+fi
+# 通常は降格後の agent を返す
+echo 'agent'
+WHOAMI
+    chmod +x "${stub_dir}/curl" "${stub_dir}/whoami"
+    # ls は本物を使い、curl / whoami だけスタブを優先させる
+    PATH="${stub_dir}:${PATH}" bash "${checks}"
     status=$?
-    rm -rf "${curl_dir}"
+    rm -rf "${stub_dir}"
     exit "${status}"
 fi
 exit 0
@@ -267,13 +282,27 @@ assert_status 1 "reachable example.com: exits non-zero"
 assert_contains "default-deny egress is broken" "reachable example.com: names the regression"
 assert_missing "${FAKE_GIF}" "reachable example.com: discards the GIF left by the previous run"
 
-# 3) 許可リスト / DNS の退行: 許可ホストへ到達できなければ失敗し、GIF を残さない
+# 3) 許可リスト / DNS の退行: 許可ホストへ到達できなければ失敗し、GIF を残さない。
+#    直前のケースが GIF を消しているので、**事前状態を touch で作ってから**検査する
+#    （作らないと「何も削除しなくても assert_missing が緑」という不在＝合格になる）
+touch "${FAKE_GIF}"
 run_record blocked
 assert_status 1 "unreachable api.anthropic.com: exits non-zero"
 assert_contains "allowlist/DNS regression" "unreachable api.anthropic.com: names the regression"
 assert_missing "${FAKE_GIF}" "unreachable api.anthropic.com: refuses to leave a GIF"
 
-# 4) ビルド失敗: 録画対象が失敗したら（asciinema は 0 を返すが）失敗として扱う
+# 3b) gosu 降格の退行（SEC-7 / AC-3）: root のままなら失敗し、GIF を残さない。
+#     ここが表示だけだと、`whoami` が root と出ている GIF を「agent へ降格している証拠」として
+#     README に貼ってしまう（docs/demo/README.md が egress の 2 つに求めている表明と同じ原則）
+touch "${FAKE_GIF}"
+run_record rootuser
+assert_status 1 "container still running as root: exits non-zero"
+assert_contains "gosu drop to agent is broken" "container still running as root: names the regression"
+assert_missing "${FAKE_GIF}" "container still running as root: refuses to leave a GIF"
+
+# 4) ビルド失敗: 録画対象が失敗したら（asciinema は 0 を返すが）失敗として扱う。
+#    直前のケースが GIF を消しているので事前状態を作る（3 と同じ理由）
+touch "${FAKE_GIF}"
 run_record buildfail
 assert_status 1 "failing build: exits non-zero despite asciinema returning 0"
 assert_missing "${FAKE_GIF}" "failing build: refuses to leave a GIF"

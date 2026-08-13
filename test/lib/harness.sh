@@ -35,7 +35,10 @@ report() {
         printf 'ok   - %s\n' "$2"
     else
         FAIL=$((FAIL + 1))
-        printf 'NOT OK - %s\n' "$2"
+        # 失敗の表記は既存 3 スイート（guard / entrypoint / action_pin）の `FAIL - ` に揃える。
+        # 揃えておかないと、それらを本ハーネスへ移行した時点で 148 ケースの出力書式が
+        # 一斉に変わり、移行の差分にログ書式の変更が混ざる（§6 変更は最小スコープに）
+        printf 'FAIL - %s\n' "$2"
         # 失敗時は原因調査のため直近の実行結果を出す
         printf '       status=%s\n' "${LAST_STATUS}"
         printf '       output=%s\n' "${LAST_OUTPUT}"

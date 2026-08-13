@@ -41,15 +41,30 @@ RECORD_ROWS=30
 # ログはすべて stderr へ (共通規約)
 log() { printf '%s\n' "$*" >&2; }
 
+# 今回の実行で GIF を書き出す段階まで進んだかどうか (0 = まだ / 1 = agg を起動済み)。
+# discard_stale_gif が削除対象を「前回の成果物」と「今回作ったもの」で言い分けるために持つ。
+# agg は失敗時にも書きかけの GIF を残しうるので、**agg を呼ぶ直前**に 1 を立てる
+GIF_GENERATED_THIS_RUN=0
+
 # 録画に失敗したとき、前回の実行で作られた GIF を消す。
 # **消さないと .cast と .gif が食い違う**: .cast は --overwrite で失敗時の内容に
 # 置き換わる一方、GIF は前回成功時のものが残るため、`git status` には .cast だけが
 # 変更として現れ、無関係な GIF と一緒にコミットされてしまう
+#
+# **削除対象が「前回のコミット済み成果物」か「今回 agg が書いたもの」かで文言を分ける**:
+# どちらも同じ文で報告すると、数秒前に自分が作った未コミットのファイルに対して
+# `git restore` を案内することになる。操作者は「コミット済みの成果物が消された」と誤解し、
+# `git restore` で古い GIF を復活させて .cast と食い違わせる (この関数が防ぎたい状態そのもの)
 discard_stale_gif() {
-    # 前回の GIF が残っていれば削除し、消したことを明示する (git restore で戻せる)
+    # GIF が残っていれば削除し、消したことを明示する
     if [ -f "${GIF_FILE}" ]; then
         rm -f "${GIF_FILE}"
-        log "       前回の ${GIF_FILE} は .cast と食い違うため削除しました (git restore で復元できます)。"
+        # 今回の実行で agg が書いたものなら、git には無いので復元の案内をしない
+        if [ "${GIF_GENERATED_THIS_RUN}" -eq 1 ]; then
+            log "       今回の実行で生成した ${GIF_FILE} は不完全なため削除しました。"
+        else
+            log "       前回の ${GIF_FILE} は .cast と食い違うため削除しました (git restore で復元できます)。"
+        fi
     fi
 }
 
@@ -107,8 +122,21 @@ set -euo pipefail
 
 # /workspace にホスト側のデモ用ディレクトリがマウントされていることを見せる
 ls -la
-# root ではなく agent へ降格していることを見せる
-whoami
+
+# 降格後に期待するユーザー名。**1 か所に置く**: 比較とエラー文言の両方で使うため、
+# 書き写すと片方だけ変えたときに「一致しないのに合格」「合格なのに違う名前を報告」になる
+EXPECTED_USER='agent'
+# 実際に誰として動いているかを取得する (set -e により whoami 自体の失敗も止まる)
+actual_user="$(whoami)"
+# 降格確認は**表明**にする: root のままでも表示するだけだと、`gosu agent` の降格が
+# 失われた退行 (SEC-7 / AC-3) でも録画は最後まで成功し、`whoami` が root と出ている GIF を
+# 「agent へ降格している証拠」として README に貼ってしまう
+if [ "${actual_user}" != "${EXPECTED_USER}" ]; then
+    echo "ERROR: running as '${actual_user}', expected '${EXPECTED_USER}' -- gosu drop to agent is broken"
+    exit 1
+fi
+# 表明を通ったユーザー名を見せる (画面上の見え方は素の whoami と同じ)
+printf '%s\n' "${actual_user}"
 
 # 遮断確認: 許可外ホストへ**到達できてしまったら** default-deny の退行なので失敗させる。
 # `|| echo` だけで受け流すと、firewall が壊れていても «blocked» 行が出ないまま
@@ -194,14 +222,21 @@ log "録画を開始します → ${CAST_FILE}"
 if [ -t 0 ] && [ -t 1 ]; then
     # 元のサイズを控えてから変更し、EXIT トラップで必ず戻す
     # (戻さないと呼び出し元の端末が 120x30 のままになり、以後の表示が崩れる)
+    # 失敗しても止めずに空文字として受け取る (取得できたかどうかは直後に明示的に分岐する)
     ORIGINAL_STTY_SIZE="$(stty size 2> /dev/null || true)"
+    # **元のサイズを控えられたときだけ変更する**: 復元できない状態変更をしないため。
+    # 無条件にリサイズすると、stty size が何も返さない環境で呼び出し元の端末が
+    # 120x30 のまま戻らず、しかもリサイズ自体は成功しているので警告も出ない
     if [ -n "${ORIGINAL_STTY_SIZE}" ]; then
         # stty size は "行 桁" の順で返すので、そのまま rows/cols へ割り当てて復元する
         trap 'cleanup; stty rows ${ORIGINAL_STTY_SIZE% *} cols ${ORIGINAL_STTY_SIZE#* } 2> /dev/null || true' EXIT
-    fi
-    # 録画用のサイズへ変更する (失敗したら理由を伝える。黙って無視しない)
-    if ! stty cols "${RECORD_COLS}" rows "${RECORD_ROWS}" 2> /dev/null; then
-        log "warning: 端末サイズを ${RECORD_COLS}x${RECORD_ROWS} に固定できませんでした。GIF の幅が環境依存になります。"
+        # 録画用のサイズへ変更する (失敗したら理由を伝える。黙って無視しない)
+        if ! stty cols "${RECORD_COLS}" rows "${RECORD_ROWS}" 2> /dev/null; then
+            log "warning: 端末サイズを ${RECORD_COLS}x${RECORD_ROWS} に固定できませんでした。GIF の幅が環境依存になります。"
+        fi
+    else
+        # 取得できなかったこと自体を握り潰さない (§6)。戻せないので変更もしない
+        log "warning: 現在の端末サイズを取得できないため端末サイズを固定できません (元に戻せない変更はしません)。GIF の幅が環境依存になります。"
     fi
 else
     # どちらかが端末でなければサイズを固定できないので、幅が環境依存になることを伝える
@@ -246,6 +281,9 @@ log "GIF へ変換します → ${GIF_FILE}"
 # 日本語グリフを持たず、CJK を含めると豆腐 (□) になって最重要の一行が読めなくなるため
 # agg も `|| { ... }` で受ける: 途中で失敗すると書きかけの GIF がそのまま残り、
 # 一見もっともらしい .cast と並んでコミットされてしまう
+# ここから先に ${GIF_FILE} が残っていれば、それは今回の実行で agg が書いたもの
+# (失敗時の書きかけを含む)。以後の後始末の文言をそちら向けに切り替える
+GIF_GENERATED_THIS_RUN=1
 if ! agg --font-size 16 "${CAST_FILE}" "${GIF_FILE}"; then
     log "error: GIF への変換に失敗しました。"
     discard_stale_gif
