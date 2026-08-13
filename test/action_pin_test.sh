@@ -567,12 +567,31 @@ split_uses_occurrences() {
             return (index(s, "[") > 0 || index(s, "{") > 0)
         }
 
+        # 取り出した値が「実際に使える action 参照の形」かどうかを調べる関数。
+        # 引用符が落ちた散文（`- name: use {uses: x} syntax` の `x` 等）を参照と report しないための歯止め。
+        # **fail-open にはならない**: GitHub Actions が受け付ける参照はここに挙げた 3 形のいずれかで、
+        # それ以外の綴りはワークフロー自体が実行できないため、取りこぼす「使える action」が存在しない
+        function looks_like_action_ref(v) {
+            # リポジトリ内のローカル action（`./…` / `../…`）
+            if (v ~ /^\.\.?\//) return 1
+            # コンテナ action（`docker://…`）
+            if (v ~ /^docker:\/\//) return 1
+            # `owner/repo[/path][@ref]` の形
+            if (v ~ /^[A-Za-z0-9._-]+\/[A-Za-z0-9._\/-]+(@.+)?$/) return 1
+            # どれにも当たらなければ参照ではない
+            return 0
+        }
+
         # コメント本文の先頭語が「版の注記らしい形」かどうかを調べる関数。
         # 引用符が落ちた値の中の `#`（`release #1}` 等）を注記と取り違えないための歯止めで、
         # タグに現れない構造文字（`}` `)` `,` など）を含む語は注記として認めない
         function looks_like_marker(w) {
-            # 数字始まり（`v` が付いてもよい）で、以降がタグに使える文字だけなら 1
-            return (w ~ /^v?[0-9][0-9A-Za-z._+-]*$/)
+            # まずタグに使える文字だけでできているかを見る（構造文字を含む語は注記ではない）
+            if (w !~ /^v?[0-9][0-9A-Za-z._+-]*$/) return 0
+            # さらに `v` 始まりか、版らしい区切りのドットを含むことを求める。
+            # これが無いと `# bump #12 -> v5` の `12` のような issue 番号を版と誤読し、
+            # 存在しないタグを上流へ問い合わせて原因を指し違えた診断を出す
+            return (w ~ /^v/ || index(w, ".") > 0)
         }
         {
             # 「行番号:行の内容」の形なので、最初のコロンで 2 つに分ける
@@ -601,8 +620,10 @@ split_uses_occurrences() {
                 delim = ""
                 # 行頭に置かれた鍵かどうかを先に見る（該当すれば必ず最も手前の一致になる）
                 if (at_line_head && match(rest, /^[[:space:]]*(-[[:space:]]+)?uses[[:space:]]*:[[:space:]]*/)) found = 1
-                # 行頭でなければ、フロー形式の区切り（`{` / `,`）の直後に置かれた鍵を探す
-                if (!found && match(rest, /[{,][[:space:]]*uses[[:space:]]*:[[:space:]]*/)) {
+                # 行頭でなければ、フロー形式の区切り（`[` / `{` / `,`）の直後に置かれた鍵を探す。
+                # **`[` を入れる**: `steps: [uses: …]`（シーケンスの先頭要素が単一対のマッピング）も
+                # 正しい YAML で実際に実行されるステップになるため、外すと丸ごと検査対象から消える
+                if (!found && match(rest, /[][{,][[:space:]]*uses[[:space:]]*:[[:space:]]*/)) {
                     found = 1
                     # 区切りが `{` と `,` のどちらだったかを控える（カンマだけ追加の条件が要る）
                     delim = substr(rest, RSTART, 1)
@@ -626,8 +647,9 @@ split_uses_occurrences() {
                 value = after
                 # フロー形式では値の直後に区切り（空白・`,`・`}`・`]`）が続くので、そこまでを値とする
                 sub(/[][[:space:],}].*$/, "", value)
-                # 値が取れたものだけを控える（鍵だけで値が無い行は対象外）
-                if (value != "") {
+                # 値が取れ、かつ実際に使える参照の形をしているものだけを控える
+                # （鍵だけで値が無い行と、引用符が落ちた散文はここで落とす）
+                if (value != "" && looks_like_action_ref(value)) {
                     values[++n] = value
                     # 値の終わりが行の何文字目かを覚えておく（版注記をこの後ろから探すため）
                     value_end = scanned + RSTART + RLENGTH + length(value) - 1
@@ -1389,7 +1411,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: ./.github/actions/local
-      - uses: ./.github/actions/local
       - if: >-
           github.event_name == '"'"'push'"'"'
         uses: actions/checkout@v7'
@@ -1402,7 +1423,6 @@ jobs:
   j:
     runs-on: ubuntu-latest
     steps:
-      - uses: ./.github/actions/local
       - uses: ./.github/actions/local
       - "uses": actions/checkout@v7'
 
@@ -1437,7 +1457,6 @@ jobs:
   j:
     runs-on: ubuntu-latest
     steps:
-      - uses: ./.github/actions/local
       - uses: ./.github/actions/local
       - uses : actions/checkout@v7'
 
@@ -1540,6 +1559,36 @@ jobs:
       - uses: ./.github/actions/local
       - {name: "a}b", uses: actions/checkout@v7}'
 
+# フローシーケンスの**先頭要素**に置かれた `uses:` も検査対象にすること。
+# `steps: [uses: …]` は単一対のマッピングとして解釈され、実際に実行されるステップになる。
+# 区切りに `[` を入れないと 1 件も抽出されず、可変タグが指摘 0 件で通る
+# 健全な `uses:` は**別のジョブ**に置く（同じ行に足すと `[` を外した退行を隠してしまうため）
+assert_pin_enforcement enforced 'mutable tag as the first entry of a flow sequence' \
+'name: X
+permissions: write-all
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/local
+  b:
+    runs-on: ubuntu-latest
+    steps: [uses: actions/checkout@v7]'
+
+# 引用符が落ちた散文は、括弧や読点を含んでいても参照として報告しないこと。
+# 位置規則だけでは `- name: "Check {braces}, uses: prose"` の `prose` を拾ってしまうため、
+# 値が実際に使える参照の形（`owner/repo` / `./…` / `docker://…`）であることも求める
+assert_pin_enforcement accepted 'prose with braces and a comma before a uses key' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/local
+      - name: "Check {braces}, uses: prose"
+        run: echo ok'
+
 # 逆に、フロー集合の**外側**にある読点は区切りではないこと。散文の `, uses:` を区切りと見なすと
 # ありもしない参照を検出したことにして CI を恒常的に赤くする（`post-ci-verify.yml` に同種の文言が入った時点で）
 assert_pin_enforcement accepted 'prose with a comma before a uses key outside any flow collection' \
@@ -1578,6 +1627,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - {uses: actions/checkout@1111111111111111111111111111111111111111, name: "release #1"}  # v4'
+
+# 裸の数字列は版注記として認めないこと。`# bump #12 -> v5` の `12` を版と読むと、
+# 存在しないタグを上流へ問い合わせて「綴り誤りでは」と原因を指し違えた診断を出す。
+# 注記として認めないので「マーカーが無い」として赤くなる（＝注記の書き方を直せ、という正しい指摘）
+assert_split_output 'a bare issue number is not accepted as a version marker' \
+"7"$'\t'"e/f@1111111111111111111111111111111111111111"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: e/f@1111111111111111111111111111111111111111  # bump #12 -> v5'
 
 # 版注記は**コメントの最初の語**だけを見ること。`#` がもう一度出てくる書き方（issue 番号の参照など）で
 # 貪欲一致すると `42)` をマーカーと誤読し、存在しないタグを上流へ問い合わせて
