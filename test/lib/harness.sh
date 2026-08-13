@@ -35,7 +35,10 @@ report() {
         printf 'ok   - %s\n' "$2"
     else
         FAIL=$((FAIL + 1))
-        printf 'NOT OK - %s\n' "$2"
+        # 失敗の表記は既存 3 スイート（guard / entrypoint / action_pin）の `FAIL - ` に揃える。
+        # 揃えておかないと、それらを本ハーネスへ移行した時点で 148 ケースの出力書式が
+        # 一斉に変わり、移行の差分にログ書式の変更が混ざる（§6 変更は最小スコープに）
+        printf 'FAIL - %s\n' "$2"
         # 失敗時は原因調査のため直近の実行結果を出す
         printf '       status=%s\n' "${LAST_STATUS}"
         printf '       output=%s\n' "${LAST_OUTPUT}"
@@ -56,6 +59,17 @@ assert_status() {
 assert_contains() {
     # 部分一致で探す
     if [[ "${LAST_OUTPUT}" == *"$1"* ]]; then
+        report 0 "$2"
+    else
+        report 1 "$2"
+    fi
+}
+
+# 出力に指定した文字列が**含まれない**ことを確認する。
+# 「余計なことを言っていない」ことを主張したい場面で使う（案内・警告の出しすぎの検出）
+assert_not_contains() {
+    # 部分一致で探し、見つからなければ成功
+    if [[ "${LAST_OUTPUT}" != *"$1"* ]]; then
         report 0 "$2"
     else
         report 1 "$2"
@@ -89,6 +103,23 @@ assert_file_ascii() {
     non_ascii="$(LC_ALL=C tr -d '\000-\177' < "$1")"
     # 残りが空なら ASCII のみ
     if [[ -z "${non_ascii}" ]]; then
+        report 0 "$2"
+    else
+        report 1 "$2"
+    fi
+}
+
+# 指定したファイルが**存在したうえで空**であることを確認する。
+# **不在を合格に倒さない**: 「何も記録されなかったこと」を主張したい場面で使うため、
+# ファイルが無い（＝そもそも記録の仕組みが動いていない）場合は失敗にする
+assert_file_empty() {
+    # ファイルが無ければ検査不能なので失敗にする
+    if [[ ! -f "$1" ]]; then
+        report 1 "$2"
+        return
+    fi
+    # 中身が空（サイズ 0）なら成功
+    if [[ ! -s "$1" ]]; then
         report 0 "$2"
     else
         report 1 "$2"

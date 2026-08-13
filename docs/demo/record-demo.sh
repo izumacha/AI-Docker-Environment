@@ -30,6 +30,13 @@ DEMO_DIR="${REPO_ROOT}/docs/demo"
 CAST_FILE="${DEMO_DIR}/aidock-demo.cast"
 # README に貼る GIF の出力先
 GIF_FILE="${DEMO_DIR}/aidock-demo.gif"
+# agg に書かせる一時ファイル。**成果物のパスへ直接書かせない**: 直接書かせると、agg が
+# 終了コード 0 のまま出力に触れなかった場合 (壊れた cast を読み飛ばした等) に、
+# 前回のコミット済み GIF がそのまま検査を通り、上書き済みの .cast と食い違ったまま
+# 「完了」と報告されてしまう。一時ファイルへ書かせて全部の検査を通ったものだけを
+# 置き換えれば、「そこにある = 今回の実行が作った」が構造的に保証される。
+# 同じディレクトリに置くのは、置き換えを同一ファイルシステム内の mv (原子的) にするため
+GIF_TMP_FILE="${GIF_FILE}.tmp"
 # GIF の上限サイズ (CLAUDE.md §15 の「10MB 以下」を名前付き定数にする)
 GIF_MAX_BYTES=$((10 * 1024 * 1024))
 # 録画する端末の桁数・行数。GIF の幅は「桁数 × フォント送り幅」で決まるため、
@@ -45,6 +52,10 @@ log() { printf '%s\n' "$*" >&2; }
 # **消さないと .cast と .gif が食い違う**: .cast は --overwrite で失敗時の内容に
 # 置き換わる一方、GIF は前回成功時のものが残るため、`git status` には .cast だけが
 # 変更として現れ、無関係な GIF と一緒にコミットされてしまう
+#
+# **消すのは常に「前回の実行の成果物」だけ**: 今回 agg が書いたものは一時ファイル
+# (GIF_TMP_FILE) にしか存在せず、全検査を通ったときにだけ成果物のパスへ移す。
+# そのため「未コミットのファイルに git restore を案内する」取り違えが起こりえない
 discard_stale_gif() {
     # 前回の GIF が残っていれば削除し、消したことを明示する (git restore で戻せる)
     if [ -f "${GIF_FILE}" ]; then
@@ -82,8 +93,15 @@ STATUS_FILE="$(mktemp /tmp/aidock-demo-status.XXXXXX)"
 # 一時ファイル類の後始末。**1 か所にまとめる**: trap を 2 度張る (端末サイズを戻す版とそうでない版)
 # ので、削除対象をそれぞれに書き写すと、後で足した一時ファイルが片方だけ消し忘れられる
 cleanup() {
-    # 作業ディレクトリと一時ファイルをまとめて消す
-    rm -rf "${DEMO_WORKSPACE}" "${STEPS_FILE}" "${STATUS_FILE}"
+    # 作業ディレクトリと一時ファイル (agg の書き出し先を含む) をまとめて消す。
+    # **後始末の失敗で終了コードを乗っ取らせない**: この関数は EXIT トラップから呼ばれ、
+    # bash はトラップ内で最後に実行したコマンドの終了コードをスクリプトの終了コードにする。
+    # 素の rm のままだと、成功した録画が「完了」と報告した直後に exit 1 で終わり、
+    # `record-demo.sh && git add docs/demo` が黙って成果物を取り込まなくなる
+    if ! rm -rf "${DEMO_WORKSPACE}" "${STEPS_FILE}" "${STATUS_FILE}" "${GIF_TMP_FILE}"; then
+        # 握り潰さず知らせる (§6)。録画の成否とは無関係なので終了コードは変えない
+        log "warning: 一時ファイルの後始末に失敗しました (${DEMO_WORKSPACE} などが残っています)。"
+    fi
 }
 # スクリプト終了時に必ず片付ける (端末サイズを変えた場合は後段でトラップを張り直す)
 trap cleanup EXIT
@@ -107,8 +125,21 @@ set -euo pipefail
 
 # /workspace にホスト側のデモ用ディレクトリがマウントされていることを見せる
 ls -la
-# root ではなく agent へ降格していることを見せる
-whoami
+
+# 降格後に期待するユーザー名。**1 か所に置く**: 比較とエラー文言の両方で使うため、
+# 書き写すと片方だけ変えたときに「一致しないのに合格」「合格なのに違う名前を報告」になる
+EXPECTED_USER='agent'
+# 実際に誰として動いているかを取得する (set -e により whoami 自体の失敗も止まる)
+actual_user="$(whoami)"
+# 降格確認は**表明**にする: root のままでも表示するだけだと、`gosu agent` の降格が
+# 失われた退行 (SEC-7 / AC-3) でも録画は最後まで成功し、`whoami` が root と出ている GIF を
+# 「agent へ降格している証拠」として README に貼ってしまう
+if [ "${actual_user}" != "${EXPECTED_USER}" ]; then
+    echo "ERROR: running as '${actual_user}', expected '${EXPECTED_USER}' -- gosu drop to agent is broken"
+    exit 1
+fi
+# 表明を通ったユーザー名を見せる (画面上の見え方は素の whoami と同じ)
+printf '%s\n' "${actual_user}"
 
 # 遮断確認: 許可外ホストへ**到達できてしまったら** default-deny の退行なので失敗させる。
 # `|| echo` だけで受け流すと、firewall が壊れていても «blocked» 行が出ないまま
@@ -194,14 +225,36 @@ log "録画を開始します → ${CAST_FILE}"
 if [ -t 0 ] && [ -t 1 ]; then
     # 元のサイズを控えてから変更し、EXIT トラップで必ず戻す
     # (戻さないと呼び出し元の端末が 120x30 のままになり、以後の表示が崩れる)
+    # 失敗しても止めずに空文字として受け取る (取得できたかどうかは直後に明示的に分岐する)
     ORIGINAL_STTY_SIZE="$(stty size 2> /dev/null || true)"
-    if [ -n "${ORIGINAL_STTY_SIZE}" ]; then
-        # stty size は "行 桁" の順で返すので、そのまま rows/cols へ割り当てて復元する
-        trap 'cleanup; stty rows ${ORIGINAL_STTY_SIZE% *} cols ${ORIGINAL_STTY_SIZE#* } 2> /dev/null || true' EXIT
-    fi
-    # 録画用のサイズへ変更する (失敗したら理由を伝える。黙って無視しない)
-    if ! stty cols "${RECORD_COLS}" rows "${RECORD_ROWS}" 2> /dev/null; then
-        log "warning: 端末サイズを ${RECORD_COLS}x${RECORD_ROWS} に固定できませんでした。GIF の幅が環境依存になります。"
+    # **元のサイズを「復元に使える値」として控えられたときだけ変更する**:
+    # 復元できない状態変更をしないため。無条件にリサイズすると、stty size が使える値を
+    # 返さない環境で呼び出し元の端末が 120x30 のまま戻らず、しかもリサイズ自体は
+    # 成功しているので警告も出ない。
+    # **非空かどうかだけを条件にしない**: winsize が未設定の pty (bare openpty など) では
+    # stty size が "0 0" を返し、そのまま復元すると `stty rows 0 cols 0` を実行してしまう。
+    # 「行 桁」が正の整数 2 つであることまで確かめる (stty size の出力形式そのもの)
+    if [[ "${ORIGINAL_STTY_SIZE}" =~ ^([1-9][0-9]*)[[:space:]]+([1-9][0-9]*)$ ]]; then
+        # stty size は "行 桁" の順で返すので、その順で取り出して復元に使う
+        ORIGINAL_STTY_ROWS="${BASH_REMATCH[1]}"
+        ORIGINAL_STTY_COLS="${BASH_REMATCH[2]}"
+        # 終了時に元の桁数・行数へ戻す (一時ファイルの後始末もまとめて行う)。
+        # **復元を先に置く**: トラップの本体も `set -e` の対象なので、先に置いた後始末が
+        # 非ゼロで返るとトラップはそこで打ち切られ、復元に到達しない。
+        # 一次の保証は `cleanup` が失敗を返さないこと (下の cleanup() を参照。
+        # そこが崩れると終了コードも乗っ取られるため、テストが exit 0 を表明している) で、
+        # この順序はそれが将来崩れたときに端末だけは戻すための二重の備え
+        # 復元に失敗したら知らせる (§6)。**トラップ自体は失敗させない**: log は 0 を返すので
+        # 終了コードを乗っ取らず、後続の cleanup にも到達する。黙って握り潰すと、
+        # 呼び出し元の端末が 120x30 のまま戻らないのに何の手掛かりも残らない
+        trap 'stty rows "${ORIGINAL_STTY_ROWS}" cols "${ORIGINAL_STTY_COLS}" 2> /dev/null || log "warning: 端末サイズを ${ORIGINAL_STTY_ROWS}x${ORIGINAL_STTY_COLS} へ戻せませんでした。stty size で確認してください。"; cleanup' EXIT
+        # 録画用のサイズへ変更する (失敗したら理由を伝える。黙って無視しない)
+        if ! stty cols "${RECORD_COLS}" rows "${RECORD_ROWS}" 2> /dev/null; then
+            log "warning: 端末サイズを ${RECORD_COLS}x${RECORD_ROWS} に固定できませんでした。GIF の幅が環境依存になります。"
+        fi
+    else
+        # 取得できなかったこと自体を握り潰さない (§6)。戻せないので変更もしない
+        log "warning: 現在の端末サイズを復元できる形で取得できないため端末サイズを固定しません (元に戻せない変更はしません)。GIF の幅が環境依存になります。"
     fi
 else
     # どちらかが端末でなければサイズを固定できないので、幅が環境依存になることを伝える
@@ -246,7 +299,20 @@ log "GIF へ変換します → ${GIF_FILE}"
 # 日本語グリフを持たず、CJK を含めると豆腐 (□) になって最重要の一行が読めなくなるため
 # agg も `|| { ... }` で受ける: 途中で失敗すると書きかけの GIF がそのまま残り、
 # 一見もっともらしい .cast と並んでコミットされてしまう
-if ! agg --font-size 16 "${CAST_FILE}" "${GIF_FILE}"; then
+# **agg を呼ぶ前に一時ファイルを消す**: 名前が固定なので、前回の実行が途中で殺された
+# (SIGKILL / OOM) 場合や後始末に失敗した場合に中身が残りうる。消さずに走らせると、
+# agg が 0 で終わりながら出力に触れなかったときに**その残骸が全検査を通って成果物になる** —
+# 一時ファイル化で無くしたはずの「古い GIF が新しい .cast と対になる」状態が復活する
+# **この rm も失敗しうる**: 同じパスにディレクトリが残っている / docs/demo が EACCES など。
+# 素で書くと set -e がここでスクリプトを終わらせ、他の失敗経路と違って
+# 前回の GIF を残したまま (= 上書き済みの .cast と対のまま) 止まってしまう
+if ! rm -f "${GIF_TMP_FILE}"; then
+    log "error: 変換用の一時ファイル ${GIF_TMP_FILE} を消せませんでした。"
+    log "       同じ名前のディレクトリが残っていないか、書き込み権限があるかを確認してください。"
+    discard_stale_gif
+    exit 1
+fi
+if ! agg --font-size 16 "${CAST_FILE}" "${GIF_TMP_FILE}"; then
     log "error: GIF への変換に失敗しました。"
     discard_stale_gif
     exit 1
@@ -258,24 +324,34 @@ fi
 # **中身が GIF であることを先に確かめる**: agg が 0 で終わりながら空ファイルや
 # 壊れた出力を残すことがある (書き込み中断・ディスク不足など)。上限だけを見ていると
 # 0 バイトは «上限以下» として素通りし、README に死んだサムネイルが貼られてしまう
-if [ ! -s "${GIF_FILE}" ]; then
+if [ ! -s "${GIF_TMP_FILE}" ]; then
     log "error: 生成された GIF が空です。agg の出力を確認してください。"
     discard_stale_gif
     exit 1
 fi
 # GIF のシグネチャ (GIF87a / GIF89a の先頭 4 バイト) を確認する
-if [ "$(head -c 4 "${GIF_FILE}")" != "GIF8" ]; then
+if [ "$(head -c 4 "${GIF_TMP_FILE}")" != "GIF8" ]; then
     log "error: 生成されたファイルが GIF ではありません。agg の出力を確認してください。"
     discard_stale_gif
     exit 1
 fi
-GIF_SIZE="$(stat -c %s "${GIF_FILE}")"
+GIF_SIZE="$(stat -c %s "${GIF_TMP_FILE}")"
 if [ "${GIF_SIZE}" -gt "${GIF_MAX_BYTES}" ]; then
     # **警告で済ませない**: 他の不備 (agg の失敗・ステップの失敗) では GIF を消しているのに
     # ここだけ残すと、`record-demo.sh && git add docs/demo` で上限超過の GIF がそのまま
     # コミットされる。基準を満たさない成果物は置いていかない (§15 / fail-closed)
     log "error: GIF が上限 $((GIF_MAX_BYTES / 1024 / 1024))MB を超えています (${GIF_SIZE} bytes)。"
     log "       --idle-time-limit や解像度を調整して録り直してください。"
+    discard_stale_gif
+    exit 1
+fi
+
+# ここまで通ったものだけを成果物の位置へ移す。**移動を最後に置く**ことで、
+# 「${GIF_FILE} が存在する = 全検査を通った今回の GIF」という不変条件が保たれる
+if ! mv "${GIF_TMP_FILE}" "${GIF_FILE}"; then
+    log "error: 生成した GIF を ${GIF_FILE} へ移動できませんでした。"
+    # ここも .cast を上書きした後の失敗なので、他の失敗経路と同じく前回の GIF を残さない
+    # (残すと、新しい .cast と古い .gif が並んだままコミットされうる)
     discard_stale_gif
     exit 1
 fi
