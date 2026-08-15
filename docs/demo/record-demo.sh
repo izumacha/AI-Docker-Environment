@@ -13,9 +13,10 @@
 #     自動化に向かないため本スクリプトでは録画しない。必要なら手動で
 #     `asciinema rec -c './bin/aidock run' docs/demo/aidock-run.cast` のように録る。
 #
-# 実行環境: Linux ホスト (Docker デーモン必須)。依存: asciinema, agg。
+# 実行環境: Linux ホスト (Docker デーモン必須)。依存: asciinema, agg, script(1)。
 #   asciinema: https://asciinema.org/ (例: pipx install asciinema)
 #   agg:       https://github.com/asciinema/agg (cast → GIF 変換)
+#   script:    util-linux 同梱 (コンテナへの入力を pty 越しに流すために使う。後述)
 #
 # 使い方: リポジトリルートで  ./docs/demo/record-demo.sh
 # 生成物: docs/demo/aidock-demo.cast / docs/demo/aidock-demo.gif
@@ -212,7 +213,17 @@ show "aidock shell  # firewall init -> checks"
 # **標準入力へ流すのはこの 2 行だけ**にする (TTY エコーで録画に写るため ASCII に限る)。
 # 末尾の exit は、TTY 付きの対話 bash が標準入力の終端だけでは終わらず、
 # aidock shell が返らないまま録画がハングするのを防ぐ
-"${AIDOCK_DEMO_REPO_ROOT}/bin/aidock" shell << 'INNER'
+#
+# **script(1) の pty 越しに流し込む**: `aidock shell` は `compose run` に行き着き、
+# compose は TTY を割り当てる際に**標準入力が端末であること**を要求する。ヒアドキュメントを
+# 直接つなぐと標準入力が端末でなくなり、asciinema 配下 (標準出力は pty) でも
+# "the input device is not a TTY" で起動自体が失敗する (GitHub Actions ランナーで実測)。
+# script が確保した pty を標準入力として与え、ヒアドキュメントは script が pty へ
+# 中継することで、対話シェルへ「打った」のと同じ形で届く (TTY エコーで録画にも写る)。
+# -e は内側のコマンドの終了コードをそのまま返すために必須 (set -e で失敗を検知するため)。
+# -c の文字列内の変数展開は実行時に sh が二重引用符の中で行うので、パスに空白や
+# 記号が含まれても安全 (このファイル冒頭の「パスは環境変数で渡す」方針と同じ)。
+script -qec '"${AIDOCK_DEMO_REPO_ROOT}/bin/aidock" shell' /dev/null << 'INNER'
 bash /workspace/aidock-demo-checks.sh
 exit
 INNER
