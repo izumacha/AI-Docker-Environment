@@ -725,25 +725,35 @@ fi
 #     （`${...}` は実行時にしか決まらないため、その手前・後ろの固定文字列だけを対象にする）
 COMMITTED_CAST="${REPO_ROOT}/docs/demo/aidock-demo.cast"
 PASS_PREFIX="$(sed -n "/^pass() {/,/^}/ s/.*printf '\(.*\)%s.*/\1/p" "${RECORD_SCRIPT}")"
-# **抽出に失敗したら合格に倒さない**: 空のまま照合すると grep -F "" が何にでも当たる
-if [ -n "${PASS_PREFIX}" ]; then
+# **抽出に失敗したら合格に倒さない**: 空のまま照合すると grep -F "" が何にでも当たる。
+# **ちょうど 1 行であることまで確かめる**: pass() に printf が増えて複数行になると、
+# grep -F は改行を候補の区切りとして扱うので「どちらか片方が当たれば合格」に化ける
+PASS_PREFIX_LINES="$(printf '%s' "${PASS_PREFIX}" | grep -c '' || true)"
+if [ -n "${PASS_PREFIX}" ] && [ "${PASS_PREFIX_LINES}" -eq 1 ]; then
     assert_file_contains "${COMMITTED_CAST}" "${PASS_PREFIX}" \
         "the committed recording was made with the label prefix pass() currently prints"
 else
     report 1 "the check label prefix can be read out of record-demo.sh (pass)"
 fi
 
-# 各 pass 呼び出しの引数からリテラル断片を取り出す（`${...}` を改行に置き換えて分割し、
-# 偶然どこにでも当たる短い断片は捨てる）
-PASS_LITERALS="$(sed -n "s/^pass ['\"]\(.*\)['\"]$/\1/p" "${RECORD_SCRIPT}" \
-    | sed 's/\${[^}]*}/\n/g' | grep -E '.{8,}' || true)"
-if [ -n "${PASS_LITERALS}" ]; then
+# 各 pass 呼び出しの引数を取り出す。**行頭固定にしない**: 呼び出しが `if` の中へ入って
+# インデントされただけで当たらなくなり、その 1 件が黙って照合対象から外れる
+PASS_ARGS="$(sed -n "s/^[[:space:]]*pass ['\"]\(.*\)['\"]\$/\1/p" "${RECORD_SCRIPT}")"
+# **取りこぼしを合格に倒さない**: 残りの断片が非空ならループは回り続けるので、
+# 「1 件だけ抽出できなかった」は非空チェックでは検出できない。呼び出し数と突き合わせる
+# （`pass() {` は直後が `(` なので `pass ` には当たらず、定義行は数に入らない）
+PASS_CALL_COUNT="$(grep -c '^[[:space:]]*pass ' "${RECORD_SCRIPT}" || true)"
+PASS_ARG_COUNT="$(printf '%s' "${PASS_ARGS}" | grep -c '' || true)"
+# `${...}` を改行に置き換えて固定部分へ分解し、偶然どこにでも当たる短い断片は捨てる
+PASS_LITERALS="$(printf '%s\n' "${PASS_ARGS}" | sed 's/\${[^}]*}/\n/g' | grep -E '.{8,}' || true)"
+if [ "${PASS_CALL_COUNT}" -gt 0 ] && [ "${PASS_ARG_COUNT}" -eq "${PASS_CALL_COUNT}" ] \
+    && [ -n "${PASS_LITERALS}" ]; then
     while IFS= read -r pass_literal; do
         assert_file_contains "${COMMITTED_CAST}" "${pass_literal}" \
             "the committed recording shows the current label text: ${pass_literal}"
     done <<< "${PASS_LITERALS}"
 else
-    report 1 "the check label bodies can be read out of record-demo.sh (pass calls)"
+    report 1 "every pass call yields a label to cross-check (${PASS_ARG_COUNT}/${PASS_CALL_COUNT} extracted)"
 fi
 
 # --- summary ----------------------------------------------------------------

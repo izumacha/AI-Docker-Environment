@@ -62,6 +62,11 @@ discard_stale_gif() {
     if [ -f "${GIF_FILE}" ]; then
         rm -f "${GIF_FILE}"
         log "       前回の ${GIF_FILE} は .cast と食い違うため削除しました (git restore で復元できます)。"
+        # **cast も名指しする**: --overwrite 済みなので、失敗した録画の内容で作業ツリーが
+        # 上書きされている。GIF だけ戻すと、コミット済みのラベルを照合する
+        # test/record_demo_test.sh のケースが「ラベルがおかしい」と読める形で落ち、
+        # 原因 (戻し忘れた cast) から遠い場所を指してしまう
+        log "       ${CAST_FILE} も失敗した録画で上書きされています。両方まとめて戻してください。"
     fi
 }
 
