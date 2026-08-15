@@ -128,6 +128,20 @@ cat > "${CHECKS_FILE}" << 'CHECKS'
 # 未定義変数とパイプ途中の失敗も検出する (デモは「壊れていないこと」の証拠なので握り潰さない)
 set -euo pipefail
 
+# 合格した検査を録画に見せるときの体裁。**1 か所に置く**: 検査は 3 つあり、書き写すと
+# 片方だけ変えたときに録画内で行の見た目が食い違う (§6 UI 文言は単一の参照元)
+PASS_FORMAT='=> %s\n'
+
+# 合格した検査 1 件を録画に見せる。
+# **素の値をそのまま出さず必ずラベルを付ける**: 録画は README のデモ GIF そのもので、
+# 見る人は 5 秒で「何を確かめたのか」を読み取る必要がある (CLAUDE.md §15)。
+# 例えばステータス行だけを裸で出すと、直前の ls 出力やビルドログに埋もれるうえ、
+# `HTTP/2 404` は「到達できた証拠」なのに「失敗した」と誤読されてしまう
+pass() {
+    # shellcheck disable=SC2059  # 体裁を 1 か所に集約するため書式は変数から与える
+    printf "${PASS_FORMAT}" "$*"
+}
+
 # /workspace にホスト側のデモ用ディレクトリがマウントされていることを見せる
 ls -la
 
@@ -143,8 +157,9 @@ if [ "${actual_user}" != "${EXPECTED_USER}" ]; then
     echo "ERROR: running as '${actual_user}', expected '${EXPECTED_USER}' -- gosu drop to agent is broken"
     exit 1
 fi
-# 表明を通ったユーザー名を見せる (画面上の見え方は素の whoami と同じ)
-printf '%s\n' "${actual_user}"
+# 表明を通ったことを見せる。**裸の `agent` を出さない**: 直前の ls 出力に所有者列として
+# `agent agent` が並ぶため、単独行の `agent` は「降格を確認した証拠」だと読み取れない
+pass "running as ${actual_user} (gosu drop to non-root ok)"
 
 # 遮断確認: 許可外ホストへ**到達できてしまったら** default-deny の退行なので失敗させる。
 # `|| echo` だけで受け流すと、firewall が壊れていても «blocked» 行が出ないまま
@@ -153,7 +168,7 @@ if curl -sS --max-time 5 https://example.com > /dev/null 2>&1; then
     echo 'ERROR: example.com is REACHABLE -- default-deny egress is broken'
     exit 1
 fi
-echo '=> example.com blocked (default-deny)'
+pass 'example.com blocked (default-deny)'
 
 # 到達確認: 許可ホストへ到達できなければ許可リスト/DNS の退行なので失敗させる。
 # curl の終了コードを直接見る (`curl | head` にすると head の 0 が curl の失敗を覆い隠す)
@@ -161,8 +176,17 @@ if ! anthropic_head="$(curl -sSI --max-time 10 https://api.anthropic.com)"; then
     echo 'ERROR: api.anthropic.com is UNREACHABLE -- allowlist/DNS regression'
     exit 1
 fi
-# 応答のステータス行だけを見せる
-printf '%s\n' "${anthropic_head}" | head -n 1
+# 応答の 1 行目 (ステータス行) だけを取り出す。**`| head -n 1` にしない**: head は 1 行読むと
+# すぐ閉じるので、書き手 (printf) が SIGPIPE で終了コード 141 を返しうる。この検査は
+# `set -o pipefail` の下にあるため、そうなると「到達できているのに検査失敗」になる。
+# 出力が小さい間は起きないが、失敗するかどうかがヘッダ長に左右される作りは避ける。
+# パラメータ展開なら外部プロセスもパイプも挟まないので、その競合自体が存在しない
+anthropic_status_line="${anthropic_head%%$'\n'*}"
+# HTTP ヘッダは CRLF 区切りなので行末に CR が残る。**必ず落とす**: 残したまま表示すると
+# 端末がカーソルを行頭へ戻し、続けて出す文字が行の先頭を上書きして読めなくなる
+anthropic_status_line="${anthropic_status_line%$'\r'}"
+# 到達できたことを、根拠のステータス行を添えて見せる
+pass "api.anthropic.com reachable -- ${anthropic_status_line}"
 CHECKS
 
 # 打ったコマンドを画面に見せてから実行するヘルパーを、録画される側のスクリプトに埋め込む。
