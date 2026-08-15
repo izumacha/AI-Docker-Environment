@@ -773,7 +773,9 @@ if [ "${PASS_CALL_COUNT}" -gt 0 ] && [ "${PASS_ARG_COUNT}" -eq "${PASS_CALL_COUN
         # 短すぎる断片は録画のどこにでも当たってしまい、`"` や `\` を含む断片は cast の
         # JSON エスケープ（`\"` / `\\`）と食い違って、録画が最新でも赤くなる。
         # なお cast の 1 イベントに 1 行が収まっている前提で grep -F している（現状の 3 行は該当）
-        if [ "${#pass_literal}" -lt 8 ] || [[ "${pass_literal}" == *'"'* || "${pass_literal}" == *'\'* ]]; then
+        # `"` と `\` はブラケット式 1 つにまとめる（`*'\'*` と書くと、shellcheck が
+        # 「シングルクォートを escape したいのでは」と読んで SC1003 を出し、CI の lint が落ちる）
+        if [ "${#pass_literal}" -lt 8 ] || [[ "${pass_literal}" == *[\"\\]* ]]; then
             report 1 "the label of this pass call can be cross-checked against the recording: ${pass_arg}"
             continue
         fi
