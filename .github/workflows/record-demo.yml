@@ -1,0 +1,83 @@
+# 一時ワークフロー: docs/demo/ のデモ録画 (.cast/.gif) を CI ランナー上で録り直す。
+#
+# なぜ CI ランナーで録るか: record-demo.sh は Docker デーモンと deb.debian.org 等への
+# egress が必要（aidock build の apt 工程）。ubuntu-latest ランナーは ci.yml の e2e ジョブが
+# 毎回 `aidock build` を完走させている実績があり、録画の前提を満たす唯一の再現可能な環境。
+#
+# このワークフローは録り直しが済んだら**ブランチから削除する**（恒久機能ではない。
+# 生成物の更新手順は従来どおり docs/demo/README.md の手動実行）。
+#
+# 再帰防止: GITHUB_TOKEN による push は新しい workflow run をトリガしない（GitHub Actions の
+# 仕様）ため、このジョブ自身のコミットでループしない。加えて生成物が既に存在する場合は
+# 録画をスキップする（後続の README 編集 push で録り直さないため。**録り直したいときは
+# .cast/.gif を消した状態で push する** — 今回はそうしている）。
+name: Record demo
+
+on:
+  push:
+    branches: [claude/amazing-davinci-9h2usq]
+
+# 生成物をブランチへ push するため書き込み権限が要る。
+# 書き込み権限を持つワークフローのため、uses: は SHA ピン + リリースマーカー必須
+# (FR-9.6(b) / test/action_pin_test.sh が検証する)
+permissions:
+  contents: write
+
+concurrency:
+  group: record-demo-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  record:
+    name: record demo cast + gif
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ASCIINEMA_VERSION: "2.4.0"
+      AGG_VERSION: "1.9.0"
+    steps:
+      # デタッチ HEAD ではなくブランチとして checkout し、生成物の git push を可能にする
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.ref_name }}
+
+      # 生成物が既に揃っていれば以降をスキップする（録り直しは .cast/.gif を消してから push する）
+      - name: Check whether recordings already exist
+        id: existing
+        run: |
+          set -euo pipefail
+          if [ -f docs/demo/aidock-demo.cast ] && [ -f docs/demo/aidock-demo.gif ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+            echo "recordings already committed; skipping re-record" >&2
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # 録画依存を導入する（ci.yml の lint ツール導入と同じくバージョンを固定する）
+      - name: Install pinned recording tools (asciinema / agg)
+        if: steps.existing.outputs.present == 'false'
+        run: |
+          set -euo pipefail
+          pipx install "asciinema==${ASCIINEMA_VERSION}"
+          curl -fsSL -o agg "https://github.com/asciinema/agg/releases/download/v${AGG_VERSION}/agg-x86_64-unknown-linux-gnu"
+          sudo install agg /usr/local/bin/agg
+          rm -f agg
+          asciinema --version
+          agg --version
+
+      # script(1) で pty を確保し 120x30 に固定してから録る（record-demo.sh は fd0/fd1 が
+      # 端末のときだけサイズを固定する設計のため、非対話の CI では pty を与える必要がある）
+      - name: Record demo (pty fixed at 120x30)
+        if: steps.existing.outputs.present == 'false'
+        run: script -qefc 'stty cols 120 rows 30 && ./docs/demo/record-demo.sh' /dev/null
+
+      # 生成物だけを明示的にコミットして push する（README 等は含めない）
+      - name: Commit recordings
+        if: steps.existing.outputs.present == 'false'
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/demo/aidock-demo.cast docs/demo/aidock-demo.gif
+          git commit -m "Re-record the demo with labelled check output"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
