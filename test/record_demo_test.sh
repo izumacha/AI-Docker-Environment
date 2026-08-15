@@ -322,7 +322,7 @@ WHOAMI
     # テスト本体が見る LAST_OUTPUT は pty 実行との比較を揃えるため CR を全部落としており、
     # 「CR が残っている」という退行だけはそこからは絶対に検出できない。控えを取らずに
     # LAST_OUTPUT へ assert を書くと、CR を落とす処理を消しても緑のままの偽合格になる
-    PATH="${stub_dir}:${PATH}" bash "${checks}" | tee "${AIDOCK_TEST_CHECKS_CAPTURE:-/dev/null}"
+    PATH="${stub_dir}:${PATH}" bash "${checks}" | tee "${AIDOCK_TEST_CHECKS_CAPTURE}"
     # **検査本体の終了コードを名指しで取り出す**。このスタブは pipefail を有効にしているので
     # 素の `$?` でも今は同じ値になるが、それは「tee が 0 を返す一方 pipefail が非ゼロを
     # 拾い上げる」という離れた設定への暗黙の依存になる。default-deny 退行の検知が
@@ -695,6 +695,21 @@ if [ -n "${ARTIFACT_BASENAME}" ]; then
         "the temporary artifact name the script derives is the one .gitignore ignores"
 else
     report 1 "the artifact name can be read out of record-demo.sh (GIF_FILE)"
+fi
+
+# 13) **コミット済みの録画が今のラベルで録られていること**。上のケース群は「今この場で
+#     実行した検査スクリプト」の出力しか見ないため、ラベルを変えて期待値 3 つを直せば
+#     CI は緑になり、README が貼る .cast / .gif だけが古い体裁のまま取り残される。
+#     この PR 自身がその形を踏んだ（`=> ` で録った後に接頭辞を変え、録り直しが必要になった）。
+#     接頭辞は pass() の printf から読み取り、成果物と機械的に突き合わせる（§6 一元管理。
+#     ケース 12 の「スクリプトから導いた名前を .gitignore と照合する」のと同じ方式）
+PASS_PREFIX="$(sed -n "/^pass() {/,/^}/ s/.*printf '\(.*\)%s.*/\1/p" "${RECORD_SCRIPT}")"
+# **抽出に失敗したら合格に倒さない**: 空のまま照合すると grep -F "" が何にでも当たる
+if [ -n "${PASS_PREFIX}" ]; then
+    assert_file_contains "${REPO_ROOT}/docs/demo/aidock-demo.cast" "${PASS_PREFIX}" \
+        "the committed recording was made with the label pass() currently prints"
+else
+    report 1 "the check label prefix can be read out of record-demo.sh (pass)"
 fi
 
 # --- summary ----------------------------------------------------------------
