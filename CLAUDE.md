@@ -112,7 +112,7 @@ OAuth トークンは必ず名前付きボリューム `claude-home` に置き�
 - スタック形態は「CLI / サンドボックス」: 公開 URL・スクショは適用外、**端末操作の録画（asciinema / GIF）で代替**する。
 - 録画対象の代表フロー 1 本（`docs/demo/record-demo.sh` が自動録画する範囲）: `bin/aidock build → shell`（コンテナ起動 → ファイアウォール初期化 → `agent` ユーザーへの降格確認 → 許可外ホストの遮断確認 → `api.anthropic.com` への到達確認）。`login → run` の対話部分（OAuth・Claude Code 画面）は自動化に向かないため、必要なら手動録画で補足する（トークンを写さないこと）。
 - 録画は `docs/demo/` 配下に置くか asciinema.org のリンクを README 冒頭のデモブロックに記載する。録画に OAuth トークン・ホストの実パス（`$HOME` 配下の個人情報が分かるパス）を写さない。
-- 録画の生成は `./docs/demo/record-demo.sh` で自動化している（Linux ホスト + Docker + asciinema + agg が必要。詳細は `docs/demo/README.md`）。
+- 録画の生成は `./docs/demo/record-demo.sh` で自動化している（Linux ホスト + Docker + asciinema + agg + script(1)〔util-linux〕が必要。詳細は `docs/demo/README.md`）。
 
 ---
 

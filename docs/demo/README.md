@@ -70,6 +70,6 @@ GIF の幅を撮影者の端末幅に依存させないよう、録画前に端�
 - `aidock login` の OAuth フローと `aidock run` の Claude Code 対話画面は自動録画の対象外。
   必要なら手動で `asciinema rec -c './bin/aidock run' docs/demo/aidock-run.cast` のように録り、
   トークンやコードが写っていないことを確認してから公開する。
-- 生成後は内容を目視確認し、問題なければ `.cast` / `.gif` をコミットして
-  README のデモブロックの TODO コメントを画像行へ置き換える（手順は README 内の
-  TODO コメント本文に書いてある）。
+- 生成後は内容を目視確認し、問題なければ `.cast` / `.gif` をコミットする
+  （README のデモブロックは既に画像行 `![...](docs/demo/aidock-demo.gif)` を参照しているため、
+  同名で上書きすれば README 側の変更は不要）。

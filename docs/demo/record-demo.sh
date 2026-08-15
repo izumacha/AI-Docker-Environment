@@ -74,10 +74,12 @@ require() {
         exit 1
     fi
 }
-# 録画には Docker (aidock の実行) と asciinema (録画) と agg (GIF 変換) が要る
+# 録画には Docker (aidock の実行) と asciinema (録画) と agg (GIF 変換) と
+# script (コンテナへの入力を pty 越しに流す。後述の STEPS 内で使う) が要る
 require docker "Docker デーモンが動く Linux ホストで実行してください。"
 require asciinema "例: pipx install asciinema"
 require agg "https://github.com/asciinema/agg の手順で導入してください。"
+require script "util-linux (Debian 11+ では bsdextrautils) を導入してください。"
 
 # CLI があってもデーモンが止まっていれば録画は失敗するので、ここで通信まで確かめる。
 # docker info はデーモンへ実際に問い合わせる最も軽い呼び出し (fail-closed)
@@ -223,7 +225,18 @@ show "aidock shell  # firewall init -> checks"
 # -e は内側のコマンドの終了コードをそのまま返すために必須 (set -e で失敗を検知するため)。
 # -c の文字列内の変数展開は実行時に sh が二重引用符の中で行うので、パスに空白や
 # 記号が含まれても安全 (このファイル冒頭の「パスは環境変数で渡す」方針と同じ)。
-script -qec '"${AIDOCK_DEMO_REPO_ROOT}/bin/aidock" shell' /dev/null << 'INNER'
+#
+# 先頭の stty -echo は**外側 pty の入力エコーを消す**: これが無いと、ヒアドキュメントの
+# 2 行が (1) script の pty に届いた瞬間 (コンテナ起動前) と (2) コンテナ内 bash の
+# プロンプト (readline の表示) の計 2 回録画に写り、コマンドが先にまとめて流れる
+# 不自然な映像になる。消すとプロンプト位置での 1 回だけになる (打った操作の見え方は保たれる)。
+#
+# 入力は { sleep; cat; } 経由で**少し遅らせて**流す: script は標準入力を pty へ即座に
+# 中継するため、直結すると -c の stty -echo が走る前に入力が届いてエコーされてしまう
+# (実測で再現)。遅延はこの競合を避けるためだけのもので、負けた場合の影響は
+# 「エコーが 1 回余計に写る」という見た目のみ (動作・終了コードには影響しない)
+ECHO_OFF_SETTLE_SECONDS=1
+{ sleep "${ECHO_OFF_SETTLE_SECONDS}"; cat; } << 'INNER' | script -qec 'stty -echo; "${AIDOCK_DEMO_REPO_ROOT}/bin/aidock" shell' /dev/null
 bash /workspace/aidock-demo-checks.sh
 exit
 INNER
