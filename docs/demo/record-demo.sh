@@ -49,7 +49,7 @@ RECORD_ROWS=30
 # ログはすべて stderr へ (共通規約)
 log() { printf '%s\n' "$*" >&2; }
 
-# 録画に失敗したとき、前回の実行で作られた GIF を消す。
+# 録画に失敗したときの後始末: 前回の実行で作られた GIF を消し、汚れた .cast を知らせる。
 # **消さないと .cast と .gif が食い違う**: .cast は --overwrite で失敗時の内容に
 # 置き換わる一方、GIF は前回成功時のものが残るため、`git status` には .cast だけが
 # 変更として現れ、無関係な GIF と一緒にコミットされてしまう
@@ -57,17 +57,18 @@ log() { printf '%s\n' "$*" >&2; }
 # **消すのは常に「前回の実行の成果物」だけ**: 今回 agg が書いたものは一時ファイル
 # (GIF_TMP_FILE) にしか存在せず、全検査を通ったときにだけ成果物のパスへ移す。
 # そのため「未コミットのファイルに git restore を案内する」取り違えが起こりえない
-discard_stale_gif() {
+clean_up_failed_recording() {
     # 前回の GIF が残っていれば削除し、消したことを明示する (git restore で戻せる)
     if [ -f "${GIF_FILE}" ]; then
         rm -f "${GIF_FILE}"
         log "       前回の ${GIF_FILE} は .cast と食い違うため削除しました (git restore で復元できます)。"
-        # **cast も名指しする**: --overwrite 済みなので、失敗した録画の内容で作業ツリーが
-        # 上書きされている。GIF だけ戻すと、コミット済みのラベルを照合する
-        # test/record_demo_test.sh のケースが「ラベルがおかしい」と読める形で落ち、
-        # 原因 (戻し忘れた cast) から遠い場所を指してしまう
-        log "       ${CAST_FILE} も失敗した録画で上書きされています。両方まとめて戻してください。"
     fi
+    # **cast の案内は GIF の有無で分岐させない**: --overwrite は録画を始めた時点で作業ツリーの
+    # .cast を失敗時の内容へ置き換えており、それは GIF が残っていたかとは無関係に起きる。
+    # GIF が無い実行 (2 回続けて失敗した後など) で黙ると、汚れた .cast だけが残り、
+    # コミット済みのラベルを照合する test/record_demo_test.sh のケースが
+    # 「ラベルがおかしい」と読める形で落ちて、原因 (戻し忘れた .cast) から遠い場所を指す
+    log "       ${CAST_FILE} は失敗した録画で上書きされています。git restore で戻してください。"
 }
 
 # 依存コマンドの存在確認 (無ければ導入方法を案内して fail-closed で終了)
@@ -333,7 +334,7 @@ if ! asciinema rec --overwrite --idle-time-limit 2 \
     --command "bash -c \"bash '${STEPS_FILE}'; echo \\\$? > '${STATUS_FILE}'\"" \
     "${CAST_FILE}"; then
     log "error: asciinema による録画自体が失敗しました (中断・起動失敗など)。"
-    discard_stale_gif
+    clean_up_failed_recording
     exit 1
 fi
 
@@ -344,14 +345,14 @@ if [ -z "${STEPS_STATUS}" ]; then
     # ステップ本体ではなく、録画コマンドの起動自体が失敗した可能性が高いケース
     log "error: 録画対象のコマンドの終了コードを取得できませんでした。"
     log "       asciinema が --command を起動できたか (シェルの互換性・PATH) を確認してください。"
-    discard_stale_gif
+    clean_up_failed_recording
     exit 1
 fi
 if [ "${STEPS_STATUS}" != "0" ]; then
     log "error: 録画対象のコマンドが失敗しました (exit ${STEPS_STATUS})。"
     log "       ${CAST_FILE} に失敗時の出力が残っているので原因を確認してください。"
     log "       GIF は生成しません (壊れた録画を README に貼らないため)。"
-    discard_stale_gif
+    clean_up_failed_recording
     exit 1
 fi
 
@@ -370,12 +371,12 @@ log "GIF へ変換します → ${GIF_FILE}"
 if ! rm -f "${GIF_TMP_FILE}"; then
     log "error: 変換用の一時ファイル ${GIF_TMP_FILE} を消せませんでした。"
     log "       同じ名前のディレクトリが残っていないか、書き込み権限があるかを確認してください。"
-    discard_stale_gif
+    clean_up_failed_recording
     exit 1
 fi
 if ! agg --font-size 16 "${CAST_FILE}" "${GIF_TMP_FILE}"; then
     log "error: GIF への変換に失敗しました。"
-    discard_stale_gif
+    clean_up_failed_recording
     exit 1
 fi
 
@@ -387,13 +388,13 @@ fi
 # 0 バイトは «上限以下» として素通りし、README に死んだサムネイルが貼られてしまう
 if [ ! -s "${GIF_TMP_FILE}" ]; then
     log "error: 生成された GIF が空です。agg の出力を確認してください。"
-    discard_stale_gif
+    clean_up_failed_recording
     exit 1
 fi
 # GIF のシグネチャ (GIF87a / GIF89a の先頭 4 バイト) を確認する
 if [ "$(head -c 4 "${GIF_TMP_FILE}")" != "GIF8" ]; then
     log "error: 生成されたファイルが GIF ではありません。agg の出力を確認してください。"
-    discard_stale_gif
+    clean_up_failed_recording
     exit 1
 fi
 # サイズの取得も**素で書かない**: 他の検査 (rm / agg / mv) と同じく失敗しうるのに、
@@ -401,7 +402,7 @@ fi
 # **前回の GIF が上書き済みの .cast と対のまま残る** (他のどの失敗経路とも違う振る舞いになる)
 if ! GIF_SIZE="$(stat -c %s "${GIF_TMP_FILE}")"; then
     log "error: 生成した GIF のサイズを取得できませんでした (${GIF_TMP_FILE})。"
-    discard_stale_gif
+    clean_up_failed_recording
     exit 1
 fi
 if [ "${GIF_SIZE}" -gt "${GIF_MAX_BYTES}" ]; then
@@ -410,7 +411,7 @@ if [ "${GIF_SIZE}" -gt "${GIF_MAX_BYTES}" ]; then
     # コミットされる。基準を満たさない成果物は置いていかない (§15 / fail-closed)
     log "error: GIF が上限 $((GIF_MAX_BYTES / 1024 / 1024))MB を超えています (${GIF_SIZE} bytes)。"
     log "       --idle-time-limit や解像度を調整して録り直してください。"
-    discard_stale_gif
+    clean_up_failed_recording
     exit 1
 fi
 
@@ -420,7 +421,7 @@ if ! mv "${GIF_TMP_FILE}" "${GIF_FILE}"; then
     log "error: 生成した GIF を ${GIF_FILE} へ移動できませんでした。"
     # ここも .cast を上書きした後の失敗なので、他の失敗経路と同じく前回の GIF を残さない
     # (残すと、新しい .cast と古い .gif が並んだままコミットされうる)
-    discard_stale_gif
+    clean_up_failed_recording
     exit 1
 fi
 

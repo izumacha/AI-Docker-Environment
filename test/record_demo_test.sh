@@ -541,6 +541,23 @@ assert_missing "${FAKE_GIF}" "asciinema failure: discards the stale GIF"
 assert_contains "は .cast と食い違うため削除しました" \
     "asciinema failure: attributes the discarded GIF to the previous run"
 assert_contains "git restore" "asciinema failure: points at the recovery path"
+# **作業ツリーの .cast が汚れたことも伝える**: --overwrite は録画開始時点で .cast を
+# 失敗時の内容へ置き換えるので、GIF だけ戻しても成果物は食い違ったまま残る。
+# この案内が無いと、コミット済みラベルを照合するケース 13 が「ラベルがおかしい」と
+# 読める形で落ち、原因（戻し忘れた .cast）から遠い場所を指す
+assert_contains "は失敗した録画で上書きされています" \
+    "asciinema failure: says the working-tree .cast was clobbered too"
+
+# 5b) **GIF が無い失敗**（2 回続けて失敗した後など）でも .cast の案内を出すこと。
+#     案内を「GIF が残っていたら」の内側に戻すと、消す GIF が無い実行では何も言わないまま
+#     汚れた .cast だけが残る。上のケースは GIF がある状態なので、この分岐は別に要る
+rm -f "${FAKE_GIF}"
+run_record asciinemafail
+assert_contains "は失敗した録画で上書きされています" \
+    "failure with no previous GIF: still says the .cast was clobbered"
+# GIF が無いので削除の案内は出しようがない（出したら嘘になる）
+assert_not_contains "は .cast と食い違うため削除しました" \
+    "failure with no previous GIF: claims no deletion it did not perform"
 
 # 6) 状態ファイルが書かれなかった場合（録画対象を起動できなかった）も fail-closed
 touch "${FAKE_GIF}"
@@ -744,14 +761,25 @@ PASS_ARGS="$(sed -n "s/^[[:space:]]*pass ['\"]\(.*\)['\"]\$/\1/p" "${RECORD_SCRI
 # （`pass() {` は直後が `(` なので `pass ` には当たらず、定義行は数に入らない）
 PASS_CALL_COUNT="$(grep -c '^[[:space:]]*pass ' "${RECORD_SCRIPT}" || true)"
 PASS_ARG_COUNT="$(printf '%s' "${PASS_ARGS}" | grep -c '' || true)"
-# `${...}` を改行に置き換えて固定部分へ分解し、偶然どこにでも当たる短い断片は捨てる
-PASS_LITERALS="$(printf '%s\n' "${PASS_ARGS}" | sed 's/\${[^}]*}/\n/g' | grep -E '.{8,}' || true)"
-if [ "${PASS_CALL_COUNT}" -gt 0 ] && [ "${PASS_ARG_COUNT}" -eq "${PASS_CALL_COUNT}" ] \
-    && [ -n "${PASS_LITERALS}" ]; then
-    while IFS= read -r pass_literal; do
+# **呼び出しごとに 1 件ずつ照合する**: 断片を全部まとめてから長さで篩うと、短いラベルの
+# 呼び出しが 1 件まるごと落ちても「残りの断片が非空」で素通りしてしまう（合計だけを見ると
+# 個々の欠落が隠れる）。`${...}` は実行時にしか決まらないので、その手前・後ろの固定部分だけを
+# 取り出し、その中で最も長い断片を代表に使う
+if [ "${PASS_CALL_COUNT}" -gt 0 ] && [ "${PASS_ARG_COUNT}" -eq "${PASS_CALL_COUNT}" ]; then
+    while IFS= read -r pass_arg; do
+        pass_literal="$(printf '%s\n' "${pass_arg}" | sed 's/\${[^}]*}/\n/g' \
+            | awk '{ if (length($0) > length(longest)) longest = $0 } END { print longest }')"
+        # **照合に使えない断片は黙って飛ばさず、その場で失敗させる**（飛ばすと不在＝合格になる）。
+        # 短すぎる断片は録画のどこにでも当たってしまい、`"` や `\` を含む断片は cast の
+        # JSON エスケープ（`\"` / `\\`）と食い違って、録画が最新でも赤くなる。
+        # なお cast の 1 イベントに 1 行が収まっている前提で grep -F している（現状の 3 行は該当）
+        if [ "${#pass_literal}" -lt 8 ] || [[ "${pass_literal}" == *'"'* || "${pass_literal}" == *'\'* ]]; then
+            report 1 "the label of this pass call can be cross-checked against the recording: ${pass_arg}"
+            continue
+        fi
         assert_file_contains "${COMMITTED_CAST}" "${pass_literal}" \
             "the committed recording shows the current label text: ${pass_literal}"
-    done <<< "${PASS_LITERALS}"
+    done <<< "${PASS_ARGS}"
 else
     report 1 "every pass call yields a label to cross-check (${PASS_ARG_COUNT}/${PASS_CALL_COUNT} extracted)"
 fi
