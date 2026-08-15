@@ -18,7 +18,8 @@ Docker デーモンが動く **Linux ホスト**で、リポジトリルート�
 ```
 
 依存: [asciinema](https://asciinema.org/)（例: `pipx install asciinema`）と
-[agg](https://github.com/asciinema/agg)（cast → GIF 変換）。
+[agg](https://github.com/asciinema/agg)（cast → GIF 変換）、および `script(1)`
+（util-linux 同梱。コンテナへの入力を pty 越しに流すために使う）。
 
 録画される代表フロー（CLAUDE.md「見せ方（§15 の具体化）」に対応）:
 
@@ -69,6 +70,6 @@ GIF の幅を撮影者の端末幅に依存させないよう、録画前に端�
 - `aidock login` の OAuth フローと `aidock run` の Claude Code 対話画面は自動録画の対象外。
   必要なら手動で `asciinema rec -c './bin/aidock run' docs/demo/aidock-run.cast` のように録り、
   トークンやコードが写っていないことを確認してから公開する。
-- 生成後は内容を目視確認し、問題なければ `.cast` / `.gif` をコミットして
-  README のデモブロックの TODO コメントを画像行へ置き換える（手順は README 内の
-  TODO コメント本文に書いてある）。
+- 生成後は内容を目視確認し、問題なければ `.cast` / `.gif` をコミットする
+  （README のデモブロックは既に画像行 `![...](docs/demo/aidock-demo.gif)` を参照しているため、
+  同名で上書きすれば README 側の変更は不要）。

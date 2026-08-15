@@ -19,16 +19,11 @@ allowlist を組み合わせている。
 
 代表フロー「`aidock build` → `aidock shell`（コンテナ起動 → ファイアウォール初期化 →
 `agent` ユーザーへの降格 → 許可外ホストの遮断確認 → `api.anthropic.com` への到達確認）」の
-端末録画を [`docs/demo/`](docs/demo/) に置く方針だが、**録画本体はまだ未生成**（下記の
-コマンドで生成する。詳細は `CLAUDE.md` §3 の「見せ方」の宿題欄）。
+端末録画（[`docs/demo/`](docs/demo/) に cast/GIF を同梱）:
 
-<!-- TODO(録画未生成): Docker が動く Linux ホストで `./docs/demo/record-demo.sh` を実行し、
-     docs/demo/aidock-demo.cast / aidock-demo.gif を生成・コミットしたら、
-     このコメントブロック全体を次の 1 行で置き換える（上段の「まだ未生成」の断り書きも消す）:
-     ![aidock のビルドからサンドボックス起動・ファイアウォール遮断確認までの端末録画](docs/demo/aidock-demo.gif)
--->
+![aidock のビルドからサンドボックス起動・ファイアウォール遮断確認までの端末録画](docs/demo/aidock-demo.gif)
 
-録画の生成・更新は次の 1 コマンド（Linux ホスト + Docker + asciinema + agg が必要。
+録画の生成・更新は次の 1 コマンド（Linux ホスト + Docker + asciinema + agg + script(1) が必要。
 詳細と撮影時の注意は [`docs/demo/README.md`](docs/demo/README.md)）:
 
 ```bash

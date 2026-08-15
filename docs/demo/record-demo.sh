@@ -13,9 +13,10 @@
 #     自動化に向かないため本スクリプトでは録画しない。必要なら手動で
 #     `asciinema rec -c './bin/aidock run' docs/demo/aidock-run.cast` のように録る。
 #
-# 実行環境: Linux ホスト (Docker デーモン必須)。依存: asciinema, agg。
+# 実行環境: Linux ホスト (Docker デーモン必須)。依存: asciinema, agg, script(1)。
 #   asciinema: https://asciinema.org/ (例: pipx install asciinema)
 #   agg:       https://github.com/asciinema/agg (cast → GIF 変換)
+#   script:    util-linux 同梱 (コンテナへの入力を pty 越しに流すために使う。後述)
 #
 # 使い方: リポジトリルートで  ./docs/demo/record-demo.sh
 # 生成物: docs/demo/aidock-demo.cast / docs/demo/aidock-demo.gif
@@ -73,10 +74,12 @@ require() {
         exit 1
     fi
 }
-# 録画には Docker (aidock の実行) と asciinema (録画) と agg (GIF 変換) が要る
+# 録画には Docker (aidock の実行) と asciinema (録画) と agg (GIF 変換) と
+# script (コンテナへの入力を pty 越しに流す。後述の STEPS 内で使う) が要る
 require docker "Docker デーモンが動く Linux ホストで実行してください。"
 require asciinema "例: pipx install asciinema"
 require agg "https://github.com/asciinema/agg の手順で導入してください。"
+require script "util-linux (Debian 11+ では bsdextrautils) を導入してください。"
 
 # CLI があってもデーモンが止まっていれば録画は失敗するので、ここで通信まで確かめる。
 # docker info はデーモンへ実際に問い合わせる最も軽い呼び出し (fail-closed)
@@ -212,7 +215,29 @@ show "aidock shell  # firewall init -> checks"
 # **標準入力へ流すのはこの 2 行だけ**にする (TTY エコーで録画に写るため ASCII に限る)。
 # 末尾の exit は、TTY 付きの対話 bash が標準入力の終端だけでは終わらず、
 # aidock shell が返らないまま録画がハングするのを防ぐ
-"${AIDOCK_DEMO_REPO_ROOT}/bin/aidock" shell << 'INNER'
+#
+# **script(1) の pty 越しに流し込む**: `aidock shell` は `compose run` に行き着き、
+# compose は TTY を割り当てる際に**標準入力が端末であること**を要求する。ヒアドキュメントを
+# 直接つなぐと標準入力が端末でなくなり、asciinema 配下 (標準出力は pty) でも
+# "the input device is not a TTY" で起動自体が失敗する (GitHub Actions ランナーで実測)。
+# script が確保した pty を標準入力として与え、ヒアドキュメントは script が pty へ
+# 中継することで、対話シェルへ「打った」のと同じ形で届く (TTY エコーで録画にも写る)。
+# -e は内側のコマンドの終了コードをそのまま返すために必須 (set -e で失敗を検知するため)。
+# -c の文字列内の変数展開は実行時に sh が二重引用符の中で行うので、パスに空白や
+# 記号が含まれても安全 (このファイル冒頭の「パスは環境変数で渡す」方針と同じ)。
+#
+# 先頭の stty -echo は**外側 pty の入力エコーを消す**: これが無いと、ヒアドキュメントの
+# 2 行がコンテナ起動前 (compose の Creating 表示より前) にまとめて画面へ流れてしまう。
+# 消しても、コンテナ側 tty が受信時に 1 回 (firewall 初期化中の「先行入力」として) と、
+# bash プロンプトで readline が 1 回表示するのは残る — これは実端末で先行入力したときと
+# 同じ見え方であり許容する (コンテナ内の tty 設定は起動前に外から変えられない)。
+#
+# 入力は { sleep; cat; } 経由で**少し遅らせて**流す: script は標準入力を pty へ即座に
+# 中継するため、直結すると -c の stty -echo が走る前に入力が届いてエコーされてしまう
+# (実測で再現)。遅延はこの競合を避けるためだけのもので、負けた場合の影響は
+# 「エコーが 1 回余計に写る」という見た目のみ (動作・終了コードには影響しない)
+ECHO_OFF_SETTLE_SECONDS=1
+{ sleep "${ECHO_OFF_SETTLE_SECONDS}"; cat; } << 'INNER' | script -qec 'stty -echo; "${AIDOCK_DEMO_REPO_ROOT}/bin/aidock" shell' /dev/null
 bash /workspace/aidock-demo-checks.sh
 exit
 INNER
