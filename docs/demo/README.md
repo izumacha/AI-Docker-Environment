@@ -18,7 +18,8 @@ Docker デーモンが動く **Linux ホスト**で、リポジトリルート�
 ```
 
 依存: [asciinema](https://asciinema.org/)（例: `pipx install asciinema`）と
-[agg](https://github.com/asciinema/agg)（cast → GIF 変換）。
+[agg](https://github.com/asciinema/agg)（cast → GIF 変換）、および `script(1)`
+（util-linux 同梱。コンテナへの入力を pty 越しに流すために使う）。
 
 録画される代表フロー（CLAUDE.md「見せ方（§15 の具体化）」に対応）:
 
