@@ -55,6 +55,15 @@ source "${SCRIPT_DIR}/lib/harness.sh"
 
 # --- スタブの用意 -------------------------------------------------------------
 
+# curl スタブが返すヘッダの中身。**1 か所に置く**（§6）: スタブ側と、それを照合する
+# 3 つの表明（ラベル本文・ヘッダ全体を出していないこと・行末 CR を落としていること）が
+# 同じ文字列を別々に持つと、**片方だけ変えたときに表明が「何にも当たらない」= 素通り**になる。
+# 特に `assert_file_not_contains` は当たらなければ合格なので、当たらなくなったことに気付けない。
+# スタブへは export した環境変数で渡す（スタブ本体はクォート付きヒアドキュメントで
+# 書き出すため、書き出し時点では何も展開されない）
+export AIDOCK_TEST_STUB_STATUS_LINE='HTTP/2 200'
+export AIDOCK_TEST_STUB_HEADER_EXTRA='content-type: application/json'
+
 # スタブを置くディレクトリ（PATH の先頭に差し込む）
 STUB_BIN="${TEST_TMP}/stub-bin"
 mkdir -p "${STUB_BIN}"
@@ -295,8 +304,12 @@ for arg in "$@"; do
             # **本物の curl -I と同じ CRLF 区切りの複数行ヘッダを返す**: 検査側は
             # ステータス行だけを取り出して行末の CR を落とすので、LF 1 行だけを返す
             # スタブだとその処理が働かなくても緑のままになり、CR が録画に残る退行
-            # （端末が行頭へ戻り、続く文字が上書きされて読めなくなる）を見逃す
-            printf 'HTTP/2 200 \r\ndate: Thu, 01 Jan 2026 00:00:00 GMT\r\ncontent-type: application/json\r\n\r\n'
+            # （端末が行頭へ戻り、続く文字が上書きされて読めなくなる）を見逃す。
+            # 内容は**テスト側の名前付き定数から受け取る**（下の STUB_STATUS_LINE 参照）:
+            # ここに直書きすると、それを照合する 3 つの表明と別々の写しになり、
+            # 片方だけ変えたときに表明が「何にも当たらない」= 素通りになる
+            printf '%s \r\ndate: Thu, 01 Jan 2026 00:00:00 GMT\r\n%s\r\n\r\n' \
+                "${AIDOCK_TEST_STUB_STATUS_LINE}" "${AIDOCK_TEST_STUB_HEADER_EXTRA}"
             exit 0
             ;;
     esac
@@ -433,14 +446,17 @@ assert_file_contains "${CHECKS_CAPTURE}" "[check] ok: running as agent (gosu dro
     "healthy sandbox: labels the gosu drop instead of printing a bare user name"
 assert_file_contains "${CHECKS_CAPTURE}" "[check] ok: example.com blocked (default-deny egress)" \
     "healthy sandbox: labels the default-deny proof"
-assert_file_contains "${CHECKS_CAPTURE}" "[check] ok: api.anthropic.com reachable -- HTTP/2 200" \
+#     ステータス行を含む 3 件は**スタブと同じ定数から組み立てる**（別々に直書きすると、
+#     スタブを変えたときに表明が何にも当たらなくなり、素通りに気付けない）
+assert_file_contains "${CHECKS_CAPTURE}" \
+    "[check] ok: api.anthropic.com reachable -- ${AIDOCK_TEST_STUB_STATUS_LINE}" \
     "healthy sandbox: labels the allowlist proof instead of printing a bare status line"
 # ステータス行**だけ**を見せること（ヘッダを丸ごと流すと 3 行の証拠が押し流される）
-assert_file_not_contains "${CHECKS_CAPTURE}" "content-type: application/json" \
+assert_file_not_contains "${CHECKS_CAPTURE}" "${AIDOCK_TEST_STUB_HEADER_EXTRA}" \
     "healthy sandbox: shows only the status line, not the whole header block"
 # 行末の CR を落としていること。**残ると端末がカーソルを行頭へ戻す**ため、GIF の上でだけ
 # 次の行が先頭を上書きして壊れて見える（マージ前の録画に実際に残っていた退行）
-assert_file_not_contains "${CHECKS_CAPTURE}" "$(printf 'HTTP/2 200 \r')" \
+assert_file_not_contains "${CHECKS_CAPTURE}" "$(printf '%s \r' "${AIDOCK_TEST_STUB_STATUS_LINE}")" \
     "healthy sandbox: strips the CR that CRLF headers leave at the end of the status line"
 # **成功時に削除の案内を出さない**: 前回の成果物が残っている状態で成功すると、
 # 「git restore で復元できます」と案内された直後に新しい GIF が出来上がる。
@@ -703,13 +719,31 @@ fi
 #     この PR 自身がその形を踏んだ（`=> ` で録った後に接頭辞を変え、録り直しが必要になった）。
 #     接頭辞は pass() の printf から読み取り、成果物と機械的に突き合わせる（§6 一元管理。
 #     ケース 12 の「スクリプトから導いた名前を .gitignore と照合する」のと同じ方式）
+#     **接頭辞だけでは足りない**: それはラベル本文を書き換えても変わらないので、
+#     文言を直して期待値を直せば緑のまま録画が取り残される。pass() の書式（接頭辞）と
+#     各 pass 呼び出しの**本文のリテラル部分**の両方を成果物と突き合わせる
+#     （`${...}` は実行時にしか決まらないため、その手前・後ろの固定文字列だけを対象にする）
+COMMITTED_CAST="${REPO_ROOT}/docs/demo/aidock-demo.cast"
 PASS_PREFIX="$(sed -n "/^pass() {/,/^}/ s/.*printf '\(.*\)%s.*/\1/p" "${RECORD_SCRIPT}")"
 # **抽出に失敗したら合格に倒さない**: 空のまま照合すると grep -F "" が何にでも当たる
 if [ -n "${PASS_PREFIX}" ]; then
-    assert_file_contains "${REPO_ROOT}/docs/demo/aidock-demo.cast" "${PASS_PREFIX}" \
-        "the committed recording was made with the label pass() currently prints"
+    assert_file_contains "${COMMITTED_CAST}" "${PASS_PREFIX}" \
+        "the committed recording was made with the label prefix pass() currently prints"
 else
     report 1 "the check label prefix can be read out of record-demo.sh (pass)"
+fi
+
+# 各 pass 呼び出しの引数からリテラル断片を取り出す（`${...}` を改行に置き換えて分割し、
+# 偶然どこにでも当たる短い断片は捨てる）
+PASS_LITERALS="$(sed -n "s/^pass ['\"]\(.*\)['\"]$/\1/p" "${RECORD_SCRIPT}" \
+    | sed 's/\${[^}]*}/\n/g' | grep -E '.{8,}' || true)"
+if [ -n "${PASS_LITERALS}" ]; then
+    while IFS= read -r pass_literal; do
+        assert_file_contains "${COMMITTED_CAST}" "${pass_literal}" \
+            "the committed recording shows the current label text: ${pass_literal}"
+    done <<< "${PASS_LITERALS}"
+else
+    report 1 "the check label bodies can be read out of record-demo.sh (pass calls)"
 fi
 
 # --- summary ----------------------------------------------------------------
