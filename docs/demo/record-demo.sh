@@ -49,7 +49,7 @@ RECORD_ROWS=30
 # ログはすべて stderr へ (共通規約)
 log() { printf '%s\n' "$*" >&2; }
 
-# 録画に失敗したとき、前回の実行で作られた GIF を消す。
+# 録画に失敗したときの後始末: 前回の実行で作られた GIF を消し、汚れた .cast を知らせる。
 # **消さないと .cast と .gif が食い違う**: .cast は --overwrite で失敗時の内容に
 # 置き換わる一方、GIF は前回成功時のものが残るため、`git status` には .cast だけが
 # 変更として現れ、無関係な GIF と一緒にコミットされてしまう
@@ -57,12 +57,18 @@ log() { printf '%s\n' "$*" >&2; }
 # **消すのは常に「前回の実行の成果物」だけ**: 今回 agg が書いたものは一時ファイル
 # (GIF_TMP_FILE) にしか存在せず、全検査を通ったときにだけ成果物のパスへ移す。
 # そのため「未コミットのファイルに git restore を案内する」取り違えが起こりえない
-discard_stale_gif() {
+clean_up_failed_recording() {
     # 前回の GIF が残っていれば削除し、消したことを明示する (git restore で戻せる)
     if [ -f "${GIF_FILE}" ]; then
         rm -f "${GIF_FILE}"
         log "       前回の ${GIF_FILE} は .cast と食い違うため削除しました (git restore で復元できます)。"
     fi
+    # **cast の案内は GIF の有無で分岐させない**: --overwrite は録画を始めた時点で作業ツリーの
+    # .cast を失敗時の内容へ置き換えており、それは GIF が残っていたかとは無関係に起きる。
+    # GIF が無い実行 (2 回続けて失敗した後など) で黙ると、汚れた .cast だけが残り、
+    # コミット済みのラベルを照合する test/record_demo_test.sh のケースが
+    # 「ラベルがおかしい」と読める形で落ちて、原因 (戻し忘れた .cast) から遠い場所を指す
+    log "       ${CAST_FILE} は失敗した録画で上書きされています。git restore で戻してください。"
 }
 
 # 依存コマンドの存在確認 (無ければ導入方法を案内して fail-closed で終了)
@@ -128,6 +134,25 @@ cat > "${CHECKS_FILE}" << 'CHECKS'
 # 未定義変数とパイプ途中の失敗も検出する (デモは「壊れていないこと」の証拠なので握り潰さない)
 set -euo pipefail
 
+# 合格した検査 1 件を録画に見せる。**書式はこの関数だけが持つ** (§6 UI 文言は単一の参照元):
+# 検査は 3 つあり、各所に書き写すと 1 つだけ変えたときに録画内で行の見た目が食い違う。
+#
+# **素の値をそのまま出さず必ずラベルを付ける**: 録画は README のデモ GIF そのもので、
+# 見る人は 5 秒で「何を確かめたのか」を読み取る必要がある (CLAUDE.md §15)。
+# 例えばステータス行だけを裸で出すと、直前の ls 出力やビルドログに埋もれるうえ、
+# `HTTP/2 404` は「到達できた証拠」なのに「失敗した」と誤読されてしまう。
+#
+# **接頭辞に `=> ` を使わない**: それは直前まで画面を流れる buildkit の進捗行
+# (`=> [internal] load …`) と同じ形で、数百行の中に検査結果が紛れる (実際に録って確認した)。
+# `[check] ok:` は、同じ録画のすぐ上に出る `[firewall] ok: …` と同じ体裁なので、
+# 「このサンドボックスが自分で報告している確認結果」だと一目で読み取れる。
+#
+# 値は必ず `%s` の引数として渡す (書式へ埋め込まない)。ステータス行は外部の応答由来なので、
+# 書式側に混ぜると `%` を含む応答で printf の解釈が壊れる
+pass() {
+    printf '[check] ok: %s\n' "$*"
+}
+
 # /workspace にホスト側のデモ用ディレクトリがマウントされていることを見せる
 ls -la
 
@@ -143,8 +168,9 @@ if [ "${actual_user}" != "${EXPECTED_USER}" ]; then
     echo "ERROR: running as '${actual_user}', expected '${EXPECTED_USER}' -- gosu drop to agent is broken"
     exit 1
 fi
-# 表明を通ったユーザー名を見せる (画面上の見え方は素の whoami と同じ)
-printf '%s\n' "${actual_user}"
+# 表明を通ったことを見せる。**裸の `agent` を出さない**: 直前の ls 出力に所有者列として
+# `agent agent` が並ぶため、単独行の `agent` は「降格を確認した証拠」だと読み取れない
+pass "running as ${actual_user} (gosu drop to non-root)"
 
 # 遮断確認: 許可外ホストへ**到達できてしまったら** default-deny の退行なので失敗させる。
 # `|| echo` だけで受け流すと、firewall が壊れていても «blocked» 行が出ないまま
@@ -153,7 +179,7 @@ if curl -sS --max-time 5 https://example.com > /dev/null 2>&1; then
     echo 'ERROR: example.com is REACHABLE -- default-deny egress is broken'
     exit 1
 fi
-echo '=> example.com blocked (default-deny)'
+pass 'example.com blocked (default-deny egress)'
 
 # 到達確認: 許可ホストへ到達できなければ許可リスト/DNS の退行なので失敗させる。
 # curl の終了コードを直接見る (`curl | head` にすると head の 0 が curl の失敗を覆い隠す)
@@ -161,8 +187,17 @@ if ! anthropic_head="$(curl -sSI --max-time 10 https://api.anthropic.com)"; then
     echo 'ERROR: api.anthropic.com is UNREACHABLE -- allowlist/DNS regression'
     exit 1
 fi
-# 応答のステータス行だけを見せる
-printf '%s\n' "${anthropic_head}" | head -n 1
+# 応答の 1 行目 (ステータス行) だけを取り出す。**`| head -n 1` にしない**: head は 1 行読むと
+# すぐ閉じるので、書き手 (printf) が SIGPIPE で終了コード 141 を返しうる。この検査は
+# `set -o pipefail` の下にあるため、そうなると「到達できているのに検査失敗」になる。
+# 出力が小さい間は起きないが、失敗するかどうかがヘッダ長に左右される作りは避ける。
+# パラメータ展開なら外部プロセスもパイプも挟まないので、その競合自体が存在しない
+anthropic_status_line="${anthropic_head%%$'\n'*}"
+# HTTP ヘッダは CRLF 区切りなので行末に CR が残る。**必ず落とす**: 残したまま表示すると
+# 端末がカーソルを行頭へ戻し、続けて出す文字が行の先頭を上書きして読めなくなる
+anthropic_status_line="${anthropic_status_line%$'\r'}"
+# 到達できたことを、根拠のステータス行を添えて見せる
+pass "api.anthropic.com reachable -- ${anthropic_status_line}"
 CHECKS
 
 # 打ったコマンドを画面に見せてから実行するヘルパーを、録画される側のスクリプトに埋め込む。
@@ -299,7 +334,7 @@ if ! asciinema rec --overwrite --idle-time-limit 2 \
     --command "bash -c \"bash '${STEPS_FILE}'; echo \\\$? > '${STATUS_FILE}'\"" \
     "${CAST_FILE}"; then
     log "error: asciinema による録画自体が失敗しました (中断・起動失敗など)。"
-    discard_stale_gif
+    clean_up_failed_recording
     exit 1
 fi
 
@@ -310,14 +345,14 @@ if [ -z "${STEPS_STATUS}" ]; then
     # ステップ本体ではなく、録画コマンドの起動自体が失敗した可能性が高いケース
     log "error: 録画対象のコマンドの終了コードを取得できませんでした。"
     log "       asciinema が --command を起動できたか (シェルの互換性・PATH) を確認してください。"
-    discard_stale_gif
+    clean_up_failed_recording
     exit 1
 fi
 if [ "${STEPS_STATUS}" != "0" ]; then
     log "error: 録画対象のコマンドが失敗しました (exit ${STEPS_STATUS})。"
     log "       ${CAST_FILE} に失敗時の出力が残っているので原因を確認してください。"
     log "       GIF は生成しません (壊れた録画を README に貼らないため)。"
-    discard_stale_gif
+    clean_up_failed_recording
     exit 1
 fi
 
@@ -336,12 +371,12 @@ log "GIF へ変換します → ${GIF_FILE}"
 if ! rm -f "${GIF_TMP_FILE}"; then
     log "error: 変換用の一時ファイル ${GIF_TMP_FILE} を消せませんでした。"
     log "       同じ名前のディレクトリが残っていないか、書き込み権限があるかを確認してください。"
-    discard_stale_gif
+    clean_up_failed_recording
     exit 1
 fi
 if ! agg --font-size 16 "${CAST_FILE}" "${GIF_TMP_FILE}"; then
     log "error: GIF への変換に失敗しました。"
-    discard_stale_gif
+    clean_up_failed_recording
     exit 1
 fi
 
@@ -353,13 +388,13 @@ fi
 # 0 バイトは «上限以下» として素通りし、README に死んだサムネイルが貼られてしまう
 if [ ! -s "${GIF_TMP_FILE}" ]; then
     log "error: 生成された GIF が空です。agg の出力を確認してください。"
-    discard_stale_gif
+    clean_up_failed_recording
     exit 1
 fi
 # GIF のシグネチャ (GIF87a / GIF89a の先頭 4 バイト) を確認する
 if [ "$(head -c 4 "${GIF_TMP_FILE}")" != "GIF8" ]; then
     log "error: 生成されたファイルが GIF ではありません。agg の出力を確認してください。"
-    discard_stale_gif
+    clean_up_failed_recording
     exit 1
 fi
 # サイズの取得も**素で書かない**: 他の検査 (rm / agg / mv) と同じく失敗しうるのに、
@@ -367,7 +402,7 @@ fi
 # **前回の GIF が上書き済みの .cast と対のまま残る** (他のどの失敗経路とも違う振る舞いになる)
 if ! GIF_SIZE="$(stat -c %s "${GIF_TMP_FILE}")"; then
     log "error: 生成した GIF のサイズを取得できませんでした (${GIF_TMP_FILE})。"
-    discard_stale_gif
+    clean_up_failed_recording
     exit 1
 fi
 if [ "${GIF_SIZE}" -gt "${GIF_MAX_BYTES}" ]; then
@@ -376,7 +411,7 @@ if [ "${GIF_SIZE}" -gt "${GIF_MAX_BYTES}" ]; then
     # コミットされる。基準を満たさない成果物は置いていかない (§15 / fail-closed)
     log "error: GIF が上限 $((GIF_MAX_BYTES / 1024 / 1024))MB を超えています (${GIF_SIZE} bytes)。"
     log "       --idle-time-limit や解像度を調整して録り直してください。"
-    discard_stale_gif
+    clean_up_failed_recording
     exit 1
 fi
 
@@ -386,7 +421,7 @@ if ! mv "${GIF_TMP_FILE}" "${GIF_FILE}"; then
     log "error: 生成した GIF を ${GIF_FILE} へ移動できませんでした。"
     # ここも .cast を上書きした後の失敗なので、他の失敗経路と同じく前回の GIF を残さない
     # (残すと、新しい .cast と古い .gif が並んだままコミットされうる)
-    discard_stale_gif
+    clean_up_failed_recording
     exit 1
 fi
 

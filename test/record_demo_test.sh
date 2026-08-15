@@ -55,6 +55,15 @@ source "${SCRIPT_DIR}/lib/harness.sh"
 
 # --- スタブの用意 -------------------------------------------------------------
 
+# curl スタブが返すヘッダの中身。**1 か所に置く**（§6）: スタブ側と、それを照合する
+# 3 つの表明（ラベル本文・ヘッダ全体を出していないこと・行末 CR を落としていること）が
+# 同じ文字列を別々に持つと、**片方だけ変えたときに表明が「何にも当たらない」= 素通り**になる。
+# 特に `assert_file_not_contains` は当たらなければ合格なので、当たらなくなったことに気付けない。
+# スタブへは export した環境変数で渡す（スタブ本体はクォート付きヒアドキュメントで
+# 書き出すため、書き出し時点では何も展開されない）
+export AIDOCK_TEST_STUB_STATUS_LINE='HTTP/2 200'
+export AIDOCK_TEST_STUB_HEADER_EXTRA='content-type: application/json'
+
 # スタブを置くディレクトリ（PATH の先頭に差し込む）
 STUB_BIN="${TEST_TMP}/stub-bin"
 mkdir -p "${STUB_BIN}"
@@ -292,7 +301,15 @@ for arg in "$@"; do
         *api.anthropic.com*)
             # blocked モードでは「到達できない」= 失敗を返す
             if [[ "${AIDOCK_TEST_MODE:-ok}" == "blocked" ]]; then exit 7; fi
-            printf 'HTTP/2 200\n'
+            # **本物の curl -I と同じ CRLF 区切りの複数行ヘッダを返す**: 検査側は
+            # ステータス行だけを取り出して行末の CR を落とすので、LF 1 行だけを返す
+            # スタブだとその処理が働かなくても緑のままになり、CR が録画に残る退行
+            # （端末が行頭へ戻り、続く文字が上書きされて読めなくなる）を見逃す。
+            # 内容は**テスト側の名前付き定数から受け取る**（下の STUB_STATUS_LINE 参照）:
+            # ここに直書きすると、それを照合する 3 つの表明と別々の写しになり、
+            # 片方だけ変えたときに表明が「何にも当たらない」= 素通りになる
+            printf '%s \r\ndate: Thu, 01 Jan 2026 00:00:00 GMT\r\n%s\r\n\r\n' \
+                "${AIDOCK_TEST_STUB_STATUS_LINE}" "${AIDOCK_TEST_STUB_HEADER_EXTRA}"
             exit 0
             ;;
     esac
@@ -313,9 +330,17 @@ fi
 echo 'agent'
 WHOAMI
     chmod +x "${stub_dir}/curl" "${stub_dir}/whoami"
-    # ls は本物を使い、curl / whoami だけスタブを優先させる
-    PATH="${stub_dir}:${PATH}" bash "${checks}"
-    status=$?
+    # ls は本物を使い、curl / whoami だけスタブを優先させる。
+    # **出力はバイト列のまま控えを取る**（tee で画面へも流すので録画側の見え方は変わらない）:
+    # テスト本体が見る LAST_OUTPUT は pty 実行との比較を揃えるため CR を全部落としており、
+    # 「CR が残っている」という退行だけはそこからは絶対に検出できない。控えを取らずに
+    # LAST_OUTPUT へ assert を書くと、CR を落とす処理を消しても緑のままの偽合格になる
+    PATH="${stub_dir}:${PATH}" bash "${checks}" | tee "${AIDOCK_TEST_CHECKS_CAPTURE}"
+    # **検査本体の終了コードを名指しで取り出す**。このスタブは pipefail を有効にしているので
+    # 素の `$?` でも今は同じ値になるが、それは「tee が 0 を返す一方 pipefail が非ゼロを
+    # 拾い上げる」という離れた設定への暗黙の依存になる。default-deny 退行の検知が
+    # そこに乗ると、pipefail を外した瞬間に失敗が握り潰されても誰も気付けない
+    status="${PIPESTATUS[0]}"
     rm -rf "${stub_dir}"
     exit "${status}"
 fi
@@ -346,11 +371,16 @@ run_record_with() {
     # stty へのサイズ変更要求（固定・復元）を受け取るファイル
     STTY_CAPTURE="${TEST_TMP}/stty-capture"
     : > "${STTY_CAPTURE}"
+    # コンテナ内の検査スクリプトが出した内容を**バイト列のまま**受け取るファイル。
+    # LAST_OUTPUT は CR を落としてしまうので、CR 由来の退行はこちらでしか見られない
+    CHECKS_CAPTURE="${TEST_TMP}/checks-capture"
+    : > "${CHECKS_CAPTURE}"
     set +e
     LAST_OUTPUT="$(
         cd "${FAKE_REPO}" &&
             PATH="${STUB_BIN}:${PATH}" AIDOCK_TEST_MODE="${mode}" \
                 AIDOCK_TEST_STDIN_CAPTURE="${STDIN_CAPTURE}" \
+                AIDOCK_TEST_CHECKS_CAPTURE="${CHECKS_CAPTURE}" \
                 AIDOCK_TEST_PWD_CAPTURE="${PWD_CAPTURE}" \
                 AIDOCK_TEST_STTY_CAPTURE="${STTY_CAPTURE}" \
                 "$@" 2>&1
@@ -404,6 +434,30 @@ assert_status 0 "healthy sandbox: exits 0"
 assert_exists "${FAKE_GIF}" "healthy sandbox: writes the GIF"
 assert_contains "example.com blocked" "healthy sandbox: records the default-deny proof"
 assert_missing "${FAKE_GIF_TMP}" "healthy sandbox: leaves no half-written temporary GIF behind"
+
+# 1a) 合格した検査は**3 つとも同じラベル付きの行**で録画に残ること。
+#     録画は README のデモ GIF そのもので、見る人はここだけを 5 秒で読む（CLAUDE.md §15）。
+#     裸の値を出すと読み取れない・誤読される:
+#       - `agent` 単独 … 直前の ls -la の所有者列（agent agent）に埋もれる
+#       - `HTTP/2 200` 単独 … 到達できた証拠なのに「失敗した」と読まれる（実機では 404 が返る）
+#     照合は LAST_OUTPUT ではなく**検査出力の控え**に対して行う: LAST_OUTPUT は pty 実行と
+#     比較を揃えるため CR を全部落としており、CR 由来の退行をそこからは検出できない
+assert_file_contains "${CHECKS_CAPTURE}" "[check] ok: running as agent (gosu drop to non-root)" \
+    "healthy sandbox: labels the gosu drop instead of printing a bare user name"
+assert_file_contains "${CHECKS_CAPTURE}" "[check] ok: example.com blocked (default-deny egress)" \
+    "healthy sandbox: labels the default-deny proof"
+#     ステータス行を含む 3 件は**スタブと同じ定数から組み立てる**（別々に直書きすると、
+#     スタブを変えたときに表明が何にも当たらなくなり、素通りに気付けない）
+assert_file_contains "${CHECKS_CAPTURE}" \
+    "[check] ok: api.anthropic.com reachable -- ${AIDOCK_TEST_STUB_STATUS_LINE}" \
+    "healthy sandbox: labels the allowlist proof instead of printing a bare status line"
+# ステータス行**だけ**を見せること（ヘッダを丸ごと流すと 3 行の証拠が押し流される）
+assert_file_not_contains "${CHECKS_CAPTURE}" "${AIDOCK_TEST_STUB_HEADER_EXTRA}" \
+    "healthy sandbox: shows only the status line, not the whole header block"
+# 行末の CR を落としていること。**残ると端末がカーソルを行頭へ戻す**ため、GIF の上でだけ
+# 次の行が先頭を上書きして壊れて見える（マージ前の録画に実際に残っていた退行）
+assert_file_not_contains "${CHECKS_CAPTURE}" "$(printf '%s \r' "${AIDOCK_TEST_STUB_STATUS_LINE}")" \
+    "healthy sandbox: strips the CR that CRLF headers leave at the end of the status line"
 # **成功時に削除の案内を出さない**: 前回の成果物が残っている状態で成功すると、
 # 「git restore で復元できます」と案内された直後に新しい GIF が出来上がる。
 # 案内に従うと古い GIF が新しい .cast と対になり、この仕組みが防ぎたい状態そのものになる
@@ -487,6 +541,23 @@ assert_missing "${FAKE_GIF}" "asciinema failure: discards the stale GIF"
 assert_contains "は .cast と食い違うため削除しました" \
     "asciinema failure: attributes the discarded GIF to the previous run"
 assert_contains "git restore" "asciinema failure: points at the recovery path"
+# **作業ツリーの .cast が汚れたことも伝える**: --overwrite は録画開始時点で .cast を
+# 失敗時の内容へ置き換えるので、GIF だけ戻しても成果物は食い違ったまま残る。
+# この案内が無いと、コミット済みラベルを照合するケース 13 が「ラベルがおかしい」と
+# 読める形で落ち、原因（戻し忘れた .cast）から遠い場所を指す
+assert_contains "は失敗した録画で上書きされています" \
+    "asciinema failure: says the working-tree .cast was clobbered too"
+
+# 5b) **GIF が無い失敗**（2 回続けて失敗した後など）でも .cast の案内を出すこと。
+#     案内を「GIF が残っていたら」の内側に戻すと、消す GIF が無い実行では何も言わないまま
+#     汚れた .cast だけが残る。上のケースは GIF がある状態なので、この分岐は別に要る
+rm -f "${FAKE_GIF}"
+run_record asciinemafail
+assert_contains "は失敗した録画で上書きされています" \
+    "failure with no previous GIF: still says the .cast was clobbered"
+# GIF が無いので削除の案内は出しようがない（出したら嘘になる）
+assert_not_contains "は .cast と食い違うため削除しました" \
+    "failure with no previous GIF: claims no deletion it did not perform"
 
 # 6) 状態ファイルが書かれなかった場合（録画対象を起動できなかった）も fail-closed
 touch "${FAKE_GIF}"
@@ -657,6 +728,62 @@ if [ -n "${ARTIFACT_BASENAME}" ]; then
         "the temporary artifact name the script derives is the one .gitignore ignores"
 else
     report 1 "the artifact name can be read out of record-demo.sh (GIF_FILE)"
+fi
+
+# 13) **コミット済みの録画が今のラベルで録られていること**。上のケース群は「今この場で
+#     実行した検査スクリプト」の出力しか見ないため、ラベルを変えて期待値 3 つを直せば
+#     CI は緑になり、README が貼る .cast / .gif だけが古い体裁のまま取り残される。
+#     この PR 自身がその形を踏んだ（`=> ` で録った後に接頭辞を変え、録り直しが必要になった）。
+#     接頭辞は pass() の printf から読み取り、成果物と機械的に突き合わせる（§6 一元管理。
+#     ケース 12 の「スクリプトから導いた名前を .gitignore と照合する」のと同じ方式）
+#     **接頭辞だけでは足りない**: それはラベル本文を書き換えても変わらないので、
+#     文言を直して期待値を直せば緑のまま録画が取り残される。pass() の書式（接頭辞）と
+#     各 pass 呼び出しの**本文のリテラル部分**の両方を成果物と突き合わせる
+#     （`${...}` は実行時にしか決まらないため、その手前・後ろの固定文字列だけを対象にする）
+COMMITTED_CAST="${REPO_ROOT}/docs/demo/aidock-demo.cast"
+PASS_PREFIX="$(sed -n "/^pass() {/,/^}/ s/.*printf '\(.*\)%s.*/\1/p" "${RECORD_SCRIPT}")"
+# **抽出に失敗したら合格に倒さない**: 空のまま照合すると grep -F "" が何にでも当たる。
+# **ちょうど 1 行であることまで確かめる**: pass() に printf が増えて複数行になると、
+# grep -F は改行を候補の区切りとして扱うので「どちらか片方が当たれば合格」に化ける
+PASS_PREFIX_LINES="$(printf '%s' "${PASS_PREFIX}" | grep -c '' || true)"
+if [ -n "${PASS_PREFIX}" ] && [ "${PASS_PREFIX_LINES}" -eq 1 ]; then
+    assert_file_contains "${COMMITTED_CAST}" "${PASS_PREFIX}" \
+        "the committed recording was made with the label prefix pass() currently prints"
+else
+    report 1 "the check label prefix can be read out of record-demo.sh (pass)"
+fi
+
+# 各 pass 呼び出しの引数を取り出す。**行頭固定にしない**: 呼び出しが `if` の中へ入って
+# インデントされただけで当たらなくなり、その 1 件が黙って照合対象から外れる
+PASS_ARGS="$(sed -n "s/^[[:space:]]*pass ['\"]\(.*\)['\"]\$/\1/p" "${RECORD_SCRIPT}")"
+# **取りこぼしを合格に倒さない**: 残りの断片が非空ならループは回り続けるので、
+# 「1 件だけ抽出できなかった」は非空チェックでは検出できない。呼び出し数と突き合わせる
+# （`pass() {` は直後が `(` なので `pass ` には当たらず、定義行は数に入らない）
+PASS_CALL_COUNT="$(grep -c '^[[:space:]]*pass ' "${RECORD_SCRIPT}" || true)"
+PASS_ARG_COUNT="$(printf '%s' "${PASS_ARGS}" | grep -c '' || true)"
+# **呼び出しごとに 1 件ずつ照合する**: 断片を全部まとめてから長さで篩うと、短いラベルの
+# 呼び出しが 1 件まるごと落ちても「残りの断片が非空」で素通りしてしまう（合計だけを見ると
+# 個々の欠落が隠れる）。`${...}` は実行時にしか決まらないので、その手前・後ろの固定部分だけを
+# 取り出し、その中で最も長い断片を代表に使う
+if [ "${PASS_CALL_COUNT}" -gt 0 ] && [ "${PASS_ARG_COUNT}" -eq "${PASS_CALL_COUNT}" ]; then
+    while IFS= read -r pass_arg; do
+        pass_literal="$(printf '%s\n' "${pass_arg}" | sed 's/\${[^}]*}/\n/g' \
+            | awk '{ if (length($0) > length(longest)) longest = $0 } END { print longest }')"
+        # **照合に使えない断片は黙って飛ばさず、その場で失敗させる**（飛ばすと不在＝合格になる）。
+        # 短すぎる断片は録画のどこにでも当たってしまい、`"` や `\` を含む断片は cast の
+        # JSON エスケープ（`\"` / `\\`）と食い違って、録画が最新でも赤くなる。
+        # なお cast の 1 イベントに 1 行が収まっている前提で grep -F している（現状の 3 行は該当）
+        # `"` と `\` はブラケット式 1 つにまとめる（`*'\'*` と書くと、shellcheck が
+        # 「シングルクォートを escape したいのでは」と読んで SC1003 を出し、CI の lint が落ちる）
+        if [ "${#pass_literal}" -lt 8 ] || [[ "${pass_literal}" == *[\"\\]* ]]; then
+            report 1 "the label of this pass call can be cross-checked against the recording: ${pass_arg}"
+            continue
+        fi
+        assert_file_contains "${COMMITTED_CAST}" "${pass_literal}" \
+            "the committed recording shows the current label text: ${pass_literal}"
+    done <<< "${PASS_ARGS}"
+else
+    report 1 "every pass call yields a label to cross-check (${PASS_ARG_COUNT}/${PASS_CALL_COUNT} extracted)"
 fi
 
 # --- summary ----------------------------------------------------------------
