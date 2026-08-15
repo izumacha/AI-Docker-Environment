@@ -429,11 +429,11 @@ assert_missing "${FAKE_GIF_TMP}" "healthy sandbox: leaves no half-written tempor
 #       - `HTTP/2 200` 単独 … 到達できた証拠なのに「失敗した」と読まれる（実機では 404 が返る）
 #     照合は LAST_OUTPUT ではなく**検査出力の控え**に対して行う: LAST_OUTPUT は pty 実行と
 #     比較を揃えるため CR を全部落としており、CR 由来の退行をそこからは検出できない
-assert_file_contains "${CHECKS_CAPTURE}" "=> running as agent (gosu drop to non-root ok)" \
+assert_file_contains "${CHECKS_CAPTURE}" "[check] ok: running as agent (gosu drop to non-root)" \
     "healthy sandbox: labels the gosu drop instead of printing a bare user name"
-assert_file_contains "${CHECKS_CAPTURE}" "=> example.com blocked (default-deny)" \
+assert_file_contains "${CHECKS_CAPTURE}" "[check] ok: example.com blocked (default-deny egress)" \
     "healthy sandbox: labels the default-deny proof"
-assert_file_contains "${CHECKS_CAPTURE}" "=> api.anthropic.com reachable -- HTTP/2 200" \
+assert_file_contains "${CHECKS_CAPTURE}" "[check] ok: api.anthropic.com reachable -- HTTP/2 200" \
     "healthy sandbox: labels the allowlist proof instead of printing a bare status line"
 # ステータス行**だけ**を見せること（ヘッダを丸ごと流すと 3 行の証拠が押し流される）
 assert_file_not_contains "${CHECKS_CAPTURE}" "content-type: application/json" \

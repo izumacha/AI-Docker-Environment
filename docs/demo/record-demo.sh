@@ -129,8 +129,13 @@ cat > "${CHECKS_FILE}" << 'CHECKS'
 set -euo pipefail
 
 # 合格した検査を録画に見せるときの体裁。**1 か所に置く**: 検査は 3 つあり、書き写すと
-# 片方だけ変えたときに録画内で行の見た目が食い違う (§6 UI 文言は単一の参照元)
-PASS_FORMAT='=> %s\n'
+# 片方だけ変えたときに録画内で行の見た目が食い違う (§6 UI 文言は単一の参照元)。
+#
+# **`=> ` を使わない**: それは直前まで画面を流れる buildkit の進捗行 (`=> [internal] load …`)
+# と同じ接頭辞で、数百行の同じ形の中に検査結果が紛れてしまう (実際に録って確認した)。
+# `[check] ok:` は、同じ録画のすぐ上に出る `[firewall] ok: …` と同じ体裁なので、
+# 「このサンドボックスが自分で報告している確認結果」だと一目で読み取れる
+PASS_FORMAT='[check] ok: %s\n'
 
 # 合格した検査 1 件を録画に見せる。
 # **素の値をそのまま出さず必ずラベルを付ける**: 録画は README のデモ GIF そのもので、
@@ -159,7 +164,7 @@ if [ "${actual_user}" != "${EXPECTED_USER}" ]; then
 fi
 # 表明を通ったことを見せる。**裸の `agent` を出さない**: 直前の ls 出力に所有者列として
 # `agent agent` が並ぶため、単独行の `agent` は「降格を確認した証拠」だと読み取れない
-pass "running as ${actual_user} (gosu drop to non-root ok)"
+pass "running as ${actual_user} (gosu drop to non-root)"
 
 # 遮断確認: 許可外ホストへ**到達できてしまったら** default-deny の退行なので失敗させる。
 # `|| echo` だけで受け流すと、firewall が壊れていても «blocked» 行が出ないまま
@@ -168,7 +173,7 @@ if curl -sS --max-time 5 https://example.com > /dev/null 2>&1; then
     echo 'ERROR: example.com is REACHABLE -- default-deny egress is broken'
     exit 1
 fi
-pass 'example.com blocked (default-deny)'
+pass 'example.com blocked (default-deny egress)'
 
 # 到達確認: 許可ホストへ到達できなければ許可リスト/DNS の退行なので失敗させる。
 # curl の終了コードを直接見る (`curl | head` にすると head の 0 が curl の失敗を覆い隠す)
