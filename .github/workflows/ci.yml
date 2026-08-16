@@ -37,11 +37,11 @@ jobs:
           hadolint --version
 
       - name: shellcheck
-        run: shellcheck bin/aidock docker/init-firewall.sh docker/entrypoint.sh test/guard_test.sh test/entrypoint_test.sh test/action_pin_test.sh test/record_demo_test.sh test/lib/harness.sh docs/demo/record-demo.sh
+        run: shellcheck bin/aidock docker/init-firewall.sh docker/entrypoint.sh test/guard_test.sh test/entrypoint_test.sh test/action_pin_test.sh test/record_demo_test.sh test/sec18_denylist_e2e.sh test/sec18_denylist_test.sh test/lib/harness.sh docs/demo/record-demo.sh
 
       - name: bash syntax check
         run: |
-          for f in bin/aidock docker/init-firewall.sh docker/entrypoint.sh test/guard_test.sh test/entrypoint_test.sh test/action_pin_test.sh test/record_demo_test.sh test/lib/harness.sh docs/demo/record-demo.sh; do
+          for f in bin/aidock docker/init-firewall.sh docker/entrypoint.sh test/guard_test.sh test/entrypoint_test.sh test/action_pin_test.sh test/record_demo_test.sh test/sec18_denylist_e2e.sh test/sec18_denylist_test.sh test/lib/harness.sh docs/demo/record-demo.sh; do
               bash -n "$f"
           done
 
@@ -71,6 +71,15 @@ jobs:
         # missing script(1) is reported as a FAIL, not skipped, so this step
         # cannot go green without having exercised those branches.
         run: bash test/record_demo_test.sh
+
+      - name: SEC-18 denylist check verdict unit tests
+        # Hermetic, Docker-free: `docker` is a PATH stub, so this exercises
+        # test/sec18_denylist_e2e.sh's decision logic -- specifically that a
+        # probe that could not run is never reported as a SEC-18 regression
+        # (issue #94), and that a build failing for an unrelated reason is
+        # never reported as "SEC-18 ok". The e2e job runs the real check
+        # against a real build; this pins how it reaches its verdict.
+        run: bash test/sec18_denylist_test.sh
 
       - name: hadolint (Dockerfile)
         run: hadolint docker/Dockerfile
@@ -137,25 +146,22 @@ jobs:
         # systemd-journal), so a future regression in that logic (e.g. the
         # denylist itself being trimmed, or the comparison being loosened)
         # could ship with CI green (found in a routine code review, see
-        # docs/requirements.md SEC-18). Resolve the "shadow" group's GID
-        # straight from the pinned base image referenced by the Dockerfile's
+        # docs/requirements.md SEC-18). The check resolves the "shadow" group's
+        # GID straight from the pinned base image referenced by the Dockerfile's
         # own FROM line, rather than hardcoding a GID that could drift on a
-        # future node:22-slim rebuild, then assert that building with
-        # HOST_GID set to that GID is refused. Placed right after AC-1 build
-        # so Docker's layer cache reuses the unaffected earlier layers
-        # (base image / apt-get / npm install) and only re-executes the
+        # future node:22-slim rebuild, then asserts that building with HOST_GID
+        # set to that GID is refused *by the denylist itself*. Placed right
+        # after AC-1 build so Docker's layer cache reuses the unaffected earlier
+        # layers (base image / apt-get / npm install) and only re-executes the
         # denylist-check RUN step itself.
-        run: |
-          set +e
-          base_image="$(awk '/^FROM /{print $2; exit}' docker/Dockerfile)"
-          shadow_gid="$(docker run --rm "$base_image" getent group shadow | cut -d: -f3)"
-          echo "shadow GID in base image ($base_image): $shadow_gid"
-          HOST_GID="$shadow_gid" docker compose -f compose.yaml build
-          code=$?
-          set -e
-          echo "docker compose build exit (HOST_GID=shadow's GID): $code"
-          [ "$code" -ne 0 ] || { echo "FAIL: build succeeded despite HOST_GID colliding with the sensitive group 'shadow' (SEC-18 denylist should have rejected it)"; exit 1; }
-          echo "SEC-18 ok: HOST_GID colliding with a sensitive system group is rejected as documented"
+        #
+        # The body lives in test/sec18_denylist_e2e.sh rather than inline here:
+        # as an inline block it was covered by neither shellcheck nor `bash -n`
+        # and could not be unit-tested, and it grew issue #94 in that blind spot
+        # (a failed GID probe was reported as a SEC-18 regression, so two runs
+        # of the same commit disagreed). test/sec18_denylist_test.sh now pins
+        # the verdict logic hermetically in the type-check job.
+        run: bash test/sec18_denylist_e2e.sh
 
       - name: AC-2 guard rejects $HOME and /
         run: |
