@@ -151,12 +151,15 @@ trap 'rm -f "${build_log}"' EXIT
 
 # HOST_GID だけを差し替えてビルドする。HOST_UID は呼び出し元の値のまま使い、
 # AC-1 のビルドとレイヤーキャッシュを共有させる（デニーリストの RUN だけが再実行される）。
-# --progress=plain は BuildKit の出力を行単位の決定的な形にして、下の照合を可能にする
-HOST_GID="${shadow_gid}" docker compose -f "${COMPOSE_FILE}" build --progress=plain > "${build_log}" 2>&1
-# ビルドの終了コードを控える
-build_status=$?
-# 成否にかかわらずビルドログを CI に出す（失敗時の原因調査に必要）
-cat "${build_log}"
+# --progress=plain は BuildKit の出力を行単位の決定的な形にして、下の照合を可能にする。
+# **`tee` で流しながら控える**のが要点: いったんファイルへ溜めてから後で出す形にすると、
+# ジョブが timeout-minutes やキャンセルで途中終了したときにビルド出力が 1 行も残らず、
+# 「pull で止まったのか npm で止まったのか」という、本スクリプトが切り分けたい当の情報が消える。
+# BuildKit の進捗は stderr に出るので 2>&1 でまとめてから渡す（これを外すと拒否メッセージを拾えない）
+HOST_GID="${shadow_gid}" docker compose -f "${COMPOSE_FILE}" build --progress=plain 2>&1 | tee "${build_log}"
+# **パイプの左端**（docker）の終了コードを取る。pipefail 下でも $? は tee の結果に引きずられるため、
+# PIPESTATUS を直後に読む（1 コマンドでも挟むと上書きされる）
+build_status="${PIPESTATUS[0]}"
 # 終了コードも明示的に残す
 printf 'docker compose build exit (HOST_GID=%s): %s\n' "${shadow_gid}" "${build_status}"
 

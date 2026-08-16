@@ -21,6 +21,22 @@ jobs:
     env:
       SHELLCHECK_VERSION: "0.11.0"
       HADOLINT_VERSION: "2.14.0"
+      # 静的解析にかけるシェルスクリプトの一覧。shellcheck と `bash -n` の両ステップが
+      # ここだけを見る（書き写すと片方の追記を忘れたときに、そのファイルが一方の網から
+      # 静かに外れる。issue #94 は「リンタの網の外にあるコード」から生まれた欠陥そのもの）。
+      # docs/requirements.md FR-8.1 の一覧とも対応させること
+      SHELL_FILES: >-
+        bin/aidock
+        docker/init-firewall.sh
+        docker/entrypoint.sh
+        test/guard_test.sh
+        test/entrypoint_test.sh
+        test/action_pin_test.sh
+        test/record_demo_test.sh
+        test/sec18_denylist_e2e.sh
+        test/sec18_denylist_test.sh
+        test/lib/harness.sh
+        docs/demo/record-demo.sh
     steps:
       - uses: actions/checkout@v7
 
@@ -37,11 +53,12 @@ jobs:
           hadolint --version
 
       - name: shellcheck
-        run: shellcheck bin/aidock docker/init-firewall.sh docker/entrypoint.sh test/guard_test.sh test/entrypoint_test.sh test/action_pin_test.sh test/record_demo_test.sh test/sec18_denylist_e2e.sh test/sec18_denylist_test.sh test/lib/harness.sh docs/demo/record-demo.sh
+        # SHELL_FILES は意図的にクォートせず単語分割させる（ファイル一覧を展開するため）
+        run: shellcheck $SHELL_FILES
 
       - name: bash syntax check
         run: |
-          for f in bin/aidock docker/init-firewall.sh docker/entrypoint.sh test/guard_test.sh test/entrypoint_test.sh test/action_pin_test.sh test/record_demo_test.sh test/sec18_denylist_e2e.sh test/sec18_denylist_test.sh test/lib/harness.sh docs/demo/record-demo.sh; do
+          for f in $SHELL_FILES; do
               bash -n "$f"
           done
 

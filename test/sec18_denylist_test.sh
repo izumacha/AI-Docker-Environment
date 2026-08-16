@@ -100,9 +100,12 @@ fi
 if [ "$1" = "compose" ]; then
     # ビルドに渡された HOST_GID を記録する（意図した値が届いたかを表明で読む）
     printf 'HOST_GID=%s\n' "${HOST_GID-<unset>}" >> "${STUB_DOCKER_ENV_LOG}"
-    # ビルドログの中身を標準出力に出す（本体はこれをファイルへ落として照合する）
+    # ビルドログの中身は**標準エラー**へ出す。本物の BuildKit が `--progress=plain` の
+    # 進捗（Dockerfile の `>&2` による拒否メッセージを含む）を stderr に書くのと揃える。
+    # 標準出力にしてしまうと、本体側の `2>&1` を消しても全ケースが緑のままになり、
+    # 「拒否メッセージを一生拾えない e2e」が本テストをすり抜ける（レビューで実測）
     if [ -n "${STUB_BUILD_OUTPUT-}" ]; then
-        printf '%s\n' "${STUB_BUILD_OUTPUT}"
+        printf '%s\n' "${STUB_BUILD_OUTPUT}" >&2
     fi
     # 指定された終了コードで終わる（既定は「拒否されて失敗」）
     exit "${STUB_BUILD_STATUS:-1}"
@@ -245,7 +248,10 @@ export STUB_BUILD_OUTPUT
 run_script
 assert_status 1 "GID 取り違え: 非ゼロで終わる"
 assert_not_contains "SEC-18 ok" "GID 取り違え: 意図した GID でビルドされていない以上、合格にしない"
-assert_contains "HOST_GID=${FAKE_SHADOW_GID}" "GID 取り違え: 期待していた GID を診断に含める"
+# **期待した拒否メッセージ全体**で照合する。`HOST_GID=42` だけを探すと、経路によらず必ず出る
+# 「docker compose build exit (HOST_GID=42): 1」の行に当たってしまい、診断文を丸ごと消しても
+# 緑のままになる（レビューで実測）。ここで見たいのは「何を期待していたか」を操作者に示せているか
+assert_contains "docker build: HOST_GID=${FAKE_SHADOW_GID} ${DENYLIST_REJECTION_FRAGMENT} 'shadow'" "GID 取り違え: 期待していた拒否メッセージを診断に含める"
 
 # --- ケース 9: Dockerfile から拒否メッセージが消えている --------------------------------
 
