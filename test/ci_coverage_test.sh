@@ -96,35 +96,44 @@ ci_workflow_load "${CI_WORKFLOW}" "${TMP_DIR}/ci-commands" \
 # --- ci.yml から検査対象の一覧を読み出す -------------------------------------------
 
 # type-check ジョブの env にある `SHELL_FILES: >-` ブロックの中身を取り出す。
-# YAML の折りたたみブロックなので、キー行より深くインデントされた行が値の続き
+# **構造行の判定は共有ライブラリの `emit_structural_lines` に委ねる**（run: の取り出しと同じ扱い）。
+# 生の行を素で探すと、`run: |` の本文に同じ見た目の行（一覧を生成・表示するステップ等）があった場合に
+# そちらへ食い付き、本文を「ファイル一覧」として読んでしまう
 extract_shell_files() {
-    # awk でキー行を見つけ、そこから続くインデント行だけを拾う
-    awk '
-        # SHELL_FILES キーの行を見つけたら、そのインデント幅を覚えて収集モードに入る
-        /^[[:space:]]*SHELL_FILES:[[:space:]]*>-[[:space:]]*$/ {
-            match($0, /^[[:space:]]*/)
-            key_indent = RLENGTH
-            collecting = 1
-            next
+    # 構造行の一覧を控えるファイル
+    local structural_file="${TMP_DIR}/shell-files.structural"
+    # 構造行を書き出す（失敗したら抽出が成立しない）
+    emit_structural_lines "${CI_WORKFLOW}" > "${structural_file}" || return 1
+    # 構造行として現れた `SHELL_FILES: >-` の直後から、非構造行（＝ブロックの本文）を拾う
+    awk -v structural_file="${structural_file}" '
+        # 構造行の行番号を読み込む
+        BEGIN {
+            while ((getline entry < structural_file) > 0) {
+                colon = index(entry, ":")
+                if (colon > 0) { structural[substr(entry, 1, colon - 1) + 0] = 1 }
+            }
+            close(structural_file)
         }
-        # 収集モード中の処理
-        collecting {
-            # 空行は YAML の折りたたみブロックでは**段落の区切り**であってブロックの終わりではない。
-            # ここで打ち切ると一覧が途中で切れ、実際には載っているファイルを
-            # 「載っていない」と誤報する（しかも空にはならないので下の空判定にも掛からない）
-            if ($0 ~ /^[[:space:]]*$/) { next }
-            # 現在行のインデント幅を測る
-            match($0, /^[[:space:]]*/)
-            # キー行と同じかそれより浅くなったらブロックの外に出たので終了
-            if (RLENGTH <= key_indent) { exit }
-            # **空白で区切って 1 エントリずつ**出力する。折りたたみブロックは
-            # 最終的に 1 本の空白区切り文字列になり、消費側（`shellcheck $SHELL_FILES` と
+        {
+            # 構造行なら、ブロックの開始かどうかだけを見る
+            if (structural[NR]) {
+                # 別の構造行に出会った時点で、直前のブロック本文は終わっている
+                collecting = ($0 ~ /^[[:space:]]*SHELL_FILES:[[:space:]]*>-[[:space:]]*$/)
+                next
+            }
+            # 本文の収集中でなければ関係ない
+            if (!collecting) { next }
+            # **空白で区切って 1 エントリずつ**出力する。折りたたみブロックは最終的に
+            # 1 本の空白区切り文字列になり、消費側（`shellcheck $SHELL_FILES` と
             # `for f in $SHELL_FILES`）も空白で分割する。1 行 1 パスと決め打つと、
-            # 2 つを同じ行に書いた（消費側には何の影響も無い）だけで
-            # 「載っているファイルが載っていない」と誤報する（レビューで実測）
+            # 2 つを同じ行に書いた（消費側には何の影響も無い）だけで誤報する
             for (i = 1; i <= NF; i++) { print $i }
         }
     ' "${CI_WORKFLOW}"
+    # awk の終了コードを控えてから後始末する
+    local status=$?
+    rm -f "${structural_file}" || true
+    return "${status}"
 }
 
 # 抽出結果をファイルへ落としてから読む。`mapfile < <(…)` のプロセス置換だと
@@ -243,7 +252,7 @@ assert_ci() {
 
 # **一覧に載っていること**は、その一覧を読むステップが生きていて初めて意味を持つ。
 # 2 つの消費側を固定しないと、`shellcheck $SHELL_FILES` を
-# `shellcheck bin/aidock` に書き換えるだけで 11 本が誰にも lint されなくなるのに
+# `shellcheck bin/aidock` に書き換えるだけで一覧のほとんどが誰にも lint されなくなるのに
 # 本テストは緑のまま通る（レビューで実測）
 # 変数参照は `$SHELL_FILES` と `${SHELL_FILES}` のどちらの書き方でも同じ意味なので両方を認め、
 # **直後が識別子の文字でないこと**まで見る（`$SHELL_FILES_FAST` のような別変数に当たらないように）
@@ -255,7 +264,7 @@ SHELL_FILES_REF='[$][{]?SHELL_FILES[}]?([^[:alnum:]_]|$)'
 # リンタ本体は **同じコマンド行で** 一覧を受け取っていること（shellcheck の呼び出し）。
 # ステップ全体で「shellcheck がある」「SHELL_FILES がある」を別々に見ると、
 # `echo "list is $SHELL_FILES"` と `shellcheck bin/aidock` を並べただけで満たせてしまい、
-# 11 本が誰にも lint されないまま緑になる（レビューで実測）
+# 一覧のほとんどが誰にも lint されないまま緑になる（レビューで実測）
 assert_ci ci_workflow_line_matches \
     "リンタ網: shellcheck が SHELL_FILES を受け取って実行される" \
     "ci.yml に「shellcheck に SHELL_FILES そのものを渡して実行する」コマンドが無い。一覧に載せても lint されない" \

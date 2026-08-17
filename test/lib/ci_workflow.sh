@@ -29,7 +29,8 @@
 #
 # Usage:
 #   source "${SCRIPT_DIR}/lib/ci_workflow.sh"
-#   ci_workflow_load "<path to ci.yml>"   # dies via the caller's bail/exit on failure
+#   ci_workflow_load "<path to ci.yml>" "<scratch file>"   # returns non-zero on failure;
+#                                          the caller decides whether to bail
 #   ci_workflow_line_matches  <regex>...  # one command line matches all of them
 #   ci_workflow_step_matches  <regex>...  # one step matches all, across its lines
 #   ci_workflow_runs_script   <path>      # that step invokes the given script
@@ -113,11 +114,18 @@ emit_structural_lines() {
 # ci.yml を読み、実行される `run:` の中身をステップ番号付きで書き出す。
 # 第 1 引数がワークフローのパス、第 2 引数が出力先ファイル。
 #
-# **構造の判定は `emit_structural_lines` に委ねる**のが要点。ステップの区切り（`- ` 始まり）や
-# `if:` の検出を生の行に対して行うと、`run: |` の**本文**に書かれた `- 箇条書き` でステップを
-# 切ってしまい（実行されているスイートが「配線されていない」と誤報される）、本文中の
-# `if: false`（YAML を書き出す heredoc 等）でステップ全体が消える。ブロックスカラーの本文を
-# 構造と読み違えない判定は既にこのファイルの上にあるので、写しを作らずそれを使う（§6）
+# **構造の判定は `emit_structural_lines` に委ねる**のが要点。ステップの区切りや `if:` の検出を
+# 生の行に対して行うと、`run: |` の**本文**に書かれた `- 箇条書き` でステップを切ってしまい
+# （実行されているスイートが「配線されていない」と誤報される）、本文中の `if: false` で
+# ステップ全体が消える。ブロックスカラー本文を構造と読み違えない判定は上にあるので、それを使う。
+#
+# **ステップの区切りは字下げで決める。** 「`- ` で始まる構造行」を一律に区切りとすると、
+# `with:` / `args:` の下の `- --quiet` のような**入れ子の並び**でもステップが切れる。
+# そこで区切りが起きると、その手前で立てた `if: false` の印が新しい疑似ステップにリセットされ、
+# **止めたはずのステップが「実行されている」と読まれる**（レビューで実測）。
+# 同じ理由でジョブの境界も追う: ジョブ直下の `if:` / `continue-on-error:` はそのジョブの
+# 全ステップに掛かり、また**ジョブが変わる前に直前のステップを確定させない**と、
+# 次のジョブの無効化キーが前のジョブ最後のステップを取り消してしまう（同じくレビューで実測）
 ci_workflow_extract() {
     # 構造行の一覧（`行番号:内容`）を控えるファイル
     local structural_file="$2.structural"
@@ -133,6 +141,8 @@ ci_workflow_extract() {
                 if (colon > 0) { structural[substr(entry, 1, colon - 1) + 0] = 1 }
             }
             close(structural_file)
+            # まだどの入れ子にも入っていない状態を表す番兵
+            jobs_indent = -1; job_indent = -1; steps_indent = -1; step_dash_indent = -1
         }
 
         # コメント部分（行頭、または空白に続く # から行末まで）を落とす
@@ -142,14 +152,24 @@ ci_workflow_extract() {
 
         # 溜めた 1 ステップ分を、無効化されていなければ出力する
         function flush_step(   i) {
-            # 無効化されていないステップだけを「実行される」と数える
-            if (!disabled) {
+            # ステップ単位でもジョブ単位でも止められていなければ「実行される」と数える
+            if (!step_disabled && !job_disabled) {
                 for (i = 1; i <= ncmd; i++) { print step_id "\t" cmds[i] }
             }
             # 次のステップに備えて溜めた内容を捨てる
             for (i = 1; i <= ncmd; i++) { delete cmds[i] }
             ncmd = 0
-            disabled = 0
+            step_disabled = 0
+        }
+
+        # 無効化を表すキーかどうかを返す（コメント除去済みの行を渡すこと）
+        function is_disabling(t) {
+            # `if: false` は決して実行されない
+            if (t ~ /^[[:space:]]*-?[[:space:]]*if:[[:space:]]*(false|"false"|.\{\{[[:space:]]*false[[:space:]]*\}\})[[:space:]]*$/) { return 1 }
+            # `continue-on-error: true` は走るが失敗してもジョブを止めない＝ゲートにならない
+            if (t ~ /^[[:space:]]*-?[[:space:]]*continue-on-error:[[:space:]]*(true|"true")[[:space:]]*$/) { return 1 }
+            # それ以外は無効化ではない
+            return 0
         }
 
         {
@@ -157,39 +177,79 @@ ci_workflow_extract() {
             line = $0
             sub(/\r$/, "", line)
 
-            # 構造行の処理
-            if (structural[NR]) {
-                # 構造行が来た時点で、直前のブロックスカラー本文は終わっている
-                in_run = 0
-                # コメントを落としてから構造を判定する
-                # （`if: false  # 理由` のように理由を添えるのが最も自然な書き方なので、
-                #   コメント付きを取りこぼすと「止めたステップが動いている」ことになる）
-                probe = strip_comment(line)
-
-                # リスト項目の開始は新しいステップの始まり
-                if (probe ~ /^[[:space:]]*-[[:space:]]/) { flush_step(); step_id++ }
-
-                # `if: false` は決して実行されない
-                if (probe ~ /^[[:space:]]*-?[[:space:]]*if:[[:space:]]*(false|"false"|.\{\{[[:space:]]*false[[:space:]]*\}\})[[:space:]]*$/) { disabled = 1 }
-                # `continue-on-error: true` は走るが失敗してもジョブを止めない＝ゲートにならない
-                if (probe ~ /^[[:space:]]*-?[[:space:]]*continue-on-error:[[:space:]]*(true|"true")[[:space:]]*$/) { disabled = 1 }
-
-                # `run: |` / `run: >` のブロック開始。以降の非構造行が本体
-                if (probe ~ /^[[:space:]]*-?[[:space:]]*run:[[:space:]]*[|>]/) { in_run = 1; next }
-
-                # 1 行で書かれた `run: <command>`
-                if (probe ~ /^[[:space:]]*-?[[:space:]]*run:[[:space:]]*[^|>[:space:]]/) {
-                    text = probe
-                    sub(/^[[:space:]]*-?[[:space:]]*run:[[:space:]]*/, "", text)
-                    text = trim(text)
+            # 非構造行＝ブロックスカラーの本文。run: の本体のときだけコマンドとして拾う
+            if (!structural[NR]) {
+                if (in_run) {
+                    text = trim(strip_comment(line))
                     if (text != "") { cmds[++ncmd] = text }
                 }
                 next
             }
 
-            # 非構造行＝ブロックスカラーの本文。run: の本体のときだけコマンドとして拾う
-            if (in_run) {
-                text = trim(strip_comment(line))
+            # 構造行が来た時点で、直前のブロックスカラー本文は終わっている
+            in_run = 0
+            # コメントを落としてから構造を判定する
+            # （`if: false  # 理由` のように理由を添えるのが最も自然な書き方なので、
+            #   コメント付きを取りこぼすと「止めたステップが動いている」ことになる）
+            probe = strip_comment(line)
+            # 空になった行（コメントだけの行）は構造として扱わない
+            if (trim(probe) == "") { next }
+            # 字下げ幅を測る（入れ子の深さの判定に使う）
+            indent = match(probe, /[^[:space:]]/) - 1
+
+            # `jobs:` の位置を覚える
+            if (jobs_indent < 0 && probe ~ /^[[:space:]]*jobs:[[:space:]]*$/) { jobs_indent = indent; next }
+
+            # ジョブ名の行（`jobs:` より深く、かつ最初に見つけた深さと同じ）が新しいジョブの始まり
+            if (jobs_indent >= 0 && indent > jobs_indent && probe ~ /^[[:space:]]*[A-Za-z_][A-Za-z0-9_.-]*:[[:space:]]*$/ \
+                && (job_indent < 0 || indent == job_indent)) {
+                # **前のジョブの最後のステップをここで確定させる**（次のジョブの無効化キーを被せない）
+                flush_step()
+                job_indent = indent
+                job_disabled = 0
+                steps_indent = -1
+                step_dash_indent = -1
+                next
+            }
+
+            # `steps:` の位置を覚える（以降の同じ深さのダッシュがステップの区切り）
+            if (job_indent >= 0 && indent > job_indent && probe ~ /^[[:space:]]*steps:[[:space:]]*$/) {
+                steps_indent = indent
+                step_dash_indent = -1
+                next
+            }
+
+            # ステップの区切り（`steps:` の下で最初に現れたダッシュと**同じ字下げ**のダッシュ）
+            if (steps_indent >= 0 && probe ~ /^[[:space:]]*-[[:space:]]/) {
+                # 最初のダッシュの字下げを、このジョブのステップの基準にする
+                if (step_dash_indent < 0) { step_dash_indent = indent }
+                # 基準と同じ深さのときだけ新しいステップとして扱う（入れ子の並びでは切らない）
+                if (indent == step_dash_indent) { flush_step(); step_id++ }
+            }
+
+            # 無効化キーの扱いは、ステップの中かジョブ直下かで宛先が変わる
+            if (is_disabling(probe)) {
+                # ステップの中（基準のダッシュ以上の深さ）ならそのステップだけを止める
+                if (step_dash_indent >= 0 && indent >= step_dash_indent) {
+                    step_disabled = 1
+                } else {
+                    # ジョブ直下ならそのジョブの全ステップが対象
+                    job_disabled = 1
+                }
+                next
+            }
+
+            # ここから先は run: の取り出し。ステップの中でなければ関係ない
+            if (step_dash_indent < 0) { next }
+
+            # `run: |` / `run: >` のブロック開始。以降の非構造行が本体
+            if (probe ~ /^[[:space:]]*-?[[:space:]]*run:[[:space:]]*[|>]/) { in_run = 1; next }
+
+            # 1 行で書かれた `run: <command>`
+            if (probe ~ /^[[:space:]]*-?[[:space:]]*run:[[:space:]]*[^|>[:space:]]/) {
+                text = probe
+                sub(/^[[:space:]]*-?[[:space:]]*run:[[:space:]]*/, "", text)
+                text = trim(text)
                 if (text != "") { cmds[++ncmd] = text }
             }
         }

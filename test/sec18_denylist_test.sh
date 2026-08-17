@@ -47,7 +47,9 @@ TARGET_SCRIPT="${REPO_ROOT}/test/sec18_denylist_e2e.sh"
 # テスト全体で使う一時ディレクトリ（スタブと擬似リポジトリを置く）
 TEST_TMP="$(mktemp -d)"
 # テスト終了時に一時ディレクトリを必ず片付ける
-trap 'rm -rf "${TEST_TMP}"' EXIT
+# **素の `rm` にしない**: EXIT トラップの本体も `set -e` の対象で、削除に失敗すると
+# その終了コードが**成功した実行を乗っ取り**、1 件も失敗していないのに赤くなる
+trap 'rm -rf "${TEST_TMP}" || true' EXIT
 
 # 共有のカウンタ・アサーション群（書き写しを増やさないため lib へ切り出してある）
 # shellcheck source=test/lib/harness.sh
