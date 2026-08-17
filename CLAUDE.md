@@ -57,7 +57,9 @@
 ├── test/entrypoint_test.sh # entrypoint.sh の SEC-13 二重キーテスト（CI から実行）
 ├── test/action_pin_test.sh # action ピンとマーカーの一致検証（FR-9.6(b) / CI から実行）
 ├── test/record_demo_test.sh # デモ録画スクリプトの fail-closed 契約テスト（CI から実行）
-├── test/lib/harness.sh     # テスト共通のカウンタ・アサーション（現状は record_demo_test.sh のみ source。既存 3 スイートの移行は別 PR）
+├── test/sec18_denylist_e2e.sh  # SEC-18 機密 GID デニーリストの回帰検査（e2e ジョブから実行）
+├── test/sec18_denylist_test.sh # 上の判定契約のハーメティックなテスト（CI から実行）
+├── test/lib/harness.sh     # テスト共通のカウンタ・アサーション（record_demo_test.sh と sec18_denylist_test.sh が source。既存 3 スイートの移行は別 PR）
 ├── .github/workflows/      # ci.yml（型チェック＋e2e）/ post-ci-verify.yml（Claude Code Action）
 ├── compose.yaml            # サービス定義 + セキュリティオプション
 ├── docs/requirements.md    # 要件定義書（正本 / Source of Truth）
