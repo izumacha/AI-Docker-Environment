@@ -100,20 +100,10 @@ ci_workflow_load "${CI_WORKFLOW}" "${TMP_DIR}/ci-commands" \
 # 生の行を素で探すと、`run: |` の本文に同じ見た目の行（一覧を生成・表示するステップ等）があった場合に
 # そちらへ食い付き、本文を「ファイル一覧」として読んでしまう
 extract_shell_files() {
-    # 構造行の一覧を控えるファイル
-    local structural_file="${TMP_DIR}/shell-files.structural"
-    # 構造行を書き出す（失敗したら抽出が成立しない）
-    emit_structural_lines "${CI_WORKFLOW}" > "${structural_file}" || return 1
-    # 構造行として現れた `SHELL_FILES: >-` の直後から、非構造行（＝ブロックの本文）を拾う
-    awk -v structural_file="${structural_file}" '
-        # 構造行の行番号を読み込む
-        BEGIN {
-            while ((getline entry < structural_file) > 0) {
-                colon = index(entry, ":")
-                if (colon > 0) { structural[substr(entry, 1, colon - 1) + 0] = 1 }
-            }
-            close(structural_file)
-        }
+    # 構造行の表の用意・後始末は共有ヘルパーに任せ、ここは解析だけを書く。
+    # awk のプログラムはシェルに展開させてはいけないので単一引用符で渡す
+    # shellcheck disable=SC2016
+    ci_workflow_run_with_structure "${CI_WORKFLOW}" "${TMP_DIR}/shell-files" '
         {
             # 構造行なら、ブロックの開始かどうかだけを見る
             if (structural[NR]) {
@@ -129,11 +119,7 @@ extract_shell_files() {
             # 2 つを同じ行に書いた（消費側には何の影響も無い）だけで誤報する
             for (i = 1; i <= NF; i++) { print $i }
         }
-    ' "${CI_WORKFLOW}"
-    # awk の終了コードを控えてから後始末する
-    local status=$?
-    rm -f "${structural_file}" || true
-    return "${status}"
+    '
 }
 
 # 抽出結果をファイルへ落としてから読む。`mapfile < <(…)` のプロセス置換だと

@@ -111,6 +111,39 @@ emit_structural_lines() {
         }
     ' "$path"
 }
+# 構造行の表を用意したうえで、渡した awk プログラムをワークフローに対して実行する。
+# 第 1 引数がワークフロー、第 2 引数が一時ファイルの土台、第 3 引数が awk プログラム本体。
+#
+# **表の読み込みと後始末をここだけに持つ**のが要点。同じ 6 行の `getline` 断片と
+# 「構造行を書き出す → awk → 終了コードを控える → 消す」の型を各所へ書き写すと、
+# `emit_structural_lines` の出力形式を変えたときに片方だけが古くなり、
+# 表が空のまま「該当なし」という**静かに誤った答え**を返す（本ライブラリを切り出した理由と同じ）。
+# awk は BEGIN ブロックを複数持てるので、呼び出し側は自分の初期化を別の BEGIN に書けばよい
+ci_workflow_run_with_structure() {
+    # 引数を受け取る
+    local workflow="$1" scratch="$2" program="$3"
+    # 構造行の一覧を控えるファイル
+    local structural_file="${scratch}.structural"
+    # 構造行を書き出す。失敗したら以降の解析が成立しない
+    emit_structural_lines "${workflow}" > "${structural_file}" || return 1
+    # 構造行の表を BEGIN で読み込んでから、呼び出し側のプログラムを続ける
+    awk -v structural_file="${structural_file}" '
+        BEGIN {
+            while ((getline entry < structural_file) > 0) {
+                colon = index(entry, ":")
+                if (colon > 0) { structural[substr(entry, 1, colon - 1) + 0] = 1 }
+            }
+            close(structural_file)
+        }
+    '"${program}" "${workflow}"
+    # awk の終了コードを控える（後始末で上書きされないように）
+    local status=$?
+    # 中間ファイルを片付ける（失敗しても終了コードは変えない）
+    rm -f "${structural_file}" || true
+    # awk の結果をそのまま返す
+    return "${status}"
+}
+
 # ci.yml を読み、実行される `run:` の中身をステップ番号付きで書き出す。
 # 第 1 引数がワークフローのパス、第 2 引数が出力先ファイル。
 #
@@ -127,23 +160,19 @@ emit_structural_lines() {
 # 全ステップに掛かり、また**ジョブが変わる前に直前のステップを確定させない**と、
 # 次のジョブの無効化キーが前のジョブ最後のステップを取り消してしまう（同じくレビューで実測）
 ci_workflow_extract() {
-    # 構造行の一覧（`行番号:内容`）を控えるファイル
-    local structural_file="$2.structural"
-    # 構造行を書き出す。失敗したら以降の解析が成立しない
-    emit_structural_lines "$1" > "${structural_file}" || return 1
+    # 中間ファイルの置き場は出力先とは別の名前にする（読み書きが同じファイルに見えないように）
+    local scratch="$2.extract"
+    # 構造行の表の用意・後始末は共有ヘルパーに任せ、ここは解析だけを書く。
+    # awk のプログラムはシェルに展開させてはいけないので単一引用符で渡す
+    # shellcheck disable=SC2016
+    ci_workflow_run_with_structure "$1" "${scratch}" '
 
-    # 構造行の集合を手掛かりに、実行される run: の中身だけを取り出す
-    awk -v structural_file="${structural_file}" '
-        # 構造行の行番号を読み込んでおく（ここに無い行はブロックスカラーの本文）
-        BEGIN {
-            while ((getline entry < structural_file) > 0) {
-                colon = index(entry, ":")
-                if (colon > 0) { structural[substr(entry, 1, colon - 1) + 0] = 1 }
-            }
-            close(structural_file)
-            # まだどの入れ子にも入っていない状態を表す番兵
-            jobs_indent = -1; job_indent = -1; steps_indent = -1; step_dash_indent = -1
-        }
+        # 構造行の表（structural[行番号]）は ci_workflow_run_with_structure が用意する。
+        # 入れ子の深さを覚える変数は **-1（まだどこにも入っていない）で始める**必要がある。
+        # awk の未初期化変数は 0 なので、初期化を落とすと `step_dash_indent` が 0 と読まれ、
+        # ジョブ直下の `continue-on-error:` までステップ内のキーとして扱われ、
+        # ジョブ単位の無効化が効かなくなる（この初期化を落として実測した）
+        BEGIN { jobs_indent = -1; job_indent = -1; steps_indent = -1; step_dash_indent = -1 }
 
         # コメント部分（行頭、または空白に続く # から行末まで）を落とす
         function strip_comment(t) { sub(/(^|[[:space:]])#.*$/, "", t); return t }
@@ -162,12 +191,20 @@ ci_workflow_extract() {
             step_disabled = 0
         }
 
-        # 無効化を表すキーかどうかを返す（コメント除去済みの行を渡すこと）
-        function is_disabling(t) {
+        # 無効化を表すキーかどうかを返す（コメント除去済みの行を渡すこと）。
+        # **引用符と大文字小文字を先に正規化する**のが要点。YAML は引用符付きの偽を
+        # 素の `if: false` と同じスカラーとして読み、GitHub Actions は `FALSE` / `False` も
+        # 偽として評価する。素の綴りだけを見ると、**止めたステップが「実行されている」と読まれる**
+        # ——本ライブラリが塞ぐと宣言している当の穴が、引用符 2 つで開く（レビューで実測）
+        function is_disabling(t,   probe) {
+            # 引用符を落とし、小文字に揃えた写しで判定する
+            probe = t
+            gsub(/["\047]/, "", probe)
+            probe = tolower(probe)
             # `if: false` は決して実行されない
-            if (t ~ /^[[:space:]]*-?[[:space:]]*if:[[:space:]]*(false|"false"|.\{\{[[:space:]]*false[[:space:]]*\}\})[[:space:]]*$/) { return 1 }
+            if (probe ~ /^[[:space:]]*-?[[:space:]]*if:[[:space:]]*(false|.\{\{[[:space:]]*false[[:space:]]*\}\})[[:space:]]*$/) { return 1 }
             # `continue-on-error: true` は走るが失敗してもジョブを止めない＝ゲートにならない
-            if (t ~ /^[[:space:]]*-?[[:space:]]*continue-on-error:[[:space:]]*(true|"true")[[:space:]]*$/) { return 1 }
+            if (probe ~ /^[[:space:]]*-?[[:space:]]*continue-on-error:[[:space:]]*true[[:space:]]*$/) { return 1 }
             # それ以外は無効化ではない
             return 0
         }
@@ -255,13 +292,7 @@ ci_workflow_extract() {
         }
         # 最後のステップを取りこぼさない
         END { flush_step() }
-    ' "$1" > "$2"
-    # awk の終了コードを控える（後始末で上書きされないように）
-    local status=$?
-    # 中間ファイルを片付ける（失敗しても終了コードは変えない）
-    rm -f "${structural_file}" || true
-    # awk の結果をそのまま返す
-    return "${status}"
+    ' > "$2"
 }
 
 # ワークフローを読み込んで以降の照会に備える。第 1 引数がワークフロー、第 2 引数が一時ファイル。
@@ -351,6 +382,11 @@ ci_workflow_runs_script() {
     escaped="$(ci_workflow_regex_escape "$1")"
     # コマンドの開始位置は、行頭か、`;` `&` `|` `(` のいずれかの直後。
     # そこから任意で `bash`（オプション付き可）を挟み、引用符と `./` を許してパスに一致させる。
-    # 末尾は空白・`;`・行末のいずれかで区切られていること（`…_test.sh.bak` に当てないため）
-    ci_workflow_line_matches "(^|[;&|(])[[:space:]]*(bash([[:space:]]+-[^[:space:]]+)*[[:space:]]+)?[\"']?(\./)?${escaped}[\"']?([[:space:]]|;|\$)"
+    # 末尾は空白・`;`・行末のいずれかで区切られていること（`…_test.sh.bak` に当てないため）。
+    #
+    # **オプションに `n` を含むものは受け付けない。** `bash -n <path>` は構文を見るだけで
+    # **実行しない**——同じジョブの隣のステップが `bash -n "$f"` なので取り違えは起こりやすく、
+    # 取り違えたままだとそのスイートの表明が全部黙る。`n` を含む綴り（`-n` / `-nx` / `--noexec`）は
+    # 「実行した証拠にならない」側へ倒す（判定できないものを合格にしない）
+    ci_workflow_line_matches "(^|[;&|(])[[:space:]]*(bash([[:space:]]+-[^[:space:]n]+)*[[:space:]]+)?[\"']?(\./)?${escaped}[\"']?([[:space:]]|;|\$)"
 }
