@@ -405,13 +405,26 @@ ci_workflow_runs_script() {
     # `-n` / `-nx` は構文を見るだけで実行しない。長いオプション（`--norc` 等）は許すが、
     # `--noexec` は下で別に弾く（`n` を含む長オプションを一律に拒むと `--norc` が誤って赤くなる）
     local option='(--[a-zA-Z0-9][a-zA-Z0-9-]*|-[a-mo-zA-MO-Z0-9]+)'
-    # コマンドの開始位置は行頭か `;` `&` `|` `(` の直後。環境変数の前置きは読み飛ばす
-    local invocation="(^|[;&|(])[[:space:]]*([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*(bash([[:space:]]+${option})*[[:space:]]+)?[\"']?(\./)?${escaped}[\"']?([[:space:]]|;|\$)"
-    # 呼び出しの直後で失敗が握り潰される形（`|| …` / 単独の `&`）
-    local neutralised="${escaped}[\"']?[[:space:]]*(\|\||&([^&]|\$))"
+    # コマンドの開始位置は行頭か `;` `&` `|` `(` の直後。環境変数の前置きは読み飛ばす。
+    # **前置きの語も許す**: `timeout 300 bash x` / `if ! bash x` / `sudo bash x` は
+    # どれも普通にゲートとして働く書き方で、行頭しか認めないと「どこからも呼ばれていない」と
+    # 事実と逆の診断で赤くなる（この repo の e2e も `timeout 5 bash -c …` を使っている）。
+    # 許すのは制御構文と実行ラッパだけ——`echo` / `ls` を許すと言及が実行に化ける
+    local wrapper='(!|if|then|else|elif|do|while|until|sudo|env|nice|timeout|command|exec)'
+    local prefix="(${wrapper}[[:space:]]+|[0-9]+[smhd]?[[:space:]]+|[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*"
+    local invocation="(^|[;&|(])[[:space:]]*${prefix}(bash([[:space:]]+${option})*[[:space:]]+)?[\"']?(\./)?${escaped}[\"']?([[:space:]]|;|\$)"
+    # 呼び出しの直後がパイプだけの形（pipefail があれば救われる）
+    local piped="${escaped}[\"']?[[:space:]]*\|[^|]"
+    # 呼び出しの直後で失敗が握り潰される形（`|| …` / 単独の `&` / パイプ）。
+    # **パイプも数える**: Actions の既定シェルは `bash -e {0}` で `pipefail` が無いため、
+    # `bash test/x_test.sh | tee log` はスイートが落ちてもステップは 0 で終わる——
+    # `|| true` と同じ「走るが止めない」形が縦棒 1 本で作れる（レビューで実測）
+    local neutralised="${escaped}[\"']?[[:space:]]*(\|\||\|[^|]|\|\$|&([^&]|\$))"
 
     # `set +e` を含むステップは、そのステップ全体で失敗が job に伝わらない
     local -A lax_steps=()
+    # `set -o pipefail` を含むステップは、パイプ越しでも失敗が伝わる
+    local -A pipefail_steps=()
     local record step text
     while IFS= read -r record; do
         # ステップ番号とコマンド本文に分ける
@@ -419,6 +432,8 @@ ci_workflow_runs_script() {
         text="${record#*$'\t'}"
         # エラー終了の抑止を見つけたら、そのステップに印を付ける
         [[ "${text}" =~ (^|[[:space:]\;])set[[:space:]]+\+e ]] && lax_steps["${step}"]=1
+        # `pipefail` を立てているステップでは、パイプでも失敗が伝わる
+        [[ "${text}" =~ (^|[[:space:]\;])set[[:space:]]+-[a-z]*o[[:space:]]+pipefail ]] && pipefail_steps["${step}"]=1
     done < "${CI_WORKFLOW_COMMANDS}"
 
     # 1 行ずつ、実行と言えるかを判定する
@@ -432,8 +447,13 @@ ci_workflow_runs_script() {
         [[ "${text}" =~ $invocation ]] || continue
         # `--noexec` は構文を見るだけなので実行の証拠にならない
         [[ "${text}" =~ (^|[[:space:]])--noexec([[:space:]]|$) ]] && continue
-        # 直後で失敗が握り潰されていれば、ゲートとして働いていない
-        [[ "${text}" =~ $neutralised ]] && continue
+        # 直後で失敗が握り潰されていれば、ゲートとして働いていない。
+        # ただし `pipefail` を立てたステップならパイプ越しでも失敗は伝わる
+        if [[ "${text}" =~ $neutralised ]]; then
+            # パイプ以外（`||` や `&`）は pipefail では救われないので、常に対象外
+            [[ -n "${pipefail_steps[${step}]-}" ]] || continue
+            [[ "${text}" =~ $piped ]] || continue
+        fi
         # ここまで来れば「実行され、その結果が job の合否に効く」と言える
         return 0
     done < "${CI_WORKFLOW_COMMANDS}"
