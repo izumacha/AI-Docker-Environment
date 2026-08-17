@@ -89,28 +89,32 @@ CI_ACTIVE="$(grep -v '^[[:space:]]*#' "${CI_WORKFLOW}")"
 # 実行される行が 1 行も残らなければ、コメント除去か読み込みが壊れている
 [ -n "${CI_ACTIVE}" ] || bail "no non-comment lines remain in ${CI_WORKFLOW}; this test cannot verify wiring"
 
-# ci.yml の「実行される部分」に指定の文字列が現れるかを返す
-ci_active_contains() {
-    # 部分一致で探す（見つかれば成功）
-    case "${CI_ACTIVE}" in
-        *"$1"*) return 0 ;;
-    esac
-    # 見つからなければ失敗
-    return 1
+# 文字列を拡張正規表現のリテラルとして扱えるようにエスケープする
+# （パス中の `.` が任意の 1 文字として働くと、別名のファイルに当たってしまう）
+regex_escape() {
+    # 英数字・`_`・`-`・`/` 以外の文字の前にバックスラッシュを置く
+    printf '%s' "$1" | sed 's|[^[:alnum:]_/-]|\\&|g'
+}
+
+# ci.yml の「実行される部分」が指定の拡張正規表現に一致するかを返す
+ci_active_matches() {
+    # 行単位で探す（見つかれば成功）
+    printf '%s\n' "${CI_ACTIVE}" | grep -Eq -- "$1"
 }
 
 # 「ci.yml に この記述がある」ことを 1 ケースとして数える共通ヘルパー。
-# 第 1 引数が探す記述、第 2 引数がケース名、第 3 引数が失敗時の診断
+# 第 1 引数が探す拡張正規表現、第 2 引数がケース名、第 3 引数が失敗時の診断。
+#
+# **部分一致ではなく語境界まで見る**のが要点。素の部分一致だと
+# `shellcheck $SHELL_FILES` の探索が `shellcheck $SHELL_FILES_FAST` にも当たり、
+# 一覧の一部しか lint していない状態を「配線されている」と読む（レビューで実測）
 assert_ci_wires() {
     # 実行される行の中に見つかれば成功として数える
-    if ci_active_contains "$1"; then
+    if ci_active_matches "$1"; then
         report 0 "$2"
     else
-        # report が出力する診断はこのケース固有の内容に差し替える
-        # （前のケースの残りを表示すると、無関係なファイルを直すよう読者を誘導する）
-        LAST_STATUS=1
-        LAST_OUTPUT="$3"
-        report 1 "$2"
+        # 診断はこのケース固有の内容にする（共通ヘルパーは lib/harness.sh 側）
+        report_fail "$2" "$3"
     fi
 }
 
@@ -138,9 +142,12 @@ extract_shell_files() {
             match($0, /^[[:space:]]*/)
             # キー行と同じかそれより浅くなったらブロックの外に出たので終了
             if (RLENGTH <= key_indent) { exit }
-            # 前後の空白を落として 1 エントリとして出力する
-            gsub(/^[[:space:]]+|[[:space:]]+$/, "")
-            print
+            # **空白で区切って 1 エントリずつ**出力する。折りたたみブロックは
+            # 最終的に 1 本の空白区切り文字列になり、消費側（`shellcheck $SHELL_FILES` と
+            # `for f in $SHELL_FILES`）も空白で分割する。1 行 1 パスと決め打つと、
+            # 2 つを同じ行に書いた（消費側には何の影響も無い）だけで
+            # 「載っているファイルが載っていない」と誤報する（レビューで実測）
+            for (i = 1; i <= NF; i++) { print $i }
         }
     ' "${CI_WORKFLOW}"
 }
@@ -163,8 +170,20 @@ discovered_scripts=()
 # 8 進エスケープ付きのダブルクォートで囲んで出すため（core.quotePath の既定は true）、
 # 日本語を含むファイル名が「実体の無いパス」に化けて静かに検査対象から落ちる。
 # 本リポジトリはドキュメントも識別子も日本語なので、これは十分に起こりうる（レビューで実測）。
-# また **変数へ溜めずに直接読む**: NUL を含む出力をコマンド置換に通すと
-# bash が「ignored null byte in input」を警告する
+#
+# **いったんファイルへ落としてから読む**のには 2 つの理由がある。(1) NUL を含む出力を
+# コマンド置換へ通すと bash が「ignored null byte in input」を警告して CI ログを汚す。
+# (2) `< <(git …)` のプロセス置換だと **git の終了コードを誰も見ない**。索引の読み取り
+# エラーやロック競合で一覧を途中まで出して失敗した場合、残りのスクリプトは
+# 「発見されなかった」＝暗黙に合格となる——issue #94 の `docker … | cut` と同じ形を
+# このスイート自身が持つことになる（レビューで指摘）
+tracked_list="$(mktemp)" || bail "could not create a temporary file for the tracked-file list"
+# どの経路で終わっても一時ファイルを残さない
+trap 'rm -f "${tracked_list}"' EXIT
+# 一覧を書き出し、**git 自身の終了コードを確かめる**
+git -C "${REPO_ROOT}" -c core.quotePath=false ls-files -z > "${tracked_list}" \
+    || bail "\`git ls-files\` failed in ${REPO_ROOT}; the committed file list is incomplete and coverage cannot be verified"
+
 while IFS= read -r -d '' path; do
     # 空のエントリは読み飛ばす
     [ -n "${path}" ] || continue
@@ -203,7 +222,7 @@ while IFS= read -r -d '' path; do
             break
         fi
     done
-done < <(git -C "${REPO_ROOT}" -c core.quotePath=false ls-files -z)
+done < "${tracked_list}"
 
 # 発見数が 0 なら列挙のロジックが壊れている（本リポジトリには必ずシェルスクリプトがある）
 [ "${#discovered_scripts[@]}" -gt 0 ] \
@@ -231,12 +250,15 @@ array_contains() {
 # 2 つの消費側を固定しないと、`shellcheck $SHELL_FILES` を
 # `shellcheck bin/aidock` に書き換えるだけで 11 本が誰にも lint されなくなるのに
 # 本テストは緑のまま通る（レビューで実測）
-assert_ci_wires "shellcheck \$SHELL_FILES" \
+# 変数参照は `$SHELL_FILES` と `${SHELL_FILES}` のどちらの書き方でも同じ意味なので両方を認め、
+# **直後が識別子の文字でないこと**まで見る（`$SHELL_FILES_FAST` のような別変数に当たらないように）
+SHELL_FILES_REF='[$]\{?SHELL_FILES\}?([^[:alnum:]_]|$)'
+assert_ci_wires "shellcheck +${SHELL_FILES_REF}" \
     "リンタ網: shellcheck ステップが SHELL_FILES を参照している" \
-    "ci.yml の shellcheck ステップが \$SHELL_FILES を読んでいない（一覧に載せても lint されない）"
-assert_ci_wires "for f in \$SHELL_FILES" \
+    "ci.yml の shellcheck ステップが SHELL_FILES そのもの（部分一致する別名ではなく）を読んでいない。一覧に載せても lint されない"
+assert_ci_wires "for +f +in +${SHELL_FILES_REF}" \
     "リンタ網: bash -n ステップが SHELL_FILES を参照している" \
-    "ci.yml の bash -n ステップが \$SHELL_FILES を読んでいない（一覧に載せても構文チェックされない）"
+    "ci.yml の bash -n ステップが SHELL_FILES そのもの（部分一致する別名ではなく）を読んでいない。一覧に載せても構文チェックされない"
 
 # --- ケース 2: すべてのシェルスクリプトがリンタの一覧に載っている -----------------------
 
@@ -246,10 +268,9 @@ for script in "${discovered_scripts[@]}"; do
     if array_contains "${script}" "${shell_files[@]}"; then
         report 0 "リンタ網: ${script} が ci.yml の SHELL_FILES に載っている"
     else
-        # 直近の実行情報は使わないので、診断に必要な内容を明示的に入れておく
-        LAST_STATUS=1
-        LAST_OUTPUT="${script} は shellcheck / bash -n のどちらからも見られていない（ci.yml の SHELL_FILES へ追加すること）"
-        report 1 "リンタ網: ${script} が ci.yml の SHELL_FILES に載っている"
+        # 診断はこのケース固有の内容にする（共通ヘルパーは lib/harness.sh 側）
+        report_fail "リンタ網: ${script} が ci.yml の SHELL_FILES に載っている" \
+            "${script} は shellcheck / bash -n のどちらからも見られていない（ci.yml の SHELL_FILES へ追加すること）"
     fi
 done
 
@@ -262,25 +283,30 @@ for listed in "${shell_files[@]}"; do
     if [ -f "${REPO_ROOT}/${listed}" ]; then
         report 0 "リンタ網: SHELL_FILES の ${listed} が実在する"
     else
-        LAST_STATUS=1
-        LAST_OUTPUT="${listed} は ci.yml の SHELL_FILES に載っているがリポジトリに存在しない（削除・改名の追随漏れ）"
-        report 1 "リンタ網: SHELL_FILES の ${listed} が実在する"
+        report_fail "リンタ網: SHELL_FILES の ${listed} が実在する" \
+            "${listed} は ci.yml の SHELL_FILES に載っているがリポジトリに存在しない（削除・改名の追随漏れ）"
     fi
 done
 
 # --- ケース 4: すべてのテストスイートが CI から実行されている ---------------------------
 
-# test/ 直下の *_test.sh を「CI が走らせるべきスイート」とみなす。
+# `test/` 配下の *_test.sh を「CI が走らせるべきスイート」とみなす。
 # 命名規約に沿ったファイルだけを対象にするので、ヘルパー（lib/harness.sh）や
-# e2e 本体（sec18_denylist_e2e.sh）は含まれない
+# e2e 本体（sec18_denylist_e2e.sh）は含まれない。
+#
+# **下位ディレクトリも対象に含める。** `[[ ]]` のパターンでは `*` が `/` も跨ぐので
+# `test/e2e/foo_test.sh` もここに入る。当初これを「test/ 直下だけ」に狭めたが、
+# それでは `test/e2e/` に置いたスイートが配線されないまま緑で通り、
+# **本テストが塞いだはずの穴が 1 階層深いところに開き直る**（レビューで実測）。
+# 契約の側を広げるのが正しく、要件（FR-8.1）もそれに合わせてある
 for script in "${discovered_scripts[@]}"; do
-    # `*` は `[[ ]]` のパターンでは `/` も跨ぐため、**下位ディレクトリを明示的に除く**。
-    # 除かないと test/lib/ に置いたヘルパー的なスイートまで対象になり、
-    # コメントと要件（「test/ 直下」）に書いた契約とコードが食い違う
-    [[ "${script}" == test/*_test.sh && "${script}" != test/*/* ]] || continue
+    # 命名規約 `*_test.sh` に沿わないファイルは対象外
+    [[ "${script}" == test/*_test.sh ]] || continue
     # ci.yml が `bash <path>` の形で**実行される行として**呼んでいることを確かめる。
-    # 置いただけで呼ばれないスイートは「常に緑」と見分けが付かない
-    assert_ci_wires "bash ${script}" \
+    # 置いただけで呼ばれないスイートは「常に緑」と見分けが付かない。
+    # パスは正規表現リテラルとしてエスケープし、直後が空白か行末であることまで見る
+    # （`bash test/foo_test.sh` の探索が `bash test/foo_test.sh.bak` に当たらないように）
+    assert_ci_wires "(^|[[:space:]])bash +$(regex_escape "${script}")([[:space:]]|\$)" \
         "実行網: ${script} が ci.yml から実行されている" \
         "${script} は ci.yml のどの実行ステップからも呼ばれていない（コメントアウトされた行は数えない）"
 done
