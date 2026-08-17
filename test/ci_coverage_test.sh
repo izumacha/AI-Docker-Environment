@@ -101,9 +101,13 @@ ci_workflow_load "${CI_WORKFLOW}" "${TMP_DIR}/ci-commands" \
 # そちらへ食い付き、本文を「ファイル一覧」として読んでしまう
 extract_shell_files() {
     # 構造行の表の用意・後始末は共有ヘルパーに任せ、ここは解析だけを書く。
+    # 中間ファイルの土台は**この関数の出力先とは別の名前**にする（呼び出し側は
+    # `> "${TMP_DIR}/shell-files"` へ書くので、同じ名前を渡すとヘルパーの一時ファイルと
+    # territory が重なる。今は `.structural` を足すだけなので実害は無いが、
+    # ヘルパーが土台そのものに触る実装へ変わった時に静かに壊れる）。
     # awk のプログラムはシェルに展開させてはいけないので単一引用符で渡す
     # shellcheck disable=SC2016
-    ci_workflow_run_with_structure "${CI_WORKFLOW}" "${TMP_DIR}/shell-files" '
+    ci_workflow_run_with_structure "${CI_WORKFLOW}" "${TMP_DIR}/shell-files.extract" '
         {
             # 構造行なら、ブロックの開始かどうかだけを見る
             if (structural[NR]) {

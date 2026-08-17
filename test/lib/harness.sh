@@ -98,7 +98,7 @@ assert_file_contains() {
     # 呼び出し側で毎回 `[ -n "…" ]` を書く運用にすると、書き忘れた 1 か所が静かに緑になる
     # （このリポジトリが繰り返し踏んだ「不在＝合格」）ので、ここで 1 回だけ止める
     if [[ -z "$2" ]]; then
-        report 1 "$3"
+        report_fail "$3" "検査できませんでした: 探す文字列が空です（抽出が空を返した可能性）"
         return
     fi
     # **複数行の needle も拒否する**: grep -F は改行を「候補の区切り」として扱うため、
@@ -106,14 +106,14 @@ assert_file_contains() {
     # 全部揃っていなくても緑になる（当たってほしい文字列が消えたことに気付けない）。
     # 1 行に絞るのは呼び出し側の責任なので、崩れたら検査できなかったものとして失敗させる
     if [[ "$2" == *$'\n'* ]]; then
-        report 1 "$3"
+        report_fail "$3" "検査できませんでした: 探す文字列が複数行です（1 行に絞るのは呼び出し側の責任）"
         return
     fi
     # 固定文字列として探す（見つからない・ファイルが無い、いずれも失敗側に倒れる）
     if grep -qF -- "$2" "$1" 2> /dev/null; then
         report 0 "$3"
     else
-        report 1 "$3"
+        report_fail "$3" "${1} に \"${2}\" が含まれていません（ファイルが無い・読めない場合もここに来ます）"
     fi
 }
 
@@ -127,7 +127,7 @@ assert_file_not_contains() {
     # 通常ファイルであることをまず要求する（姉妹の assert_file_ascii / assert_file_empty と同じ理由）。
     # -r だけでは足りない: 読めるディレクトリは -r を満たしつつ grep を 2 で失敗させる
     if [[ ! -f "$1" ]]; then
-        report 1 "$3"
+        report_fail "$3" "検査できませんでした: ${1} が通常ファイルとして存在しません"
         return
     fi
     # 終了コードを捨てずに受け取る。**`|| 代入` の形にする**のは、呼び出し元が `set -e` の
@@ -138,7 +138,7 @@ assert_file_not_contains() {
     if [[ "${grep_status}" -eq 1 ]]; then
         report 0 "$3"
     else
-        report 1 "$3"
+        report_fail "$3" "${1} に \"${2}\" が含まれています（grep 終了コード ${grep_status}。2 以上は検査自体の失敗）"
     fi
 }
 
@@ -151,7 +151,7 @@ assert_file_not_contains() {
 assert_file_ascii() {
     # ファイルが無ければ検査不能なので失敗にする
     if [[ ! -f "$1" ]]; then
-        report 1 "$2"
+        report_fail "$2" "検査できませんでした: ${1} が通常ファイルとして存在しません"
         return
     fi
     # 0x00-0x7F（ASCII）を削除した残りを取り出す。非 ASCII バイトがあればここに残る
@@ -161,7 +161,7 @@ assert_file_ascii() {
     if [[ -z "${non_ascii}" ]]; then
         report 0 "$2"
     else
-        report 1 "$2"
+        report_fail "$2" "${1} に ASCII 以外のバイトが含まれています"
     fi
 }
 
@@ -171,14 +171,14 @@ assert_file_ascii() {
 assert_file_empty() {
     # ファイルが無ければ検査不能なので失敗にする
     if [[ ! -f "$1" ]]; then
-        report 1 "$2"
+        report_fail "$2" "検査できませんでした: ${1} が存在しません（記録の仕組み自体が動いていない可能性）"
         return
     fi
     # 中身が空（サイズ 0）なら成功
     if [[ ! -s "$1" ]]; then
         report 0 "$2"
     else
-        report 1 "$2"
+        report_fail "$2" "${1} は空ではありません（記録されないはずのものが記録されています）"
     fi
 }
 
@@ -188,7 +188,7 @@ assert_missing() {
     if [[ ! -e "$1" ]]; then
         report 0 "$2"
     else
-        report 1 "$2"
+        report_fail "$2" "${1} が残っています（消えているはずのもの）"
     fi
 }
 
@@ -198,7 +198,7 @@ assert_exists() {
     if [[ -e "$1" ]]; then
         report 0 "$2"
     else
-        report 1 "$2"
+        report_fail "$2" "${1} がありません（作られているはずのもの）"
     fi
 }
 

@@ -201,10 +201,15 @@ ci_workflow_extract() {
             probe = t
             gsub(/["\047]/, "", probe)
             probe = tolower(probe)
-            # `if: false` は決して実行されない
+            # **値がブロックスカラー（`if: >-` / `continue-on-error: |`）なら中身は構造行に現れない。**
+            # 確かめられない以上「実行される」とは主張できないので、無効化側へ倒す（fail-closed）。
+            # `action_pin_test.sh` が `permissions:` をブロックスカラーで書かれたとき特権側へ倒すのと同じ判断
+            if (probe ~ /^[[:space:]]*-?[[:space:]]*(if|continue-on-error):[[:space:]]*[|>][0-9]*[+-]?[[:space:]]*$/) { return 1 }
+            # `if: false` は決して実行されない（式で書かれた `${{ false }}` も同じ）
             if (probe ~ /^[[:space:]]*-?[[:space:]]*if:[[:space:]]*(false|.\{\{[[:space:]]*false[[:space:]]*\}\})[[:space:]]*$/) { return 1 }
-            # `continue-on-error: true` は走るが失敗してもジョブを止めない＝ゲートにならない
-            if (probe ~ /^[[:space:]]*-?[[:space:]]*continue-on-error:[[:space:]]*true[[:space:]]*$/) { return 1 }
+            # `continue-on-error: true` は走るが失敗してもジョブを止めない＝ゲートにならない。
+            # **式の形も同じ**（`if:` 側だけ式を見て `continue-on-error:` を見ないと、1 行でゲートが外れる）
+            if (probe ~ /^[[:space:]]*-?[[:space:]]*continue-on-error:[[:space:]]*(true|.\{\{[[:space:]]*true[[:space:]]*\}\})[[:space:]]*$/) { return 1 }
             # それ以外は無効化ではない
             return 0
         }
@@ -287,6 +292,11 @@ ci_workflow_extract() {
                 text = probe
                 sub(/^[[:space:]]*-?[[:space:]]*run:[[:space:]]*/, "", text)
                 text = trim(text)
+                # **値全体を囲む引用符は落とす。** `run: "bash test/x_test.sh"` は正当な YAML で
+                # 中身は同じコマンドだが、引用符が先頭に残るとコマンドの開始位置の判定に外れ、
+                # 実行しているのに「どこからも呼ばれていない」と赤くなる（レビューで実測）
+                if (text ~ /^".*"$/ || text ~ /^\047.*\047$/) { text = substr(text, 2, length(text) - 2) }
+                text = trim(text)
                 if (text != "") { cmds[++ncmd] = text }
             }
         }
@@ -313,6 +323,7 @@ ci_workflow_load() {
 # 現状の ci.yml でも 1 回の照会で百数十プロセスを生む（挙動は同じで費用だけ違う）
 ci_workflow_line_matches() {
     # 1 行ずつ見る
+    # 走査中の 1 行・コマンド本文・当てるパターン・全一致したかの目印
     local record text pattern matched_all
     while IFS= read -r record; do
         # 行頭のステップ番号とタブを落として、コマンド本文だけにする
@@ -335,6 +346,7 @@ ci_workflow_line_matches() {
 ci_workflow_step_matches() {
     # 各パターンがどのステップで見つかったかを記録する
     local -A hits=()
+    # 走査中の 1 行・ステップ番号・コマンド本文・当てるパターン・何番目のパターンかの目印
     local record step text pattern index
     while IFS= read -r record; do
         # ステップ番号とコマンド本文に分ける
@@ -350,7 +362,9 @@ ci_workflow_step_matches() {
     done < "${CI_WORKFLOW_COMMANDS}"
 
     # すべてのパターンが揃ったステップが 1 つでもあるかを調べる
+    # 何らかのパターンが当たったステップ番号の集合
     local -A steps=()
+    # 走査中のキーと、そのステップが全パターンを満たしたかの目印
     local key complete
     for key in "${!hits[@]}"; do steps["${key%%:*}"]=1; done
     for step in "${!steps[@]}"; do
@@ -388,5 +402,6 @@ ci_workflow_runs_script() {
     # **実行しない**——同じジョブの隣のステップが `bash -n "$f"` なので取り違えは起こりやすく、
     # 取り違えたままだとそのスイートの表明が全部黙る。`n` を含む綴り（`-n` / `-nx` / `--noexec`）は
     # 「実行した証拠にならない」側へ倒す（判定できないものを合格にしない）
-    ci_workflow_line_matches "(^|[;&|(])[[:space:]]*(bash([[:space:]]+-[^[:space:]n]+)*[[:space:]]+)?[\"']?(\./)?${escaped}[\"']?([[:space:]]|;|\$)"
+    # コマンドの前に `FOO=1` のような環境変数の指定が並ぶこともあるので読み飛ばす
+    ci_workflow_line_matches "(^|[;&|(])[[:space:]]*([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*(bash([[:space:]]+-[^[:space:]n]+)*[[:space:]]+)?[\"']?(\./)?${escaped}[\"']?([[:space:]]|;|\$)"
 }
