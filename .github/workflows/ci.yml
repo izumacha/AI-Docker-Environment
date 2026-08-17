@@ -24,7 +24,9 @@ jobs:
       # 静的解析にかけるシェルスクリプトの一覧。shellcheck と `bash -n` の両ステップが
       # ここだけを見る（書き写すと片方の追記を忘れたときに、そのファイルが一方の網から
       # 静かに外れる。issue #94 は「リンタの網の外にあるコード」から生まれた欠陥そのもの）。
-      # docs/requirements.md FR-8.1 の一覧とも対応させること
+      # docs/requirements.md FR-8.1 の一覧とも対応させること。
+      # **この一覧への追記漏れ自体は test/ci_coverage_test.sh が検出する**
+      # （コミット済みのシェルスクリプトを git から数え上げてここと突き合わせる）
       SHELL_FILES: >-
         bin/aidock
         docker/init-firewall.sh
@@ -35,6 +37,7 @@ jobs:
         test/record_demo_test.sh
         test/sec18_denylist_e2e.sh
         test/sec18_denylist_test.sh
+        test/ci_coverage_test.sh
         test/lib/harness.sh
         docs/demo/record-demo.sh
     steps:
@@ -97,6 +100,15 @@ jobs:
         # never reported as "SEC-18 ok". The e2e job runs the real check
         # against a real build; this pins how it reaches its verdict.
         run: bash test/sec18_denylist_test.sh
+
+      - name: CI coverage (every script linted, every suite run)
+        # Guards the nets above against the way issue #94 started: a script the
+        # linters never see. SHELL_FILES is hand-maintained, so a script
+        # committed without an entry is silently unlinted, and a new
+        # test/<name>_test.sh nobody wires up here never runs -- and a suite
+        # that never runs looks exactly like a suite that always passes. This
+        # derives both lists from git and ci.yml and fails when they diverge.
+        run: bash test/ci_coverage_test.sh
 
       - name: hadolint (Dockerfile)
         run: hadolint docker/Dockerfile
