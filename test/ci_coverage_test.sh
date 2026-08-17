@@ -25,6 +25,19 @@
 # actually committed, rather than restated here. Restating them would just
 # create a third copy to forget.
 #
+# Three things had to be got right for this to be evidence rather than
+# decoration, each found by injecting the regression and watching this suite
+# stay green (see the PR's review round):
+#
+#   * Membership in `SHELL_FILES` proves nothing unless the lint steps still
+#     *consume* the variable, so the two consumers are asserted too.
+#   * A commented-out `run:` line still contains the text we search for, so the
+#     search runs over ci.yml with comment lines removed -- commenting a step
+#     out is the most likely way a suite quietly stops running.
+#   * Discovery has to see the scripts that have no `.sh` suffix, so the
+#     shebang branch tokenizes the line instead of matching it whole (`#!/bin/bash -eu`
+#     and `#!/usr/bin/env -S bash -euo pipefail` are shell scripts too).
+#
 # Runs in the type-check job: no Docker, no network. It reads the real
 # ci.yml and the real file list from git, so it is a repository-invariant test
 # (like test/sec18_denylist_test.sh's wiring cases), not a behavioural one.
@@ -45,21 +58,61 @@ source "${SCRIPT_DIR}/lib/harness.sh"
 
 # --- 前提の確認 ---------------------------------------------------------------
 
-# ワークフローが読めなければ以降の抽出がすべて空になり、
-# 「照合対象が無い＝全部合格」に化ける。**先に止める**
-if [ ! -f "${CI_WORKFLOW}" ]; then
-    # 何が無いのかを明示して落とす
-    printf 'FAIL - .github/workflows/ci.yml not found at %s\n' "${CI_WORKFLOW}" >&2
+# 検査が成立しないと分かった時点で、合格に倒さず理由を述べて止めるための共通の出口。
+# 「照合対象が無い＝差分ゼロ＝合格」に化けるのを防ぐのがこのテストの要なので、
+# 土台が崩れたときこそ黙って緑にしない（fail-closed）
+bail() {
+    # 何が成立しなかったのかを stderr に出す（CI ログでの見出しになる）
+    printf 'FAIL - %s\n' "$1" >&2
+    # 非ゼロで終了して CI を赤くする
     exit 1
-fi
+}
+
+# ワークフローが読めなければ以降の抽出がすべて空になる
+[ -f "${CI_WORKFLOW}" ] || bail ".github/workflows/ci.yml not found at ${CI_WORKFLOW}"
 
 # 対象は「コミット済みのファイル」に限る。作業ツリーの未追跡ファイル（試し書きの
-# スクリプト等）まで拾うと、手元だけ赤くなって CI と結論が食い違う
-if ! tracked_files="$(git -C "${REPO_ROOT}" ls-files 2> /dev/null)"; then
-    # git が使えない場所では「検査できなかった」ことを合格に倒さない（fail-closed）
-    printf 'FAIL - could not list tracked files via "git ls-files" in %s\n' "${REPO_ROOT}" >&2
-    exit 1
-fi
+# スクリプト等）まで拾うと、手元だけ赤くなって CI と結論が食い違う。
+# まず git が使える場所かを確かめる（使えないまま進むと一覧が空になる）
+git -C "${REPO_ROOT}" rev-parse --git-dir > /dev/null 2>&1 \
+    || bail "${REPO_ROOT} is not a usable git checkout, so the committed file list cannot be read"
+
+# --- ci.yml のうち「実際に実行される部分」を取り出す ------------------------------------
+
+# 行頭が `#` の行を落とす。YAML のコメントも `run: |` ブロック内のシェルコメントも
+# 行頭 `#` である点は同じで、どちらも実行されない。
+# **コメント行を含めたまま探すと、コメントアウトされたステップを「配線されている」と読む**——
+# 一時的にコメントアウトするのはスイートの実行が止まる最もありがちな経路で、
+# それを素通りさせると本テスト自体が「不在＝合格」になる（レビューで実測）
+CI_ACTIVE="$(grep -v '^[[:space:]]*#' "${CI_WORKFLOW}")"
+
+# 実行される行が 1 行も残らなければ、コメント除去か読み込みが壊れている
+[ -n "${CI_ACTIVE}" ] || bail "no non-comment lines remain in ${CI_WORKFLOW}; this test cannot verify wiring"
+
+# ci.yml の「実行される部分」に指定の文字列が現れるかを返す
+ci_active_contains() {
+    # 部分一致で探す（見つかれば成功）
+    case "${CI_ACTIVE}" in
+        *"$1"*) return 0 ;;
+    esac
+    # 見つからなければ失敗
+    return 1
+}
+
+# 「ci.yml に この記述がある」ことを 1 ケースとして数える共通ヘルパー。
+# 第 1 引数が探す記述、第 2 引数がケース名、第 3 引数が失敗時の診断
+assert_ci_wires() {
+    # 実行される行の中に見つかれば成功として数える
+    if ci_active_contains "$1"; then
+        report 0 "$2"
+    else
+        # report が出力する診断はこのケース固有の内容に差し替える
+        # （前のケースの残りを表示すると、無関係なファイルを直すよう読者を誘導する）
+        LAST_STATUS=1
+        LAST_OUTPUT="$3"
+        report 1 "$2"
+    fi
+}
 
 # --- ci.yml から検査対象の一覧を読み出す -------------------------------------------
 
@@ -77,8 +130,10 @@ extract_shell_files() {
         }
         # 収集モード中の処理
         collecting {
-            # 空行はブロックの終わりとみなす
-            if ($0 ~ /^[[:space:]]*$/) { exit }
+            # 空行は YAML の折りたたみブロックでは**段落の区切り**であってブロックの終わりではない。
+            # ここで打ち切ると一覧が途中で切れ、実際には載っているファイルを
+            # 「載っていない」と誤報する（しかも空にはならないので下の空判定にも掛からない）
+            if ($0 ~ /^[[:space:]]*$/) { next }
             # 現在行のインデント幅を測る
             match($0, /^[[:space:]]*/)
             # キー行と同じかそれより浅くなったらブロックの外に出たので終了
@@ -93,12 +148,9 @@ extract_shell_files() {
 # 抽出結果を配列へ読み込む（1 行 1 ファイル）
 mapfile -t shell_files < <(extract_shell_files)
 
-# 抽出が空なら、YAML の書式が変わって読めていない。**照合の土台が無い**ので
-# 「差分ゼロ＝合格」に倒さず、ここで検査不能として落とす
-if [ "${#shell_files[@]}" -eq 0 ]; then
-    printf 'FAIL - could not parse SHELL_FILES out of %s (the "SHELL_FILES: >-" block moved or changed shape); this test cannot verify coverage\n' "${CI_WORKFLOW}" >&2
-    exit 1
-fi
+# 抽出が空なら、YAML の書式が変わって読めていない
+[ "${#shell_files[@]}" -gt 0 ] \
+    || bail "could not parse SHELL_FILES out of ${CI_WORKFLOW} (the \"SHELL_FILES: >-\" block moved or changed shape); this test cannot verify coverage"
 
 # --- リポジトリ側の実体を数え上げる -------------------------------------------------
 
@@ -107,12 +159,19 @@ fi
 # **shebang も見る**のが要点で、bin/aidock のように拡張子を持たない実行スクリプトを
 # 拡張子だけで探すと取りこぼし、それこそが本テストの防ぎたい漏れになる
 discovered_scripts=()
-# 追跡ファイルを 1 行ずつ処理する
-while IFS= read -r path; do
-    # 空行は読み飛ばす
+# NUL 区切りで読む。既定の `git ls-files` は非 ASCII のパスを
+# 8 進エスケープ付きのダブルクォートで囲んで出すため（core.quotePath の既定は true）、
+# 日本語を含むファイル名が「実体の無いパス」に化けて静かに検査対象から落ちる。
+# 本リポジトリはドキュメントも識別子も日本語なので、これは十分に起こりうる（レビューで実測）。
+# また **変数へ溜めずに直接読む**: NUL を含む出力をコマンド置換に通すと
+# bash が「ignored null byte in input」を警告する
+while IFS= read -r -d '' path; do
+    # 空のエントリは読み飛ばす
     [ -n "${path}" ] || continue
-    # 作業ツリーに実体が無いもの（削除途中など）は対象外
-    [ -f "${REPO_ROOT}/${path}" ] || continue
+    # 追跡されているのに作業ツリーに実体が無い＝索引と食い違っている。
+    # ここで読み飛ばすと「見つからなかったから合格」に倒れるので、理由を述べて止める
+    [ -f "${REPO_ROOT}/${path}" ] \
+        || bail "${path} is tracked by git but missing from the working tree; the checkout is inconsistent and coverage cannot be verified"
     # 拡張子が .sh ならシェルスクリプトとして扱う
     if [[ "${path}" == *.sh ]]; then
         discovered_scripts+=("${path}")
@@ -124,18 +183,31 @@ while IFS= read -r path; do
     first_line=""
     # 1 行目だけを読む（読めない・空ファイルでも失敗させない）
     IFS= read -r first_line < "${REPO_ROOT}/${path}" 2> /dev/null || true
-    # sh / bash を指す shebang ならシェルスクリプトとして扱う（python 等は対象外）
-    if [[ "${first_line}" =~ ^#\!.*[[:space:]/](bash|sh)$ ]]; then
-        discovered_scripts+=("${path}")
-    fi
-done <<< "${tracked_files}"
+    # CRLF で保存されたファイルでも判定できるよう行末の CR を落とす
+    first_line="${first_line%$'\r'}"
+    # shebang で始まらなければシェルスクリプトではない
+    [[ "${first_line}" == '#!'* ]] || continue
+    # shebang を**単語に分割して**調べる。行全体を 1 つの正規表現で終端一致させると
+    # `#!/bin/bash -eu` や `#!/usr/bin/env -S bash -euo pipefail` のように
+    # 引数付きの shebang を取りこぼす（＝そのファイルがリンタからも本テストからも消える）
+    shebang_tokens=()
+    # `#!` を取り除いた残りを空白で区切って配列にする
+    read -r -a shebang_tokens <<< "${first_line#'#!'}"
+    # 先頭から順にトークンを見る
+    for token in "${shebang_tokens[@]}"; do
+        # パス部分（/usr/bin/ 等）を落として実行ファイル名だけにする
+        token="${token##*/}"
+        # sh か bash を指していればシェルスクリプトとして扱う（python 等は対象外）
+        if [ "${token}" = "bash" ] || [ "${token}" = "sh" ]; then
+            discovered_scripts+=("${path}")
+            break
+        fi
+    done
+done < <(git -C "${REPO_ROOT}" -c core.quotePath=false ls-files -z)
 
-# 発見数が 0 なら列挙のロジックが壊れている（本リポジトリには必ずシェルスクリプトがある）。
-# 0 件のまま進むと「全部カバーされている」と報告してしまう
-if [ "${#discovered_scripts[@]}" -eq 0 ]; then
-    printf 'FAIL - found no shell scripts in the repository; the discovery logic is broken and this test proves nothing\n' >&2
-    exit 1
-fi
+# 発見数が 0 なら列挙のロジックが壊れている（本リポジトリには必ずシェルスクリプトがある）
+[ "${#discovered_scripts[@]}" -gt 0 ] \
+    || bail "found no shell scripts in the repository; the discovery logic is broken and this test proves nothing"
 
 # 配列に指定の要素が含まれるかを返す小さなヘルパー（第 1 引数が探す値、以降が配列）
 array_contains() {
@@ -153,7 +225,20 @@ array_contains() {
     return 1
 }
 
-# --- ケース 1: すべてのシェルスクリプトがリンタの一覧に載っている -----------------------
+# --- ケース 1: リンタの一覧が実際に使われている -----------------------------------------
+
+# **一覧に載っていること**は、その一覧を読むステップが生きていて初めて意味を持つ。
+# 2 つの消費側を固定しないと、`shellcheck $SHELL_FILES` を
+# `shellcheck bin/aidock` に書き換えるだけで 11 本が誰にも lint されなくなるのに
+# 本テストは緑のまま通る（レビューで実測）
+assert_ci_wires "shellcheck \$SHELL_FILES" \
+    "リンタ網: shellcheck ステップが SHELL_FILES を参照している" \
+    "ci.yml の shellcheck ステップが \$SHELL_FILES を読んでいない（一覧に載せても lint されない）"
+assert_ci_wires "for f in \$SHELL_FILES" \
+    "リンタ網: bash -n ステップが SHELL_FILES を参照している" \
+    "ci.yml の bash -n ステップが \$SHELL_FILES を読んでいない（一覧に載せても構文チェックされない）"
+
+# --- ケース 2: すべてのシェルスクリプトがリンタの一覧に載っている -----------------------
 
 # 発見したスクリプトを 1 つずつ SHELL_FILES と突き合わせる
 for script in "${discovered_scripts[@]}"; do
@@ -168,7 +253,7 @@ for script in "${discovered_scripts[@]}"; do
     fi
 done
 
-# --- ケース 2: 一覧に載っているファイルが実在する ---------------------------------------
+# --- ケース 3: 一覧に載っているファイルが実在する ---------------------------------------
 
 # 消えたファイルが一覧に残っていると shellcheck のステップ自体が失敗するが、
 # 原因が「一覧の古さ」だと分かる形でここでも落としておく
@@ -183,17 +268,21 @@ for listed in "${shell_files[@]}"; do
     fi
 done
 
-# --- ケース 3: すべてのテストスイートが CI から実行されている ---------------------------
+# --- ケース 4: すべてのテストスイートが CI から実行されている ---------------------------
 
 # test/ 直下の *_test.sh を「CI が走らせるべきスイート」とみなす。
 # 命名規約に沿ったファイルだけを対象にするので、ヘルパー（lib/harness.sh）や
 # e2e 本体（sec18_denylist_e2e.sh）は含まれない
 for script in "${discovered_scripts[@]}"; do
-    # test/ 直下の *_test.sh 以外は対象外
-    [[ "${script}" == test/*_test.sh ]] || continue
-    # ci.yml が `bash <path>` の形で実際に呼んでいることを確かめる。
+    # `*` は `[[ ]]` のパターンでは `/` も跨ぐため、**下位ディレクトリを明示的に除く**。
+    # 除かないと test/lib/ に置いたヘルパー的なスイートまで対象になり、
+    # コメントと要件（「test/ 直下」）に書いた契約とコードが食い違う
+    [[ "${script}" == test/*_test.sh && "${script}" != test/*/* ]] || continue
+    # ci.yml が `bash <path>` の形で**実行される行として**呼んでいることを確かめる。
     # 置いただけで呼ばれないスイートは「常に緑」と見分けが付かない
-    assert_file_contains "${CI_WORKFLOW}" "bash ${script}" "実行網: ${script} が ci.yml から実行されている"
+    assert_ci_wires "bash ${script}" \
+        "実行網: ${script} が ci.yml から実行されている" \
+        "${script} は ci.yml のどの実行ステップからも呼ばれていない（コメントアウトされた行は数えない）"
 done
 
 # 集計を出して、失敗が 1 件でもあれば非ゼロで終わる
