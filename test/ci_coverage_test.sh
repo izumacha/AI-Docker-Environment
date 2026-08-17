@@ -77,17 +77,72 @@ bail() {
 git -C "${REPO_ROOT}" rev-parse --git-dir > /dev/null 2>&1 \
     || bail "${REPO_ROOT} is not a usable git checkout, so the committed file list cannot be read"
 
-# --- ci.yml のうち「実際に実行される部分」を取り出す ------------------------------------
+# --- ci.yml から「実際に実行されるコマンド」だけを取り出す ------------------------------
 
-# 行頭が `#` の行を落とす。YAML のコメントも `run: |` ブロック内のシェルコメントも
-# 行頭 `#` である点は同じで、どちらも実行されない。
-# **コメント行を含めたまま探すと、コメントアウトされたステップを「配線されている」と読む**——
-# 一時的にコメントアウトするのはスイートの実行が止まる最もありがちな経路で、
-# それを素通りさせると本テスト自体が「不在＝合格」になる（レビューで実測）
-CI_ACTIVE="$(grep -v '^[[:space:]]*#' "${CI_WORKFLOW}")"
+# 後始末する一時ファイルを 1 か所にまとめる（トラップを 1 本にするため）
+TMP_DIR="$(mktemp -d)" || bail "could not create a temporary directory"
+# どの経路で終わっても片付ける。**素の `rm` にしない**のが要点で、EXIT トラップの本体も
+# `set -e` の対象であり、削除に失敗するとその終了コードが**成功した実行を乗っ取る**
+# （docs/requirements.md FR-8.1 の record-demo.sh 側で不変条件として明記されている形）
+trap 'rm -rf "${TMP_DIR}" || true' EXIT
 
-# 実行される行が 1 行も残らなければ、コメント除去か読み込みが壊れている
-[ -n "${CI_ACTIVE}" ] || bail "no non-comment lines remain in ${CI_WORKFLOW}; this test cannot verify wiring"
+# 各 `run:` ステップの中身を 1 ステップ 1 行にして書き出したファイル
+CI_COMMANDS="${TMP_DIR}/ci-commands"
+
+# **行を素で探さず、`run:` の値だけを取り出す。** 行頭 `#` を落とすだけでは
+# 行**途中**から始まるコメント（YAML の行末コメント、`run: |` 内の行内コメント）や、
+# `name:` に書かれた単なる言及が「配線されている」と読まれる——
+# `run: echo skipped  # bash test/foo_test.sh` の 1 文字ずらしで穴が開く（レビューで実測）
+extract_ci_commands() {
+    awk '
+        # 溜めていた 1 ステップ分を吐き出す
+        function flush() { if (buf != "") { print buf; buf = "" } }
+        # コメント部分（行頭、または空白に続く # から行末まで）を落とす
+        function strip_comment(t) { sub(/(^|[[:space:]])#.*$/, "", t); return t }
+        # 前後の空白を落とす
+        function trim(t) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", t); return t }
+
+        # `run: |` / `run: >` のブロック開始。以降のより深いインデント行が本体
+        /^[[:space:]]*run:[[:space:]]*[|>]/ {
+            flush()
+            match($0, /^[[:space:]]*/)
+            run_indent = RLENGTH
+            inblock = 1
+            next
+        }
+        # 1 行で書かれた `run: <command>`
+        /^[[:space:]]*run:[[:space:]]*[^|>[:space:]]/ {
+            flush()
+            inblock = 0
+            line = $0
+            sub(/^[[:space:]]*run:[[:space:]]*/, "", line)
+            line = trim(strip_comment(line))
+            if (line != "") { print line }
+            next
+        }
+        # ブロック本体の収集中
+        inblock {
+            # 空行はブロックを終わらせない（YAML では単なる区切り）
+            if ($0 ~ /^[[:space:]]*$/) { next }
+            match($0, /^[[:space:]]*/)
+            # `run:` と同じかそれより浅くなったらブロックの外
+            if (RLENGTH <= run_indent) { flush(); inblock = 0; next }
+            line = trim(strip_comment($0))
+            # 1 ステップを 1 行に畳む（`for f in …` と `bash -n` が同じステップだと分かるように）
+            if (line != "") { buf = buf " " line }
+        }
+        END { flush() }
+    ' "${CI_WORKFLOW}"
+}
+
+# 抽出結果をファイルへ落とし、**awk 自身の終了コードを確かめる**
+# （プロセス置換のままだと誰も終了コードを見ず、途中で落ちた抽出が「短い一覧」に化ける）
+extract_ci_commands > "${CI_COMMANDS}" \
+    || bail "failed to extract the run: steps from ${CI_WORKFLOW}; this test cannot verify wiring"
+
+# 実行コマンドが 1 つも取れなければ、YAML の書式が変わって読めていない
+[ -s "${CI_COMMANDS}" ] \
+    || bail "no run: steps could be read from ${CI_WORKFLOW}; this test cannot verify wiring"
 
 # 文字列を拡張正規表現のリテラルとして扱えるようにエスケープする
 # （パス中の `.` が任意の 1 文字として働くと、別名のファイルに当たってしまう）
@@ -96,25 +151,39 @@ regex_escape() {
     printf '%s' "$1" | sed 's|[^[:alnum:]_/-]|\\&|g'
 }
 
-# ci.yml の「実行される部分」が指定の拡張正規表現に一致するかを返す
-ci_active_matches() {
-    # 行単位で探す（見つかれば成功）
-    printf '%s\n' "${CI_ACTIVE}" | grep -Eq -- "$1"
+# 渡したすべての拡張正規表現に一致する `run:` ステップが 1 つでもあるかを返す。
+# **1 ステップの中で全部に一致すること**を見るのが要点で、`bash -n` のステップは
+# `for f in $SHELL_FILES` と `bash -n "$f"` が別の行にあるため、行単位では結び付かない
+ci_command_matches() {
+    # 1 ステップ（1 行）ずつ見る
+    local record
+    while IFS= read -r record; do
+        # そのステップがすべてのパターンを満たすかを確かめる
+        local pattern matched_all=1
+        for pattern in "$@"; do
+            # 1 つでも外れたらこのステップは候補から外す
+            grep -Eq -- "${pattern}" <<< "${record}" || { matched_all=0; break; }
+        done
+        # すべて満たすステップが見つかれば成功
+        [ "${matched_all}" -eq 1 ] && return 0
+    done < "${CI_COMMANDS}"
+    # 最後まで見つからなければ失敗
+    return 1
 }
 
-# 「ci.yml に この記述がある」ことを 1 ケースとして数える共通ヘルパー。
-# 第 1 引数が探す拡張正規表現、第 2 引数がケース名、第 3 引数が失敗時の診断。
-#
-# **部分一致ではなく語境界まで見る**のが要点。素の部分一致だと
-# `shellcheck $SHELL_FILES` の探索が `shellcheck $SHELL_FILES_FAST` にも当たり、
-# 一覧の一部しか lint していない状態を「配線されている」と読む（レビューで実測）
+# 「ci.yml のいずれかの run: ステップがこの条件を満たす」ことを 1 ケースとして数える。
+# 第 1 引数がケース名、第 2 引数が失敗時の診断、第 3 引数以降が満たすべき正規表現
 assert_ci_wires() {
-    # 実行される行の中に見つかれば成功として数える
-    if ci_active_matches "$1"; then
-        report 0 "$2"
+    # ケース名と診断を取り出す
+    local name="$1" diagnostic="$2"
+    # 残りをパターンとして扱う
+    shift 2
+    # 条件を満たすステップがあれば成功として数える
+    if ci_command_matches "$@"; then
+        report 0 "${name}"
     else
         # 診断はこのケース固有の内容にする（共通ヘルパーは lib/harness.sh 側）
-        report_fail "$2" "$3"
+        report_fail "${name}" "${diagnostic}"
     fi
 }
 
@@ -152,8 +221,14 @@ extract_shell_files() {
     ' "${CI_WORKFLOW}"
 }
 
-# 抽出結果を配列へ読み込む（1 行 1 ファイル）
-mapfile -t shell_files < <(extract_shell_files)
+# 抽出結果をファイルへ落としてから読む。`mapfile < <(…)` のプロセス置換だと
+# **awk の終了コードを誰も見ない**ため、途中で落ちた抽出が「短い一覧」に化け、
+# 載っているファイルを「載っていない」と誤報する（git ls-files 側と同じ扱いに揃える）
+shell_files_raw="${TMP_DIR}/shell-files"
+extract_shell_files > "${shell_files_raw}" \
+    || bail "failed to extract SHELL_FILES from ${CI_WORKFLOW}; this test cannot verify coverage"
+# 1 行 1 パスとして配列へ読み込む
+mapfile -t shell_files < "${shell_files_raw}"
 
 # 抽出が空なら、YAML の書式が変わって読めていない
 [ "${#shell_files[@]}" -gt 0 ] \
@@ -177,9 +252,7 @@ discovered_scripts=()
 # エラーやロック競合で一覧を途中まで出して失敗した場合、残りのスクリプトは
 # 「発見されなかった」＝暗黙に合格となる——issue #94 の `docker … | cut` と同じ形を
 # このスイート自身が持つことになる（レビューで指摘）
-tracked_list="$(mktemp)" || bail "could not create a temporary file for the tracked-file list"
-# どの経路で終わっても一時ファイルを残さない
-trap 'rm -f "${tracked_list}"' EXIT
+tracked_list="${TMP_DIR}/tracked-files"
 # 一覧を書き出し、**git 自身の終了コードを確かめる**
 git -C "${REPO_ROOT}" -c core.quotePath=false ls-files -z > "${tracked_list}" \
     || bail "\`git ls-files\` failed in ${REPO_ROOT}; the committed file list is incomplete and coverage cannot be verified"
@@ -252,13 +325,17 @@ array_contains() {
 # 本テストは緑のまま通る（レビューで実測）
 # 変数参照は `$SHELL_FILES` と `${SHELL_FILES}` のどちらの書き方でも同じ意味なので両方を認め、
 # **直後が識別子の文字でないこと**まで見る（`$SHELL_FILES_FAST` のような別変数に当たらないように）
-SHELL_FILES_REF='[$]\{?SHELL_FILES\}?([^[:alnum:]_]|$)'
-assert_ci_wires "shellcheck +${SHELL_FILES_REF}" \
-    "リンタ網: shellcheck ステップが SHELL_FILES を参照している" \
-    "ci.yml の shellcheck ステップが SHELL_FILES そのもの（部分一致する別名ではなく）を読んでいない。一覧に載せても lint されない"
-assert_ci_wires "for +f +in +${SHELL_FILES_REF}" \
-    "リンタ網: bash -n ステップが SHELL_FILES を参照している" \
-    "ci.yml の bash -n ステップが SHELL_FILES そのもの（部分一致する別名ではなく）を読んでいない。一覧に載せても構文チェックされない"
+SHELL_FILES_REF='[$][{]?SHELL_FILES[}]?([^[:alnum:]_]|$)'
+# 検査するのは「そのステップが SHELL_FILES を消費しているか」だけにする。
+# `shellcheck` の直後の空白やループ変数名まで固定すると、`shellcheck -x $SHELL_FILES` や
+# `for file in $SHELL_FILES` のような**意味の変わらない書き換え**で赤くなり、
+# しかも「SHELL_FILES を読んでいない」という事実と逆の診断を出す（レビューで実測）
+assert_ci_wires "リンタ網: shellcheck ステップが SHELL_FILES を参照している" \
+    "ci.yml に「shellcheck を実行し、かつ SHELL_FILES そのもの（部分一致する別名ではなく）を渡す」run: ステップが無い。一覧に載せても lint されない" \
+    '(^|[^[:alnum:]_])shellcheck([^[:alnum:]_]|$)' "${SHELL_FILES_REF}"
+assert_ci_wires "リンタ網: bash -n ステップが SHELL_FILES を参照している" \
+    "ci.yml に「bash -n を実行し、かつ SHELL_FILES そのもの（部分一致する別名ではなく）を渡す」run: ステップが無い。一覧に載せても構文チェックされない" \
+    '(^|[^[:alnum:]_])bash +-n([^[:alnum:]_]|$)' "${SHELL_FILES_REF}"
 
 # --- ケース 2: すべてのシェルスクリプトがリンタの一覧に載っている -----------------------
 
@@ -299,17 +376,27 @@ done
 # それでは `test/e2e/` に置いたスイートが配線されないまま緑で通り、
 # **本テストが塞いだはずの穴が 1 階層深いところに開き直る**（レビューで実測）。
 # 契約の側を広げるのが正しく、要件（FR-8.1）もそれに合わせてある
+# 実際に何件のスイートを見たかを数える（0 件なら検査が丸ごと消えている）
+wired_suites_checked=0
 for script in "${discovered_scripts[@]}"; do
     # 命名規約 `*_test.sh` に沿わないファイルは対象外
     [[ "${script}" == test/*_test.sh ]] || continue
-    # ci.yml が `bash <path>` の形で**実行される行として**呼んでいることを確かめる。
+    # 検査したスイートの件数を数える
+    wired_suites_checked=$((wired_suites_checked + 1))
+    # ci.yml のいずれかの `run:` ステップが `bash <path>` を実行していることを確かめる。
     # 置いただけで呼ばれないスイートは「常に緑」と見分けが付かない。
     # パスは正規表現リテラルとしてエスケープし、直後が空白か行末であることまで見る
     # （`bash test/foo_test.sh` の探索が `bash test/foo_test.sh.bak` に当たらないように）
-    assert_ci_wires "(^|[[:space:]])bash +$(regex_escape "${script}")([[:space:]]|\$)" \
-        "実行網: ${script} が ci.yml から実行されている" \
-        "${script} は ci.yml のどの実行ステップからも呼ばれていない（コメントアウトされた行は数えない）"
+    assert_ci_wires "実行網: ${script} が ci.yml から実行されている" \
+        "${script} は ci.yml のどの run: ステップからも呼ばれていない（コメント部分は数えない）" \
+        "(^|[[:space:]])bash +$(regex_escape "${script}")([[:space:]]|\$)"
 done
+
+# **1 件も見なかった場合を合格にしない。** 命名規約が変わる・発見ロジックが壊れる等で
+# 対象が空になると、表明が 0 件のまま「実行網は問題なし」に化ける
+# （ケース 2・3 には空集合の歯止めがあるのに、ここだけ無かった。レビューで実測）
+[ "${wired_suites_checked}" -gt 0 ] \
+    || bail "no test/**/*_test.sh suites were found, so the \"every suite is run\" net checked nothing; the naming convention or the discovery logic changed"
 
 # 集計を出して、失敗が 1 件でもあれば非ゼロで終わる
 harness_summary
