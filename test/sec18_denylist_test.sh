@@ -290,8 +290,31 @@ assert_file_empty "${STUB_DOCKER_LOG}" "Dockerfile 不在: docker を呼ばな�
 assert_file_contains "${TARGET_SCRIPT}" "${DENYLIST_REJECTION_FRAGMENT}" "配線: e2e スクリプトが同じ拒否メッセージ断片を見ている"
 assert_file_contains "${REPO_ROOT}/docker/Dockerfile" "${DENYLIST_REJECTION_FRAGMENT}" "配線: 本物の Dockerfile に拒否メッセージが実在する"
 # CI から実際に呼ばれていることも固定する（スクリプトを置いただけで呼ばれない状態を防ぐ）
-assert_file_contains "${REPO_ROOT}/.github/workflows/ci.yml" "bash test/sec18_denylist_e2e.sh" "配線: e2e ジョブが本スクリプトを実行する"
-assert_file_contains "${REPO_ROOT}/.github/workflows/ci.yml" "bash test/sec18_denylist_test.sh" "配線: type-check ジョブが本テストを実行する"
+# 実行の配線は**共有ライブラリ**で判定する。ここで素の文字列一致を書くと、
+# 行末コメントや `name:` の言及、`if: false` で無効化されたステップでも
+# 「実行されている」と読む弱い版になる（`test/lib/ci_workflow.sh` のヘッダを参照）
+# shellcheck source=test/lib/ci_workflow.sh
+source "${SCRIPT_DIR}/lib/ci_workflow.sh"
+# ci.yml の実行内容を読み込む（読めなければ配線を検査できないので失敗として数える）
+if ci_workflow_load "${REPO_ROOT}/.github/workflows/ci.yml" "${TEST_TMP}/ci-commands"; then
+    # e2e ジョブが e2e スクリプトを実行していること
+    if ci_workflow_runs_script 'test/sec18_denylist_e2e.sh'; then
+        report 0 "配線: e2e ジョブが本スクリプトを実行する"
+    else
+        report_fail "配線: e2e ジョブが本スクリプトを実行する" \
+            "ci.yml のどの run: ステップも test/sec18_denylist_e2e.sh を実行していない"
+    fi
+    # type-check ジョブが本テストを実行していること
+    if ci_workflow_runs_script 'test/sec18_denylist_test.sh'; then
+        report 0 "配線: type-check ジョブが本テストを実行する"
+    else
+        report_fail "配線: type-check ジョブが本テストを実行する" \
+            "ci.yml のどの run: ステップも test/sec18_denylist_test.sh を実行していない"
+    fi
+else
+    report_fail "配線: ci.yml の run: ステップを読み取れる" \
+        "could not read the run: steps from ci.yml, so the wiring of the SEC-18 scripts could not be verified"
+fi
 
 # 集計を出して、失敗が 1 件でもあれば非ゼロで終わる
 harness_summary

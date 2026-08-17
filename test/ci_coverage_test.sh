@@ -55,6 +55,9 @@ CI_WORKFLOW="${REPO_ROOT}/.github/workflows/ci.yml"
 # 共有のカウンタ・アサーション群（書き写しを増やさないため lib へ切り出してある）
 # shellcheck source=test/lib/harness.sh
 source "${SCRIPT_DIR}/lib/harness.sh"
+# ci.yml が「実際に何を実行するか」を読む共有ライブラリ（同じ問いを複数のスイートが持つため）
+# shellcheck source=test/lib/ci_workflow.sh
+source "${SCRIPT_DIR}/lib/ci_workflow.sh"
 
 # --- 前提の確認 ---------------------------------------------------------------
 
@@ -77,7 +80,7 @@ bail() {
 git -C "${REPO_ROOT}" rev-parse --git-dir > /dev/null 2>&1 \
     || bail "${REPO_ROOT} is not a usable git checkout, so the committed file list cannot be read"
 
-# --- ci.yml から「実際に実行されるコマンド」だけを取り出す ------------------------------
+# --- ci.yml から「実際に実行されるコマンド」を読み込む --------------------------------
 
 # 後始末する一時ファイルを 1 か所にまとめる（トラップを 1 本にするため）
 TMP_DIR="$(mktemp -d)" || bail "could not create a temporary directory"
@@ -86,106 +89,9 @@ TMP_DIR="$(mktemp -d)" || bail "could not create a temporary directory"
 # （docs/requirements.md FR-8.1 の record-demo.sh 側で不変条件として明記されている形）
 trap 'rm -rf "${TMP_DIR}" || true' EXIT
 
-# 各 `run:` ステップの中身を 1 ステップ 1 行にして書き出したファイル
-CI_COMMANDS="${TMP_DIR}/ci-commands"
-
-# **行を素で探さず、`run:` の値だけを取り出す。** 行頭 `#` を落とすだけでは
-# 行**途中**から始まるコメント（YAML の行末コメント、`run: |` 内の行内コメント）や、
-# `name:` に書かれた単なる言及が「配線されている」と読まれる——
-# `run: echo skipped  # bash test/foo_test.sh` の 1 文字ずらしで穴が開く（レビューで実測）
-extract_ci_commands() {
-    awk '
-        # 溜めていた 1 ステップ分を吐き出す
-        function flush() { if (buf != "") { print buf; buf = "" } }
-        # コメント部分（行頭、または空白に続く # から行末まで）を落とす
-        function strip_comment(t) { sub(/(^|[[:space:]])#.*$/, "", t); return t }
-        # 前後の空白を落とす
-        function trim(t) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", t); return t }
-
-        # `run: |` / `run: >` のブロック開始。以降のより深いインデント行が本体
-        /^[[:space:]]*run:[[:space:]]*[|>]/ {
-            flush()
-            match($0, /^[[:space:]]*/)
-            run_indent = RLENGTH
-            inblock = 1
-            next
-        }
-        # 1 行で書かれた `run: <command>`
-        /^[[:space:]]*run:[[:space:]]*[^|>[:space:]]/ {
-            flush()
-            inblock = 0
-            line = $0
-            sub(/^[[:space:]]*run:[[:space:]]*/, "", line)
-            line = trim(strip_comment(line))
-            if (line != "") { print line }
-            next
-        }
-        # ブロック本体の収集中
-        inblock {
-            # 空行はブロックを終わらせない（YAML では単なる区切り）
-            if ($0 ~ /^[[:space:]]*$/) { next }
-            match($0, /^[[:space:]]*/)
-            # `run:` と同じかそれより浅くなったらブロックの外
-            if (RLENGTH <= run_indent) { flush(); inblock = 0; next }
-            line = trim(strip_comment($0))
-            # 1 ステップを 1 行に畳む（`for f in …` と `bash -n` が同じステップだと分かるように）
-            if (line != "") { buf = buf " " line }
-        }
-        END { flush() }
-    ' "${CI_WORKFLOW}"
-}
-
-# 抽出結果をファイルへ落とし、**awk 自身の終了コードを確かめる**
-# （プロセス置換のままだと誰も終了コードを見ず、途中で落ちた抽出が「短い一覧」に化ける）
-extract_ci_commands > "${CI_COMMANDS}" \
-    || bail "failed to extract the run: steps from ${CI_WORKFLOW}; this test cannot verify wiring"
-
-# 実行コマンドが 1 つも取れなければ、YAML の書式が変わって読めていない
-[ -s "${CI_COMMANDS}" ] \
-    || bail "no run: steps could be read from ${CI_WORKFLOW}; this test cannot verify wiring"
-
-# 文字列を拡張正規表現のリテラルとして扱えるようにエスケープする
-# （パス中の `.` が任意の 1 文字として働くと、別名のファイルに当たってしまう）
-regex_escape() {
-    # 英数字・`_`・`-`・`/` 以外の文字の前にバックスラッシュを置く
-    printf '%s' "$1" | sed 's|[^[:alnum:]_/-]|\\&|g'
-}
-
-# 渡したすべての拡張正規表現に一致する `run:` ステップが 1 つでもあるかを返す。
-# **1 ステップの中で全部に一致すること**を見るのが要点で、`bash -n` のステップは
-# `for f in $SHELL_FILES` と `bash -n "$f"` が別の行にあるため、行単位では結び付かない
-ci_command_matches() {
-    # 1 ステップ（1 行）ずつ見る
-    local record
-    while IFS= read -r record; do
-        # そのステップがすべてのパターンを満たすかを確かめる
-        local pattern matched_all=1
-        for pattern in "$@"; do
-            # 1 つでも外れたらこのステップは候補から外す
-            grep -Eq -- "${pattern}" <<< "${record}" || { matched_all=0; break; }
-        done
-        # すべて満たすステップが見つかれば成功
-        [ "${matched_all}" -eq 1 ] && return 0
-    done < "${CI_COMMANDS}"
-    # 最後まで見つからなければ失敗
-    return 1
-}
-
-# 「ci.yml のいずれかの run: ステップがこの条件を満たす」ことを 1 ケースとして数える。
-# 第 1 引数がケース名、第 2 引数が失敗時の診断、第 3 引数以降が満たすべき正規表現
-assert_ci_wires() {
-    # ケース名と診断を取り出す
-    local name="$1" diagnostic="$2"
-    # 残りをパターンとして扱う
-    shift 2
-    # 条件を満たすステップがあれば成功として数える
-    if ci_command_matches "$@"; then
-        report 0 "${name}"
-    else
-        # 診断はこのケース固有の内容にする（共通ヘルパーは lib/harness.sh 側）
-        report_fail "${name}" "${diagnostic}"
-    fi
-}
+# `run:` の中身の解析は共有ライブラリに寄せてある（同じ問いを 3 つのスイートが持つため。§6）
+ci_workflow_load "${CI_WORKFLOW}" "${TMP_DIR}/ci-commands" \
+    || bail "could not read the run: steps from ${CI_WORKFLOW} (the workflow moved or changed shape); this test cannot verify wiring"
 
 # --- ci.yml から検査対象の一覧を読み出す -------------------------------------------
 
@@ -317,6 +223,22 @@ array_contains() {
     return 1
 }
 
+# 「ci.yml の実行が この条件を満たす」ことを 1 ケースとして数える共通の枠。
+# 第 1 引数が判定関数、第 2 引数がケース名、第 3 引数が失敗時の診断、以降がその関数への引数
+assert_ci() {
+    # 判定関数・ケース名・診断を取り出す
+    local matcher="$1" name="$2" diagnostic="$3"
+    # 残りを判定関数へ渡す引数として扱う
+    shift 3
+    # 条件を満たせば成功として数える
+    if "${matcher}" "$@"; then
+        report 0 "${name}"
+    else
+        # 診断はこのケース固有の内容にする（共通ヘルパーは lib/harness.sh 側）
+        report_fail "${name}" "${diagnostic}"
+    fi
+}
+
 # --- ケース 1: リンタの一覧が実際に使われている -----------------------------------------
 
 # **一覧に載っていること**は、その一覧を読むステップが生きていて初めて意味を持つ。
@@ -330,12 +252,23 @@ SHELL_FILES_REF='[$][{]?SHELL_FILES[}]?([^[:alnum:]_]|$)'
 # `shellcheck` の直後の空白やループ変数名まで固定すると、`shellcheck -x $SHELL_FILES` や
 # `for file in $SHELL_FILES` のような**意味の変わらない書き換え**で赤くなり、
 # しかも「SHELL_FILES を読んでいない」という事実と逆の診断を出す（レビューで実測）
-assert_ci_wires "リンタ網: shellcheck ステップが SHELL_FILES を参照している" \
-    "ci.yml に「shellcheck を実行し、かつ SHELL_FILES そのもの（部分一致する別名ではなく）を渡す」run: ステップが無い。一覧に載せても lint されない" \
-    '(^|[^[:alnum:]_])shellcheck([^[:alnum:]_]|$)' "${SHELL_FILES_REF}"
-assert_ci_wires "リンタ網: bash -n ステップが SHELL_FILES を参照している" \
-    "ci.yml に「bash -n を実行し、かつ SHELL_FILES そのもの（部分一致する別名ではなく）を渡す」run: ステップが無い。一覧に載せても構文チェックされない" \
-    '(^|[^[:alnum:]_])bash +-n([^[:alnum:]_]|$)' "${SHELL_FILES_REF}"
+# リンタ本体は **同じコマンド行で** 一覧を受け取っていること（shellcheck の呼び出し）。
+# ステップ全体で「shellcheck がある」「SHELL_FILES がある」を別々に見ると、
+# `echo "list is $SHELL_FILES"` と `shellcheck bin/aidock` を並べただけで満たせてしまい、
+# 11 本が誰にも lint されないまま緑になる（レビューで実測）
+assert_ci ci_workflow_line_matches \
+    "リンタ網: shellcheck が SHELL_FILES を受け取って実行される" \
+    "ci.yml に「shellcheck に SHELL_FILES そのものを渡して実行する」コマンドが無い。一覧に載せても lint されない" \
+    '(^|[^[:alnum:]_])shellcheck([^[:alnum:]_])' "${SHELL_FILES_REF}"
+
+# `bash -n` はループ変数を経由するため 1 行に収まらない。**同じステップの中に**
+# 「一覧を回すループ」と「bash -n の実行」が揃っていることを見る。
+# 単なる言及では満たせないよう、SHELL_FILES 側は `for … in … $SHELL_FILES` の形を要求する
+assert_ci ci_workflow_step_matches \
+    "リンタ網: bash -n が SHELL_FILES を回して実行される" \
+    "ci.yml に「SHELL_FILES を for ループで回し、その各要素に bash -n を実行する」ステップが無い。一覧に載せても構文チェックされない" \
+    "(^|[^[:alnum:]_])for +[A-Za-z_][A-Za-z0-9_]* +in +.*${SHELL_FILES_REF}" \
+    '(^|[^[:alnum:]_])bash +-n([^[:alnum:]_]|$)'
 
 # --- ケース 2: すべてのシェルスクリプトがリンタの一覧に載っている -----------------------
 
@@ -387,9 +320,10 @@ for script in "${discovered_scripts[@]}"; do
     # 置いただけで呼ばれないスイートは「常に緑」と見分けが付かない。
     # パスは正規表現リテラルとしてエスケープし、直後が空白か行末であることまで見る
     # （`bash test/foo_test.sh` の探索が `bash test/foo_test.sh.bak` に当たらないように）
-    assert_ci_wires "実行網: ${script} が ci.yml から実行されている" \
-        "${script} は ci.yml のどの run: ステップからも呼ばれていない（コメント部分は数えない）" \
-        "(^|[[:space:]])bash +$(regex_escape "${script}")([[:space:]]|\$)"
+    assert_ci ci_workflow_runs_script \
+        "実行網: ${script} が ci.yml から実行されている" \
+        "${script} は ci.yml のどの run: ステップからも実行されていない（コメント部分と、if: false / continue-on-error: true で無効化されたステップは数えない）" \
+        "${script}"
 done
 
 # **1 件も見なかった場合を合格にしない。** 命名規約が変わる・発見ロジックが壊れる等で

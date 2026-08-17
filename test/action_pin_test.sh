@@ -1694,17 +1694,29 @@ done < <(find "$WORKFLOW_DIR" -maxdepth 1 -type f \( -name '*.yml' -o -name '*.y
 # --- 網羅性テスト自身の配線を、別のスイートから固定する -------------------------------
 #
 # `test/ci_coverage_test.sh` は「全スイートが ci.yml から実行されているか」を検査するが、
-# **自分のステップが削除された場合だけは自分で気付けない**（走らなくなるので何も言わない）。
+# **自分のステップが無効化された場合だけは自分で気付けない**（走らなくなるので何も言わない）。
 # その結果、以後の追記漏れ・未配線スイートが一切検出されないまま CI は緑で通る。
 # 検査の連鎖はどこかで別のスイートに支えさせる必要があるので、常時実行される本スイートから
-# 1 行だけ固定する（`test/sec18_denylist_test.sh` が e2e 側の配線を固定しているのと同じ前例）。
-CI_WORKFLOW_FILE="${WORKFLOW_DIR}/ci.yml"
-# 行頭コメントを除いた実行部分に、網羅性テストの実行が残っていることを確かめる
-if grep -v '^[[:space:]]*#' "${CI_WORKFLOW_FILE}" 2> /dev/null | grep -Eq '(^|[[:space:]])bash +test/ci_coverage_test\.sh([[:space:]]|$)'; then
+# 1 件だけ固定する（`test/sec18_denylist_test.sh` が e2e 側の配線を固定しているのと同じ前例）。
+#
+# 判定は**共有ライブラリに委ねる**。ここに独自の grep を書くと、当初そうしたように
+# 行末コメントや `name:` の言及でも「配線されている」と読む弱い版になり、
+# **支え役のはずの表明が最初に破れる**（レビューで実測）
+# shellcheck source=test/lib/ci_workflow.sh
+source "${SCRIPT_DIR}/lib/ci_workflow.sh"
+
+# 抽出結果を置く一時ファイル（このスイートが既に持っている TEST_TMP の下に作る）
+COVERAGE_WIRING_TMP="${TEST_TMP}/ci-commands"
+# ci.yml の実行内容を読み込む
+if ! ci_workflow_load "${WORKFLOW_DIR}/ci.yml" "${COVERAGE_WIRING_TMP}"; then
+    fail 'ci.yml still runs test/ci_coverage_test.sh (coverage net is wired)' \
+        "could not read the run: steps from ${WORKFLOW_DIR}/ci.yml, so the coverage step's wiring could not be verified"
+# 網羅性テストが実際に実行されていることを確かめる
+elif ci_workflow_runs_script 'test/ci_coverage_test.sh'; then
     pass 'ci.yml still runs test/ci_coverage_test.sh (coverage net is wired)'
 else
     fail 'ci.yml still runs test/ci_coverage_test.sh (coverage net is wired)' \
-        "the CI coverage step is gone from ${CI_WORKFLOW_FILE}; without it, scripts missing from SHELL_FILES and unwired suites stop being detected and CI stays green"
+        "the CI coverage step no longer runs in ${WORKFLOW_DIR}/ci.yml; without it, scripts missing from SHELL_FILES and unwired suites stop being detected and CI stays green"
 fi
 
 # 検査結果の合計を、他のテストスイートと同じ書式で出力する
