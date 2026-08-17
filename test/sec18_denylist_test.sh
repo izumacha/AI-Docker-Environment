@@ -300,30 +300,21 @@ source "${SCRIPT_DIR}/lib/ci_workflow.sh"
 # ci.yml の実行内容を読み込む（読めなければ配線を検査できないので失敗として数える）
 if ci_workflow_load "${REPO_ROOT}/.github/workflows/ci.yml" "${TEST_TMP}/ci-commands"; then
     # e2e ジョブが e2e スクリプトを実行していること
-    if ci_workflow_runs_script 'test/sec18_denylist_e2e.sh'; then
-        report 0 "配線: e2e ジョブが本スクリプトを実行する"
-    else
-        report_fail "配線: e2e ジョブが本スクリプトを実行する" \
-            "ci.yml のどの run: ステップも test/sec18_denylist_e2e.sh を実行していない"
-    fi
+    assert_with ci_workflow_runs_script "配線: e2e ジョブが本スクリプトを実行する" \
+        "ci.yml のどの run: ステップも test/sec18_denylist_e2e.sh を実行していない" \
+        'test/sec18_denylist_e2e.sh'
     # type-check ジョブが本テストを実行していること
-    if ci_workflow_runs_script 'test/sec18_denylist_test.sh'; then
-        report 0 "配線: type-check ジョブが本テストを実行する"
-    else
-        report_fail "配線: type-check ジョブが本テストを実行する" \
-            "ci.yml のどの run: ステップも test/sec18_denylist_test.sh を実行していない"
-    fi
+    assert_with ci_workflow_runs_script "配線: type-check ジョブが本テストを実行する" \
+        "ci.yml のどの run: ステップも test/sec18_denylist_test.sh を実行していない" \
+        'test/sec18_denylist_test.sh'
     # 網羅性テストが実行されていること。**輪を断つためにここでも固定する**:
     # `ci_coverage_test.sh` の配線は `action_pin_test.sh` が、`action_pin_test.sh` の配線は
     # `ci_coverage_test.sh` が見ているだけなので、**その 2 つを同時に止めると誰も気付かない**
     # （検査が走らなければ何も報告しない、という同じ形が 1 段上に移るだけ。レビューで指摘）。
     # 3 本目の支えを別のスイートに置くと、同時に止める必要のあるステップが 1 つ増える
-    if ci_workflow_runs_script 'test/ci_coverage_test.sh'; then
-        report 0 "配線: type-check ジョブが網羅性テストを実行する"
-    else
-        report_fail "配線: type-check ジョブが網羅性テストを実行する" \
-            "ci.yml のどの run: ステップも test/ci_coverage_test.sh を実行していない。これが止まると SHELL_FILES への追記漏れも未配線スイートも検出されなくなる"
-    fi
+    assert_with ci_workflow_runs_script "配線: type-check ジョブが網羅性テストを実行する" \
+        "ci.yml のどの run: ステップも test/ci_coverage_test.sh を実行していない。これが止まると SHELL_FILES への追記漏れも未配線スイートも検出されなくなる" \
+        'test/ci_coverage_test.sh'
 else
     report_fail "配線: ci.yml の run: ステップを読み取れる" \
         "could not read the run: steps from ci.yml, so the wiring of the SEC-18 scripts could not be verified"

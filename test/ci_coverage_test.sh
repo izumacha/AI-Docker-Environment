@@ -113,6 +113,11 @@ extract_shell_files() {
             if (structural[NR]) {
                 # 別の構造行に出会った時点で、直前のブロック本文は終わっている
                 collecting = ($0 ~ /^[[:space:]]*SHELL_FILES:[[:space:]]*>-[[:space:]]*$/)
+                # **定義が何回現れたかを数える。** 一覧が 2 か所に分かれると、
+                # ここで全部を合流させたぶんには「載っている」と見えるのに、
+                # 実際に lint するジョブが読むのは自分の env だけなので、
+                # 片方のジョブに置かれたファイルは誰にも lint されない（レビューで実測）
+                if (collecting) { definitions++ }
                 next
             }
             # 本文の収集中でなければ関係ない
@@ -122,6 +127,14 @@ extract_shell_files() {
             # `for f in $SHELL_FILES`）も空白で分割する。1 行 1 パスと決め打つと、
             # 2 つを同じ行に書いた（消費側には何の影響も無い）だけで誤報する
             for (i = 1; i <= NF; i++) { print $i }
+        }
+        # 定義がちょうど 1 つでなければ、この検査の前提（一覧は 1 か所）が崩れている。
+        # 合流させた結果を返すと上記の穴を隠すので、理由を述べて失敗させる
+        END {
+            if (definitions != 1) {
+                printf "SHELL_FILES is defined %d times in the workflow; this test assumes exactly one definition, because entries split across jobs are linted by neither\n", definitions > "/dev/stderr"
+                exit 1
+            }
         }
     '
 }
@@ -222,22 +235,6 @@ array_contains() {
     return 1
 }
 
-# 「ci.yml の実行が この条件を満たす」ことを 1 ケースとして数える共通の枠。
-# 第 1 引数が判定関数、第 2 引数がケース名、第 3 引数が失敗時の診断、以降がその関数への引数
-assert_ci() {
-    # 判定関数・ケース名・診断を取り出す
-    local matcher="$1" name="$2" diagnostic="$3"
-    # 残りを判定関数へ渡す引数として扱う
-    shift 3
-    # 条件を満たせば成功として数える
-    if "${matcher}" "$@"; then
-        report 0 "${name}"
-    else
-        # 診断はこのケース固有の内容にする（共通ヘルパーは lib/harness.sh 側）
-        report_fail "${name}" "${diagnostic}"
-    fi
-}
-
 # --- ケース 1: リンタの一覧が実際に使われている -----------------------------------------
 
 # **一覧に載っていること**は、その一覧を読むステップが生きていて初めて意味を持つ。
@@ -255,19 +252,22 @@ SHELL_FILES_REF='[$][{]?SHELL_FILES[}]?([^[:alnum:]_]|$)'
 # ステップ全体で「shellcheck がある」「SHELL_FILES がある」を別々に見ると、
 # `echo "list is $SHELL_FILES"` と `shellcheck bin/aidock` を並べただけで満たせてしまい、
 # 一覧のほとんどが誰にも lint されないまま緑になる（レビューで実測）
-assert_ci ci_workflow_line_matches \
+assert_with ci_workflow_line_matches \
     "リンタ網: shellcheck が SHELL_FILES を受け取って実行される" \
     "ci.yml に「shellcheck に SHELL_FILES そのものを渡して実行する」コマンドが無い。一覧に載せても lint されない" \
-    '(^|[^[:alnum:]_])shellcheck([^[:alnum:]_])' "${SHELL_FILES_REF}"
+    '(^|[;&|(][[:space:]]*)shellcheck([^[:alnum:]_])' "${SHELL_FILES_REF}"
 
 # `bash -n` はループ変数を経由するため 1 行に収まらない。**同じステップの中に**
 # 「一覧を回すループ」と「bash -n の実行」が揃っていることを見る。
 # 単なる言及では満たせないよう、SHELL_FILES 側は `for … in … $SHELL_FILES` の形を要求する
-assert_ci ci_workflow_step_matches \
+# **どちらのパターンもコマンドの位置に錨を打つ。** 語境界だけだと
+# `echo "TODO: restore for f in $SHELL_FILES loop"` の一言がループの代わりを務めてしまい、
+# 実際には 1 ファイルしか構文チェックしていない状態が緑で通る（レビューで実測）
+assert_with ci_workflow_step_matches \
     "リンタ網: bash -n が SHELL_FILES を回して実行される" \
     "ci.yml に「SHELL_FILES を for ループで回し、その各要素に bash -n を実行する」ステップが無い。一覧に載せても構文チェックされない" \
-    "(^|[^[:alnum:]_])for +[A-Za-z_][A-Za-z0-9_]* +in +.*${SHELL_FILES_REF}" \
-    '(^|[^[:alnum:]_])bash +-n([^[:alnum:]_]|$)'
+    "(^|[;&|(][[:space:]]*)for +[A-Za-z_][A-Za-z0-9_]* +in +[^;&|]*${SHELL_FILES_REF}" \
+    '(^|[;&|(][[:space:]]*)bash +-n([^[:alnum:]_]|$)'
 
 # --- ケース 2: すべてのシェルスクリプトがリンタの一覧に載っている -----------------------
 
@@ -319,7 +319,7 @@ for script in "${discovered_scripts[@]}"; do
     # 置いただけで呼ばれないスイートは「常に緑」と見分けが付かない。
     # パスは正規表現リテラルとしてエスケープし、直後が空白か行末であることまで見る
     # （`bash test/foo_test.sh` の探索が `bash test/foo_test.sh.bak` に当たらないように）
-    assert_ci ci_workflow_runs_script \
+    assert_with ci_workflow_runs_script \
         "実行網: ${script} が ci.yml から実行されている" \
         "${script} は ci.yml のどの run: ステップからも実行されていない（コメント部分と、if: false / continue-on-error: true で無効化されたステップは数えない）" \
         "${script}"

@@ -108,7 +108,6 @@ fail() {
     FAIL=$((FAIL + 1))
 }
 
-
 # ワークフローの構造を 1 度だけ走査し、特権の根拠が本文にあるかどうかを調べる関数
 # 第 1 引数: ワークフローファイルのパス
 # 判定を必ず標準出力へ出す（`privileged` = 特権の根拠がある / `read-only` = 根拠が無い）。
@@ -1657,7 +1656,7 @@ elif ci_workflow_runs_script 'test/ci_coverage_test.sh'; then
     pass 'ci.yml still runs test/ci_coverage_test.sh (coverage net is wired)'
 else
     fail 'ci.yml still runs test/ci_coverage_test.sh (coverage net is wired)' \
-        "the CI coverage step no longer runs in ${WORKFLOW_DIR}/ci.yml; without it, scripts missing from SHELL_FILES and unwired suites stop being detected and CI stays green"
+        "the CI coverage step no longer gates in ${WORKFLOW_DIR}/ci.yml; without it, scripts missing from SHELL_FILES and unwired suites stop being detected and CI stays green"
 fi
 
 # 検査結果の合計を、他のテストスイートと同じ書式で出力する
