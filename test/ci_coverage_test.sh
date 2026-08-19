@@ -209,6 +209,9 @@ array_contains() {
 # 2 つの消費側を固定しないと、`shellcheck $SHELL_FILES` を
 # `shellcheck bin/aidock` に書き換えるだけで一覧のほとんどが誰にも lint されなくなるのに
 # 本テストは緑のまま通る（レビューで実測）
+# コマンドの開始位置（`sudo` / `timeout` などの実行ラッパを読み飛ばす綴り）は
+# ライブラリの `CI_WORKFLOW_COMMAND_START` を使う。ここに独自の狭い版を書くと、
+# 「実際に呼ばれているか」への答えが 2 つに割れる（§6 DRY）。
 # 変数参照は `$SHELL_FILES` と `${SHELL_FILES}` のどちらの書き方でも同じ意味なので両方を認め、
 # **直後が識別子の文字でないこと**まで見る（`$SHELL_FILES_FAST` のような別変数に当たらないように）
 SHELL_FILES_REF="[$][{]?${SHELL_FILES_VAR}[}]?([^[:alnum:]_]|$)"
@@ -227,7 +230,7 @@ assert_with ci_workflow_command_matches \
     "リンタ網: shellcheck が SHELL_FILES を受け取って実行される" \
     "ci.yml に「shellcheck に SHELL_FILES そのものを渡して実行する」コマンドが、一覧を定義したジョブに無い。一覧に載せても lint されない（失敗を握り潰す形も数えない）" \
     "${shell_files_job}" \
-    '(^|[;&|(][[:space:]]*)shellcheck([^[:alnum:]_])' "${SHELL_FILES_REF}"
+    "${CI_WORKFLOW_COMMAND_START}shellcheck([^[:alnum:]_])" "${SHELL_FILES_REF}"
 
 # `bash -n` はループ変数を経由するため 1 行に収まらない。**同じステップの中に**
 # 「一覧を回すループ」と「bash -n の実行」が揃っていることを見る。
@@ -239,8 +242,8 @@ assert_with ci_workflow_step_matches \
     "リンタ網: bash -n が SHELL_FILES を回して実行される" \
     "ci.yml に「SHELL_FILES を for ループで回し、その各要素に bash -n を実行する」ステップが、一覧を定義したジョブに無い。一覧に載せても構文チェックされない（失敗を握り潰す形も数えない）" \
     "${shell_files_job}" \
-    "(^|[;&|(][[:space:]]*)for +[A-Za-z_][A-Za-z0-9_]* +in +[^;&|]*${SHELL_FILES_REF}" \
-    '(^|[;&|(][[:space:]]*)bash +-n([^[:alnum:]_]|$)'
+    "${CI_WORKFLOW_COMMAND_START}for +[A-Za-z_][A-Za-z0-9_]* +in +[^;&|]*${SHELL_FILES_REF}" \
+    "${CI_WORKFLOW_COMMAND_START}bash +-n([^[:alnum:]_]|$)"
 
 # --- ケース 2: すべてのシェルスクリプトがリンタの一覧に載っている -----------------------
 

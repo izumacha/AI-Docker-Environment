@@ -318,8 +318,15 @@ if ci_workflow_load "${REPO_ROOT}/.github/workflows/ci.yml" "${TEST_TMP}/ci-comm
         "ci.yml の type-check ジョブに test/ci_coverage_test.sh を実行する run: ステップが無い。これが止まると SHELL_FILES への追記漏れも未配線スイートも検出されなくなる" \
         'test/ci_coverage_test.sh' 'type-check'
 else
-    report_fail "配線: ci.yml の run: ステップを読み取れる" \
-        "could not read the run: steps from ci.yml, so the wiring of the SEC-18 scripts could not be verified"
+    # **読み込めなかったときも、上の 3 件を 1 件ずつ失敗として数える。**
+    # 別名のケース 1 件にまとめると、名前の付いた 3 件が集計から**消える**——
+    # 「表明が出ていない」ことに気付ける仕組みが無いので、静かに検査が減る
+    report_fail "配線: e2e ジョブが本スクリプトを実行する" \
+        "ci.yml の run: ステップを読み取れず、配線を検証できませんでした（ワークフローが移動・変形した可能性）"
+    report_fail "配線: type-check ジョブが本テストを実行する" \
+        "ci.yml の run: ステップを読み取れず、配線を検証できませんでした（ワークフローが移動・変形した可能性）"
+    report_fail "配線: type-check ジョブが網羅性テストを実行する" \
+        "ci.yml の run: ステップを読み取れず、配線を検証できませんでした（ワークフローが移動・変形した可能性）"
 fi
 
 # 集計を出して、失敗が 1 件でもあれば非ゼロで終わる

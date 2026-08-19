@@ -48,6 +48,12 @@
 #   ci_workflow_regex_escape    <string>          # literal text -> safe ERE fragment
 # `<job>` は絞り込むジョブ名。空文字列を渡すとジョブを問わない。
 
+# **コマンドの開始位置**を表す正規表現の断片（実行ラッパと環境変数の前置きを読み飛ばす）。
+# `ci_workflow_runs_script` と、リンタの綴りを照合する呼び出し側の**両方**がこれを使う——
+# 別々に書くと「このコマンドは実際に呼ばれているか」への答えが 2 つに割れ、
+# 片方だけが `sudo shellcheck …` のような等価な書き換えを認めなくなる（レビューで実測）
+CI_WORKFLOW_COMMAND_START='^[(]?[[:space:]]*((sudo|env|nice|timeout|command|exec)[[:space:]]+|[0-9]+[smhd]?[[:space:]]+|[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*'
+
 # 抽出した「実行されるコマンド」を保持するファイル。1 行が
 # `<ジョブ名>#<ステップ番号><TAB><ゲートに効くか(1/0)><TAB><コマンドの断片>`
 CI_WORKFLOW_COMMANDS=""
@@ -109,7 +115,7 @@ emit_structural_lines() {
             sub(/[[:space:]]*#.*$/, "", probe)
             probe = tolower(probe)
             # `run: |` や `prompt: >-` のような行なら、次の行から本文として読み飛ばす
-            if (probe ~ /^[[:space:]]*(-[[:space:]]+)?[a-z_][a-z0-9_.-]*[[:space:]]*:[[:space:]]*[|>][0-9]*[+-]?[[:space:]]*$/) {
+            if (probe ~ /^[[:space:]]*(-[[:space:]]+)?[a-z_][a-z0-9_.-]*[[:space:]]*:[[:space:]]*[|>]([0-9]*[+-]?|[+-]?[0-9]*)[[:space:]]*$/) {
                 in_scalar = 1
                 # 本文の範囲は**鍵の桁**で決める。ダッシュの桁で決めると、
                 # `- if: >-` の本文だけでなく**同じ手順の兄弟キー**（次行の `uses:` 等）まで
@@ -185,80 +191,275 @@ ci_workflow_extract() {
         # awk の未初期化変数は 0 なので、初期化を落とすと `step_dash_indent` が 0 と読まれ、
         # ジョブ直下の `continue-on-error:` までステップ内のキーとして扱われ、
         # ジョブ単位の無効化が効かなくなる（この初期化を落として実測した）
-        BEGIN { jobs_indent = -1; job_indent = -1; steps_indent = -1; step_dash_indent = -1; env_indent = -1; step_key_indent = -1 }
+        BEGIN {
+            jobs_indent = -1; job_indent = -1; steps_indent = -1
+            step_dash_indent = -1; env_indent = -1; step_key_indent = -1; defaults_indent = -1; job_key_indent = -1
 
-        # コメント部分（行頭、または空白に続く # から行末まで）を落とす
-        function strip_comment(t) { sub(/(^|[[:space:]])#.*$/, "", t); return t }
+            # **ワークフロー直下の `defaults:` は先に 1 度だけ読んでおく。**
+            # 出力はジョブ 1 つ分を確定させてから行うため、`jobs:` より後ろに書かれた既定を
+            # 本文と同じ 1 回の走査で拾うと、既に確定したジョブには反映できない
+            # （YAML のキー順は自由で、Actions は位置に関わらずトップレベルの `defaults:` を適用する）。
+            # 桁 0 の行だけを見るので、`run: |` の本文（必ず字下げされる）と取り違えることはない
+            while ((getline preline < ARGV[1]) > 0) {
+                # Windows 改行が混じっていても桁の判定が狂わないよう CR を落とす
+                sub(/\r$/, "", preline)
+                # **行末コメントを落としてから判定する。** 本文側の走査は既にそうしており
+                # （`if: false  # 理由` を取りこぼさないため）、ここだけ生の行を見ると
+                # `defaults:  # 全ジョブ共通` がフロー形式に、`shell: bash  # 明示` が未知のシェルに見え、
+                # **全ジョブの全ステップが合否の証拠から外れて**すべて「配線されていない」と誤報される
+                sub(/(^|[[:space:]])#.*$/, "", preline)
+                # **鍵の引用符も本文の走査と同じ規則で落とす。** ここだけ素の綴りを見ていると
+                # `"defaults":` / `"shell":` の 2 文字で既定シェルの検出をすり抜けられ、
+                # `-e` を落とすワークフロー既定が「無い」ものとして扱われる（レビューで実測）
+                preline = unquote_key(preline)
+                # 空行（コメントだけの行を含む）はブロックの内外を変えない
+                if (preline ~ /^[[:space:]]*$/) { continue }
+                # 桁 0 の鍵が来たら、直前のトップレベルブロックは終わっている
+                if (preline !~ /^[[:space:]]/) { in_top_defaults = (preline ~ /^defaults:/) }
+                # フロー形式（`defaults: {run: {shell: …}}`）は中身を構造として読めないので未知扱い
+                if (preline ~ /^defaults:[[:space:]]*[^[:space:]]/) { workflow_shell = "?" ; in_top_defaults = 0 }
+                # `run:` がフロー形式なら中の `shell:` を読めないので、未知のシェル扱いにする
+                if (in_top_defaults && preline ~ /^[[:space:]]+run:[[:space:]]*[^[:space:]]/) {
+                    workflow_shell = "?"
+                }
+                # ブロック形式の中に現れた `shell:` を既定として控える
+                if (in_top_defaults && preline ~ /^[[:space:]]+shell:[[:space:]]*[^[:space:]]/) {
+                    workflow_shell = read_shell_value(preline)
+                }
+            }
+            # 本文の走査に影響しないよう読み終えたファイルを閉じる
+            close(ARGV[1])
+        }
+
+        # **引用符の扱いはこの 1 か所に集約する。** 以前は「コメントの開始位置」「括弧の釣り合い」
+        # 「行が閉じているか」「区切り記号かどうか」で同じ状態機械を 4 回書いており、
+        # どれか 1 つにだけ修正が入ると「どこでコマンドが終わるか」と「行が続いているか」の
+        # 答えが食い違う（§6 DRY。レビューで指摘）。
+        #
+        # 引用符で囲まれた部分を**同じ長さの空白**へ置き換えた写しを返す。桁がずれないので、
+        # 呼び出し側は写しの上で位置を探して、元の文字列を同じ位置で切れる。
+        # 閉じずに行が終わったかどうかは `MASK_UNCLOSED` に入れる（awk に多値返却が無いため）。
+        # 規則は 1 つ: **単一引用符の外側では、バックスラッシュが次の 1 文字を打ち消す**
+        function mask_quoted(t,   i, c, out, in_single, in_double) {
+            out = ""; in_single = 0; in_double = 0
+            for (i = 1; i <= length(t); i++) {
+                c = substr(t, i, 1)
+                # 打ち消された 2 文字は、区切りにもコメントにも括弧にもならない
+                if (c == "\\" && !in_single && i < length(t)) { out = out "  "; i++; continue }
+                # 引用符そのものは中身と同じく空白にする（開閉の状態だけ更新する）
+                if (c == "\"" && !in_single) { in_double = !in_double; out = out " "; continue }
+                if (c == "\047" && !in_double) { in_single = !in_single; out = out " "; continue }
+                # 引用符の内側は文字列なので、すべて空白へ潰す
+                if (in_single || in_double) { out = out " "; continue }
+                # 引用符の外側はそのまま残す
+                out = out c
+            }
+            # 閉じないまま行が終わったか（次の行へ続いているか）を控える
+            MASK_UNCLOSED = (in_single || in_double) ? 1 : 0
+            return out
+        }
+
+        # コメント部分（行頭、または空白に続く # から行末まで）を落とす。
+        # 引用符の内側の `#` は落とさない——素の正規表現で切ると
+        # `bash x --label \047issue # 94\047 || true` が途中で切られ、**後ろの `|| true` ごと消える**
+        function strip_comment(t,   masked, i, prev) {
+            masked = mask_quoted(t)
+            for (i = 1; i <= length(masked); i++) {
+                # 引用符の外側に現れた `#` だけが候補
+                if (substr(masked, i, 1) != "#") { continue }
+                # 行頭か、空白の直後であればそこからがコメント（判定は元の文字列で行う）
+                prev = (i > 1) ? substr(t, i - 1, 1) : ""
+                if (i == 1 || prev == " " || prev == "\t") { return substr(t, 1, i - 1) }
+            }
+            return t
+        }
         # 前後の空白を落とす
         function trim(t) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", t); return t }
+
+        # **鍵を囲む引用符を落として揃える。** YAML は `"shell": bash` を `shell: bash` と
+        # 同じ鍵として読むので、素の綴りだけを見ると引用符 2 つで検出をすり抜けられる。
+        # 値には触らない（値の引用符は `read_shell_value` / `is_disabling` 側で扱う）
+        function unquote_key(t,   probe) {
+            probe = t
+            if (probe ~ /^[[:space:]]*-?[[:space:]]*["\047][A-Za-z0-9_.-]+["\047][[:space:]]*:/) {
+                match(probe, /["\047][A-Za-z0-9_.-]+["\047]/)
+                probe = substr(probe, 1, RSTART - 1) substr(probe, RSTART + 1, RLENGTH - 2) substr(probe, RSTART + RLENGTH)
+            }
+            return probe
+        }
+
+        # `shell:` の行から値だけを取り出す。**引用符は落とす**——YAML では `shell: "bash"` と
+        # `shell: bash` は同じスカラーなので、引用の有無で「未知のシェル」に転ぶと、
+        # 見た目だけの整形で「どこからも呼ばれていない」と事実と逆の診断が出る
+        # （`is_disabling` が同じ理由で引用符を正規化しているのと揃える）。
+        # 2 か所（ステップの `shell:` と `defaults:` の `shell:`）から呼ぶのでここに置く（§6 DRY）
+        function read_shell_value(t,   value) {
+            value = t
+            sub(/^[[:space:]]*-?[[:space:]]*shell:[[:space:]]*/, "", value)
+            gsub(/["\047]/, "", value)
+            return trim(value)
+        }
+
+        # 断片の中の丸括弧の釣り合い（開き − 閉じ）を返す。引用符の中は数えない
+        function paren_delta(t,   masked, i, c, delta) {
+            masked = mask_quoted(t)
+            delta = 0
+            for (i = 1; i <= length(masked); i++) {
+                c = substr(masked, i, 1)
+                if (c == "(") { delta++ }
+                else if (c == ")") { delta-- }
+            }
+            return delta
+        }
+
+        # 引用符が閉じていない（＝次の行へ続く）かどうかを返す
+        function unbalanced_quotes(t) {
+            mask_quoted(t)
+            return MASK_UNCLOSED
+        }
+
+        # heredoc の区切り語を囲む引用符（`<<` の直後に引用符付きで書かれた区切り語）だけを
+        # 外した写しを返す。
+        # 区切り語は文字列ではなく**名前**なので、引用符を潰す処理の前に外しておく
+        function unquote_heredoc(t,   out, rest, matched) {
+            out = ""
+            rest = t
+            # 見つかるたびに、その部分の引用符だけを落として繋ぎ直す
+            # 区切り語に使える字はシェルの識別子より広い（`EOF-1` / `EOF.1` / `1EOF` も有効）ので、
+            # 引用符の中の「空白と引用符以外がひと続き」を区切り語として扱う
+            while (match(rest, /<<-?[[:space:]]*["\047][^"\047[:space:]]+["\047]/)) {
+                matched = substr(rest, RSTART, RLENGTH)
+                gsub(/["\047]/, "", matched)
+                out = out substr(rest, 1, RSTART - 1) matched
+                rest = substr(rest, RSTART + RLENGTH)
+            }
+            # 残りをそのまま繋いで返す
+            return out rest
+        }
+
+        # 算術展開（`$(( … ))` / `(( … ))`）を取り除いた写しを返す。内側の入れ子から順に潰すので
+        # `$(( (1 << A) + B ))` のような形も残らない。heredoc の判定にだけ使う
+        function strip_arithmetic(t,   guard) {
+            # 置換のたびに文字列は短くなるが、万一に備えて回数にも上限を置く
+            guard = 0
+            while (guard < 100) {
+                guard++
+                # まず `((` … `))` の形を丸ごと落とす
+                if (match(t, /\$?\(\([^()]*\)\)/)) {
+                    t = substr(t, 1, RSTART - 1) " " substr(t, RSTART + RLENGTH)
+                    continue
+                }
+                # **入れ子があると上の形に当たらない**（`$(( (1 << BIT) | FLAG ))` など）。
+                # まだ算術式らしい `((` が残っているときに限り、内側の括弧を 1 つ落として近づける。
+                # `(` を無条件に落とすと `( cat <<EOF )` のような部分シェルの heredoc まで
+                # 見えなくしてしまうので、`((` が残っていることを条件にする
+                if (index(t, "((") > 0 && match(t, /\([^()]*\)/)) {
+                    t = substr(t, 1, RSTART - 1) " " substr(t, RSTART + RLENGTH)
+                    continue
+                }
+                # これ以上落とせるものが無ければ終わり
+                break
+            }
+            return t
+        }
 
         # 1 行を制御演算子（`;` `&&` `||` `|` `&`）で切り、seg[] に本文・ops[] に直後の演算子を入れる。
         # **区切りを見てはじめて「失敗が job に伝わるか」が決まる**のがこの分割の理由で、
         # 演算子をコマンド末尾に貼り付いた形でしか見ないと、間に引数やリダイレクトが 1 つ入るだけで
         # `bash x 2>&1 | tee log`（落ちてもステップは 0 で終わる）を「ゲートしている」と読む
-        function split_commands(line, seg, ops,   i, n, c, nxt, prv, cur, in_single, in_double) {
-            # 断片の数・組み立て中の断片・引用符の内側にいるかの目印を初期化する
-            n = 0; cur = ""; in_single = 0; in_double = 0
-            # 1 文字ずつ見ていく
-            for (i = 1; i <= length(line); i++) {
-                # 判定に使う現在の文字と、その前後の文字を取り出す
-                c = substr(line, i, 1)
-                nxt = substr(line, i + 1, 1)
-                prv = (i > 1) ? substr(line, i - 1, 1) : ""
-                # **引用符の内側は文字列であって区切りではない。** ここを見ないと
-                # `echo "止めました; bash test/x_test.sh"` の一言が実行に化ける
-                if (c == "\"" && !in_single) { in_double = !in_double; cur = cur c; continue }
-                if (c == "\047" && !in_double) { in_single = !in_single; cur = cur c; continue }
-                # 引用符の中の文字はそのまま溜める
-                if (in_single || in_double) { cur = cur c; continue }
+        function split_commands(line, seg, ops,   i, n, c, nxt, prv, start, masked) {
+            # 引用符の中を空白へ潰した写しの上で区切りを探す（桁が同じなので元の文字列を切れる）
+            masked = mask_quoted(line)
+            n = 0; start = 1
+            for (i = 1; i <= length(masked); i++) {
+                c = substr(masked, i, 1)
+                nxt = substr(masked, i + 1, 1)
+                prv = (i > 1) ? substr(masked, i - 1, 1) : ""
                 # `;` は区切り。直後のコマンドは前の結果に関係なく走る
-                if (c == ";") { n++; seg[n] = cur; ops[n] = ";"; cur = ""; continue }
+                if (c == ";") {
+                    n++; seg[n] = substr(line, start, i - start); ops[n] = ";"; start = i + 1
+                    continue
+                }
                 # `||`（前が失敗したときだけ走る）と `|`（パイプ）を見分ける
                 if (c == "|") {
-                    n++; seg[n] = cur; cur = ""
+                    n++; seg[n] = substr(line, start, i - start)
                     if (nxt == "|") { ops[n] = "||"; i++ } else { ops[n] = "|" }
+                    start = i + 1
                     continue
                 }
                 if (c == "&") {
                     # `2>&1` / `&>log` / `<&3` はリダイレクトであって区切りではない
-                    # （区切りと誤読すると、普通に書かれた呼び出しが「ゲートしない」と誤判定される）
-                    if (prv == ">" || prv == "<" || nxt == ">") { cur = cur c; continue }
+                    if (prv == ">" || prv == "<" || nxt == ">") { continue }
                     # `&&`（前が成功したときだけ走る）と `&`（バックグラウンド実行）を見分ける
-                    n++; seg[n] = cur; cur = ""
+                    n++; seg[n] = substr(line, start, i - start)
                     if (nxt == "&") { ops[n] = "&&"; i++ } else { ops[n] = "&" }
+                    start = i + 1
                     continue
                 }
-                # 区切りでない文字は組み立て中の断片へ足す
-                cur = cur c
             }
             # 最後の断片は演算子を伴わない（行末まで続く）
-            n++; seg[n] = cur; ops[n] = ""
+            n++; seg[n] = substr(line, start); ops[n] = ""
             # 断片の数を返す（呼び出し側は 1..n だけを読む）
             return n
         }
 
         # その構造行がステップの中の鍵かどうかを返す。**ジョブ直下の鍵は `steps:` と同じ桁**に並ぶ
         # （どちらもジョブというマップの鍵なので）。ダッシュで始まる行はステップの先頭鍵なので中側。
-        function is_step_level(probe, indent) {
-            # `steps:` にまだ入っていなければ、ジョブ直下の鍵しかありえない
-            if (steps_indent < 0 || step_dash_indent < 0) { return 0 }
-            # ダッシュで始まる行はステップの 1 つ目の鍵（`- if: false` の形）
-            if (probe ~ /^[[:space:]]*-[[:space:]]/) { return 1 }
+        # その構造行が「ジョブ直下の鍵」「ステップ自身の鍵」「それより内側（入れ子の中身）」の
+        # どれかを返す。**3 通りに分けるのが要点**で、真偽 2 通りにすると
+        # `with:` の下の入れ子の並びに書かれた `- if: false` の行き先が無く、
+        # ジョブ直下（＝ジョブ全体を止める）かステップ（＝外側のステップを止める）へ
+        # 誤って割り当てられる（どちらも、実行されているスイートを「未配線」と誤報する。レビューで実測）
+        function key_scope(probe, indent) {
+            # `steps:` にまだ入っていない段階では、**ジョブ直下の鍵の桁**と比べる。
+            # 「ジョブより深ければジョブ直下」と決めると、`steps:` より前に来ることの多い
+            # `env:` / `strategy:` / `container:` の**中身**（`env: defaults: none` など）まで
+            # ジョブ直下の鍵と読み、ジョブ全体を証拠から外してしまう（レビューで実測）
+            if (steps_indent < 0 || step_dash_indent < 0) {
+                if (job_indent < 0 || indent <= job_indent) { return "outside" }
+                return (job_key_indent < 0 || indent == job_key_indent) ? "job" : "nested"
+            }
+            # ダッシュで始まる行は、**基準の桁にあるときだけ**ステップの 1 つ目の鍵（`- if: false`）
+            if (probe ~ /^[[:space:]]*-([[:space:]]|$)/) {
+                return (indent == step_dash_indent) ? "step" : "nested"
+            }
             # `steps:` と同じ桁の鍵はジョブ直下のもの（`- name:` を同じ桁に書く書式でもここで分かれる）
-            if (indent <= steps_indent) { return 0 }
-            # それより深ければステップの中の鍵
-            return 1
+            if (indent <= steps_indent) { return "job" }
+            # ステップ自身の鍵の桁ならステップのもの、それより深ければ入れ子の中身
+            return (indent == step_key_indent) ? "step" : "nested"
         }
 
         # 溜めた 1 ステップ分を、無効化されていなければジョブの控えへ移す。
         # **ここでは出力しない**のが要点で、ジョブ単位の無効化キー（`if: false` 等）は
         # YAML のキー順が自由である以上 `steps:` の**後ろ**にも書ける。書いた時点で
         # 出力済みのステップは取り消せないため、ジョブ 1 つ分を溜めてから出す
-        function flush_step(   i, j, nseg, gate, seg, ops, text, lax, pipefail, joined, njoined, carry) {
+        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k) {
             # **シェルのオプションはステップごとにリセットする。** ステップは 1 つずつ
-            # 別のシェルで走るので、前のステップの `set +e` / `pipefail` は引き継がれない
-            lax = 0
-            pipefail = 0
+            # 別のシェルで走るので、前のステップの `set +e` / `pipefail` は引き継がれない。
+            # **控えるのは `set` で明示された分だけ（-1 = 明示なし）。** シェルの既定と突き合わせるのは
+            # ジョブが確定するとき（`flush_job`）で、ここではまだ決めない——ジョブの既定シェルは
+            # `steps:` の**後ろ**にも書けるので、ステップを確定する時点では判明していないことがある
+            # （1 ステップずつ決めると、後ろに書かれた既定が最後のステップにしか効かない。レビューで実測）
+            errexit = -1
+            pipefail = -1
+            # 制御構造の深さもステップごとに数え直す
+            depth = 0
+            # そのうち「走るか分からない」側の数（実行の証拠と `set` の反映はこれで決める）
+            uncertain = 0
+            # 偽と分かる条件のブロックに入った深さ（-1 = 入っていない）
+            dead_depth = -1
+            # `case` の入れ子の数（パターン末尾の `)` を見分けるために数える）
+            case_depth = 0
+            # 直前の断片の後ろに置かれた区切り（「そもそも走らない」形の判定に使う）
+            prev_op = ""
+            # 直前までの連鎖が「そもそも走らない」状態か
+            unreachable = 0
+            # 連鎖の現在の状態（"" = 不明 / "t" = 真と分かる / "f" = 偽と分かる）。
+            # `A && B || C` のように向きが変わる連鎖では、「B が走らない」ことと
+            # 「C が走らない」ことは別物なので、区切りの種類だけでは決められない
+            chain_status = ""
+            # 部分シェル（`( … )`）の入れ子の数。**`set` はここでは外へ漏れない**
+            subshell = 0
             if (!step_disabled) {
                 # **行末の `\` は次の行へ続く 1 つの論理行。** 物理行のまま切ると、
                 # 次の行に置かれた `|| true` やパイプが呼び出しと結び付かず、
@@ -270,6 +471,10 @@ ci_workflow_extract() {
                     text = (carry != "") ? carry " " cmds[i] : cmds[i]
                     # まだ `\` で終わっていれば、次の行を待つ
                     if (text ~ /\\$/) { carry = substr(text, 1, length(text) - 1); continue }
+                    # **引用符が閉じていない行も 1 つの論理行の途中。** 閉じるまで繋がないと、
+                    # 複数行の引用符付き引数の**閉じ行**に付いた `|| true` が呼び出しと結び付かず、
+                    # 握り潰された実行が「ゲートしている」と読まれる（レビューで実測）
+                    if (unbalanced_quotes(text) && i < ncmd) { carry = text; continue }
                     # continuation が閉じたので 1 本の論理行として確定する
                     carry = ""
                     joined[++njoined] = text
@@ -281,29 +486,156 @@ ci_workflow_extract() {
                     # 1 つの論理行を断片に切る
                     nseg = split_commands(joined[i], seg, ops)
                     for (j = 1; j <= nseg; j++) {
-                        # 前後の空白を落として本文だけにする
+                        # 前後の空白を落として本文だけにする。**内側のタブは空白へ潰す**——
+                        # 控えはタブ区切りで持つので、本文にタブが残ると 6 列目がそこで切れ、
+                        # 後ろにある呼び出しが記録から消える（YAML のブロックスカラーにタブは書ける）
                         text = trim(seg[j])
+                        gsub(/\t/, " ", text)
                         # `set +e` 以降はエラーが伝わらない。`set -e` で元に戻る
                         # （`set +e … set -e` で囲った検査を「ゲートしない」と決め付けると、
                         #   実際には落ちるステップが「配線されていない」と逆の診断で赤くなる）
-                        if (text ~ /^set[[:space:]]+\+[a-z]*e[a-z]*([[:space:]]|$)/) { lax = 1 }
-                        else if (text ~ /^set[[:space:]]+-[a-z]*e[a-z]*([[:space:]]|$)/) { lax = 0 }
-                        # `pipefail` が立っていればパイプ越しでも失敗が伝わる
-                        if (text ~ /^set[[:space:]]+-[a-z]*o[[:space:]]+pipefail([[:space:]]|$)/) { pipefail = 1 }
-                        else if (text ~ /^set[[:space:]]+\+[a-z]*o[[:space:]]+pipefail([[:space:]]|$)/) { pipefail = 0 }
+                        # **オプションは語をまたいで書ける**（`set -e -o pipefail` / `set -o pipefail -e`）。
+                        # 1 語目だけを見ると、実際には落ちる書き方を「落ちない」と読んで誤報する
+                        # **制御構造の中や、偽と分かるブロックの中の `set` は反映しない。**
+                        # 走ったかどうかが分からないものをステップ全体の状態にすると、
+                        # 通らない分岐の `set -e` で握り潰しが隠れ、通るとは限らない分岐の
+                        # `set +e` で実際にはゲートするステップが「未配線」と誤報される（レビューで実測）
+                        # **部分シェル（`( … )`）の中の `set` は外へ漏れない。** 子シェルの
+                        # オプション変更なので、`set +e` のステップの中に `( set -e )` を置いても
+                        # 親は握り潰したままである（ブレースグループ `{ … }` は同じシェルなので漏れる）
+                        if (text ~ /^set([[:space:]]|$)/ && uncertain == 0 && dead_depth < 0 && subshell == 0) {
+                            if (text ~ /(^|[[:space:]])\+[a-z]*e[a-z]*([[:space:]]|$)/) { errexit = 0 }
+                            else if (text ~ /(^|[[:space:]])-[a-z]*e[a-z]*([[:space:]]|$)/) { errexit = 1 }
+                            # **長い綴りも同じ意味。** `set +o errexit` は POSIX の書き方で、
+                            # 短い綴りだけを見ると 1 行でゲートを外したまま「ゲートしている」と読む
+                            if (text ~ /(^|[[:space:]])\+[a-z]*o[[:space:]]+errexit([[:space:]]|$)/) { errexit = 0 }
+                            else if (text ~ /(^|[[:space:]])-[a-z]*o[[:space:]]+errexit([[:space:]]|$)/) { errexit = 1 }
+                            # `pipefail` が立っていればパイプ越しでも失敗が伝わる
+                            if (text ~ /(^|[[:space:]])-[a-z]*o[[:space:]]+pipefail([[:space:]]|$)/) { pipefail = 1 }
+                            else if (text ~ /(^|[[:space:]])\+[a-z]*o[[:space:]]+pipefail([[:space:]]|$)/) { pipefail = 0 }
+                        }
                         # 空の断片（`;;` や行頭の区切り）は記録しない
                         if (text == "") { continue }
-                        # 既定では「失敗すれば job が落ちる」＝ゲートに効くとみなす
-                        gate = 1
-                        # `||` の前と、バックグラウンド実行（`&`）は失敗が伝わらない
-                        if (ops[j] == "||" || ops[j] == "&") { gate = 0 }
-                        # パイプの左側は pipefail がある時だけ伝わる
-                        if (ops[j] == "|") { gate = pipefail }
-                        # `set +e` の効力下ではどう書いても伝わらない
-                        if (lax) { gate = 0 }
-                        # ジョブの控えへ積む（出力はジョブの終わりでまとめて行う）
+                        # **制御構造の深さを追う。** `if` / `while` / `for` / `case` / 関数定義の中身は
+                        # 条件や呼び出し元を読まないと実行されるか分からない。1 行で書かれた
+                        # `if false; then bash x; fi` は `then` を実行ラッパに入れないことで弾けていたが、
+                        # 同じ意味を 3 行で書くと弾けていなかった（2 行足すだけでスイートを止められる。レビューで実測）。
+                        # 閉じ側を先に見るのは `fi` / `done` が自分の階層を閉じるため
+                        # 閉じ側。**その階層が「走るか分からない」側だったかを覚えておき**、
+                        # 対応する分だけ戻す（`uncertain_at[]` が階層ごとの印）
+                        closed_group_start = -1
+                        if (text ~ /^(fi|done|esac|\})([[:space:]]|;|$)/ && depth > 0) {
+                            if (uncertain_at[depth]) { uncertain--; uncertain_at[depth] = 0 }
+                            else if (group_start[depth] >= 1) { closed_group_start = group_start[depth] }
+                            if (subshell_at[depth]) { subshell--; subshell_at[depth] = 0 }
+                            group_start[depth] = -1
+                            depth--
+                        }
+                        # **括弧は釣り合いで測る。** 閉じ側が断片の**先頭**に来るとは限らず、
+                        # `( cd /tmp; echo hi )` のように末尾で閉じる書き方だと深さが戻らない
+                        # ——この ci.yml も 1 行の部分シェルを使っており、その後ろに呼び出しを
+                        # 足した瞬間に「配線されていない」と逆の診断で赤くなる（レビューで実測）。
+                        # `$(foo)` のようなコマンド置換は開閉が揃うので差し引き 0 になる
+                        # **`case` のパターン（`never)`）の `)` は部分シェルの閉じではない。**
+                        # 数えてしまうと `case` が開いた深さがその場で打ち消され、
+                        # 一致しないアームの中身が「最上位で実行される」と読まれる（レビューで実測）
+                        paren_probe = text
+                        if (case_depth > 0 && paren_probe ~ /^[^()]*\)([[:space:]]|;|$)/) {
+                            sub(/^[^()]*\)/, "", paren_probe)
+                        }
+                        paren = paren_delta(paren_probe)
+                        if (paren < 0) {
+                            # 括弧で閉じる分も、階層ごとの印を見て戻す
+                            for (closing = 0; closing < -paren && depth > 0; closing++) {
+                                if (uncertain_at[depth]) { uncertain--; uncertain_at[depth] = 0 }
+                                else if (group_start[depth] >= 1) { closed_group_start = group_start[depth] }
+                                if (subshell_at[depth]) { subshell--; subshell_at[depth] = 0 }
+                                group_start[depth] = -1
+                                depth--
+                            }
+                        }
+                        # **条件がその場で偽と分かるブロックの中身は、どの照会からも証拠にしない。**
+                        # 深さで除くのは実行の照会だけなので、`if false; then shellcheck $LIST; fi` は
+                        # リンタの照合（ステップの形を見る側）を素通りしてしまう——2 行で lint を止められる
+                        # （実行の証拠にならないだけでなく、そもそも走らないので合否にも効かない。レビューで実測）
+                        if (dead_depth >= 0 && depth <= dead_depth) { dead_depth = -1 }
+                        # **直前の区切りも見る。** `true || bash x` / `false && bash x` は
+                        # その場で偽と分かる条件なので、その断片は 1 度も走らない
+                        # ——`|| true` より 1 トークン短くスイートを止められる（レビューで実測）
+                        # **連鎖の途中で終わらせない。** `false && a && bash x` のように
+                        # 2 つ先へ続く形でも、その先はすべて走らない（レビューで実測）。
+                        # `;` や行末で連鎖が切れたら、そこで伝播も終わる
+                        # **向きが変わる連鎖を取り違えない。** `false && echo mid || bash x` の
+                        # `bash x` は走る（`&&` が外れた時点の状態は失敗なので `||` の右が動く）。
+                        # 「直前が `||`／`&&` なら伝播を続ける」とだけ書くと、走る呼び出しを
+                        # 「未配線」と事実と逆に診断して赤くする（レビューで実測）。
+                        # 走らなかった断片は連鎖の状態を変えない（判定は最後に走った結果で決まる）
+                        if (prev_op != "||" && prev_op != "&&") { unreachable = 0; chain_status = "" }
+                        else if (prev_op == "&&") { unreachable = (chain_status == "f") }
+                        else { unreachable = (chain_status == "t") }
+                        if (!unreachable && dead_depth < 0) {
+                            if (text == "true" || text == ":") { chain_status = "t" }
+                            else if (text == "false") { chain_status = "f" }
+                            else { chain_status = "" }
+                        }
+                        # ジョブの控えへ積む。**判定に要る材料（直後の区切り・`set` の明示・深さ）ごと**渡し、
+                        # ゲートかどうかの結論はジョブが確定するときに出す
                         nbuf++
-                        buf[nbuf] = step_id "\t" gate "\t" text
+                        buf[nbuf] = step_id "\t" ops[j] "\t" ((dead_depth >= 0 || unreachable) ? 0 : errexit) "\t" pipefail "\t" uncertain "\t" text
+                        # 偽と分かる条件のブロックに入るところを覚える（この深さより深い間は無効）
+                        if (dead_depth < 0 && text ~ /^(if|while)[[:space:]]+false([[:space:]]|;|$)/) { dead_depth = depth }
+                        else if (dead_depth < 0 && text ~ /^until[[:space:]]+true([[:space:]]|;|$)/) { dead_depth = depth }
+                        # **grouping を閉じた断片に付いた区切りは、その中身すべてに掛かる。**
+                        # `( bash x ) || true` は中の `bash x` も「失敗が伝わらない」——
+                        # 中身だけを見ると区切りが無いので「ゲートしている」と読まれる（レビューで実測）
+                        # **開いた断片そのものも中身になりうる。** `( bash x; ) || true` では
+                        # `(` と呼び出しが同じ断片に載るので、控えた位置の**次**から書き換えると
+                        # 呼び出しだけが取り残され、握り潰された実行が「ゲートしている」と読まれる
+                        if (closed_group_start >= 0 && (ops[j] == "||" || ops[j] == "&" || ops[j] == "|")) {
+                            for (k = closed_group_start; k <= nbuf; k++) {
+                                split(buf[k], inner, "\t")
+                                buf[k] = inner[1] "\t" ops[j] "\t" inner[3] "\t" inner[4] "\t" inner[5] "\t" inner[6]
+                            }
+                        }
+                        # 次の断片から見た「直前」を控える
+                        prev_op = ops[j]
+                        # 開き側はこの断片の後ろから効く（`if` 自身は外側の階層にある）
+                        # `case` の入れ子を数えておく（上のパターン判定に使う）
+                        if (text ~ /^case([[:space:]]|$)/) { case_depth++ }
+                        else if (text ~ /^esac([[:space:]]|;|$)/ && case_depth > 0) { case_depth-- }
+                        # **「必ず走る入れ子」と「走るか分からない入れ子」を分ける。**
+                        # `( … )` / `{ … }` の grouping と `if true` / `while true` の本体は必ず走るので、
+                        # 中の `set +e` は効くし、中の呼び出しは実行の証拠になる。
+                        # 一方 `if <条件>` / ループ / 関数定義の中身は、条件や呼び出し元を読まないと決まらない
+                        # （両者を深さ 1 本で扱うと、grouping の中の呼び出しが「未配線」と誤報され、
+                        #   通る分岐の `set +e` が握り潰しを隠す。どちらもレビューで実測）
+                        if (text ~ /^(if|while)[[:space:]]+(true|:)([[:space:]]|;|$)/) { depth++ }
+                        else if (text ~ /^(if|while|until|for|case|select)([[:space:]]|$)/) {
+                            depth++; uncertain++; uncertain_at[depth] = 1
+                        }
+                        # bash の `function name { … }` 形式（`()` を伴わない綴り）も 1 階層開く
+                        else if (text ~ /^function[[:space:]]+[A-Za-z_][A-Za-z0-9_]*([[:space:]]*\{)?$/) {
+                            depth++; uncertain++; uncertain_at[depth] = 1
+                        }
+                        # 関数定義は `{` を伴う形だけを開き側に数える。`f()` と次行の `{` を
+                        # どちらも数えると 2 つ開いて 1 つしか閉じず、以降ずっと「入れ子の中」に見える
+                        else if (text ~ /^[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\(\)[[:space:]]*\{$/) {
+                            depth++; uncertain++; uncertain_at[depth] = 1
+                        }
+                        # **ブレースグループ（`cmd || { echo bad; exit 1; }`）も 1 階層開く。**
+                        # 閉じ側の `}` だけを数えると深さが 1 つ足りなくなり、以降の断片が
+                        # 「最上位」に見える——条件の中でしか走らない呼び出しが実行の証拠に化ける（レビューで実測）
+                        # grouping（`{ … }` / `( … )`）は必ず走るので uncertain は増やさない。
+                        # ただし**閉じたところに付く区切りは中身にも掛かる**ので、開始位置を控える
+                        else if (text ~ /^\{([[:space:]]|$)/) { depth++; group_start[depth] = nbuf }
+                        # 部分シェルの開き分（釣り合いの正側）を足す。
+                        # **部分シェルであることを階層ごとに覚える**（中の `set` を外へ持ち出さない）
+                        else if (paren > 0) {
+                            for (closing = 0; closing < paren; closing++) {
+                                depth++; group_start[depth] = nbuf
+                                subshell_at[depth] = 1; subshell++
+                            }
+                        }
                     }
                 }
             }
@@ -317,7 +649,7 @@ ci_workflow_extract() {
         # ステップ番号にジョブ名を冠するのは、呼び出し側が「どのジョブが実行するか」まで
         # 問えるようにするため（env は同じジョブからしか見えないので、ジョブを跨いだ
         # 分割は「配線されている」と答えてはいけない）
-        function flush_job(   i) {
+        function flush_job(   i, parts, shell_name, errexit_on, pipefail_on, gate) {
             # 未確定のステップをジョブの控えへ移してから判断する
             flush_step()
             # **env の記録は無効化に関わらず出す。** これは「何が実行されるか」ではなく
@@ -325,15 +657,35 @@ ci_workflow_extract() {
             # 止まっているジョブの定義を「定義が 0 件」と報告すると、
             # 一覧の書式が壊れたのか job が止まっているのかを取り違えた診断になる
             for (i = 1; i <= nenv; i++) { print jobname "#" envbuf[i] }
-            # ジョブごと止められていなければ、コマンドの控えをまとめて出す
+            # ジョブごと止められていなければ、コマンドの控えをまとめて出す。
+            # **ここで初めて実効シェルが確定する**（ステップ自身の指定 > ジョブの既定 > ワークフローの既定）
             if (!job_disabled) {
-                for (i = 1; i <= nbuf; i++) { print jobname "#" buf[i] }
+                for (i = 1; i <= nbuf; i++) {
+                    # 控えた 1 件を「ステップ番号・直後の区切り・errexit・pipefail・本文」に分ける
+                    split(buf[i], parts, "\t")
+                    # そのステップの実効シェルを決める
+                    shell_name = (shells[parts[1]] != "") ? shells[parts[1]] : ((job_shell != "") ? job_shell : workflow_shell)
+                    # `set` で明示されていなければシェルの既定に従う。既定（指定なし）と
+                    # `bash` / `sh` は `-e` を含むが、自前テンプレートや `python` 等は含むとは限らない
+                    errexit_on = (parts[3] == "-1") ? ((shell_name == "" || shell_name == "bash" || shell_name == "sh") ? 1 : 0) : (parts[3] + 0)
+                    # `bash` キーワードは `-o pipefail` も含む
+                    pipefail_on = (parts[4] == "-1") ? ((shell_name == "bash") ? 1 : 0) : (parts[4] + 0)
+                    # 直後の区切りから、その失敗が job に伝わるかを決める
+                    gate = 1
+                    if (parts[2] == "||" || parts[2] == "&") { gate = 0 }
+                    if (parts[2] == "|") { gate = pipefail_on }
+                    if (!errexit_on) { gate = 0 }
+                    # 断片は trim 済みでタブを含まないので、6 列目がそのまま本文
+                    print jobname "#" parts[1] "\t" gate "\t" parts[5] "\t" parts[6]
+                }
             }
             # 次のジョブに備えて控えと状態を捨てる
             for (i = 1; i <= nenv; i++) { delete envbuf[i] }
             nenv = 0
             for (i = 1; i <= nbuf; i++) { delete buf[i] }
             nbuf = 0
+            # ステップごとのシェル指定はジョブをまたいで持ち越さない
+            for (i in shells) { delete shells[i] }
             job_disabled = 0
             step_id = 0
         }
@@ -380,8 +732,17 @@ ci_workflow_extract() {
                     # `cat <<EOF` … `bash test/x_test.sh` … `EOF` の中身を実行と読むと、
                     # ファイルへ書き出しているだけの文字列が「配線されている」証拠に化ける
                     if (heredoc_end != "") {
-                        # 終端の行に来たら本文の読み飛ばしを終える（`<<-` はタブ字下げを許すので trim して比べる）
-                        if (trim(strip_comment(line)) == heredoc_end || trim(line) == heredoc_end) { heredoc_end = "" }
+                        # 終端の行に来たら本文の読み飛ばしを終える。
+                        # **素の `<<` は字下げされた区切り語を終端と認めない**（`<<-` だけが許す）。
+                        # ここを緩くすると、本文中の字下げされた区切り語で読み飛ばしが早く終わり、
+                        # 以降の本文（＝ただのデータ）が実行と読まれる（レビューで実測）。
+                        # YAML のブロックスカラーは全体が字下げされているので、
+                        # 「開いた行より深くない」ことを条件にする
+                        if (trim(strip_comment(line)) == heredoc_end || trim(line) == heredoc_end) {
+                            if (heredoc_dash || (match(line, /[^[:space:]]/) - 1) <= heredoc_indent) {
+                                heredoc_end = ""
+                            }
+                        }
                         next
                     }
                     text = trim(strip_comment(line))
@@ -389,11 +750,39 @@ ci_workflow_extract() {
                     if (text != "" && run_folded && ncmd > 0) { cmds[ncmd] = cmds[ncmd] " " text }
                     else if (text != "") { cmds[++ncmd] = text }
                     # この行が heredoc を開いていれば、終端までの本文を読み飛ばす
-                    if (text ~ /<<-?[[:space:]]*["\047]?[A-Za-z_][A-Za-z0-9_]*/) {
-                        heredoc_end = text
-                        sub(/^.*<<-?[[:space:]]*["\047]?/, "", heredoc_end)
-                        sub(/["\047].*$/, "", heredoc_end)
-                        sub(/[^A-Za-z0-9_].*$/, "", heredoc_end)
+                    # **算術式の左シフトは heredoc ではない。** `bit=$(( 1 << SHIFT ))` を
+                    # heredoc の開始と読むと、そのステップの残り全部が本文として捨てられ、
+                    # 後ろで実行しているスイートが「配線されていない」と事実と逆の診断で赤くなる。
+                    # 判定は**算術展開を取り除いた写し**に対して行う。「`<<` より前に `((` があるか」で
+                    # 決めると、`if (( 1 > 0 )); then cat <<EOF` のように**別の場所**の `((` が
+                    # 本物の heredoc の検出を止めてしまい、本文が実行と読まれる（レビューで実測）
+                    # here-string（`<<<`）は本文を持たないので、**その出現だけ**を消してから判定する。
+                    # 行に `<<<` があるだけで判定を諦めると、同じ行の本物の heredoc を見落とし、
+                    # その本文が実行と読まれる（レビューで実測）
+                    # **引用符の中の `<<` は heredoc ではない。** 潰した写しの上で判定しないと、
+                    # `echo "use << HERE syntax"` の一言でそのステップの残りが本文として捨てられ、
+                    # 後ろの呼び出しが「配線されていない」と逆の診断で赤くなる（レビューで実測）
+                    # 判定の順序が要点: **まず heredoc の区切り語を囲む引用符だけ外し**、
+                    # そのうえで残りの引用符を潰す。逆にすると、引用符付きで書かれた区切り語まで
+                    # 空白になって heredoc を見落とし、本文が実行と読まれる（注入で実測）
+                    heredoc_probe = strip_arithmetic(mask_quoted(unquote_heredoc(text)))
+                    gsub(/<<</, " ", heredoc_probe)
+                    # `<<<`（here-string）は 1 語を渡すだけで、本文の続きを持たない。
+                    # heredoc と読むと、そこから先のステップ全部が本文として捨てられ、
+                    # 後ろの呼び出しが「配線されていない」と事実と逆の診断で赤くなる（レビューで実測）
+                    # **区切り語はシェルの識別子より広い。** `EOF-1` / `EOF.1` / `1EOF` も有効な
+                    # 区切り語なので、`[A-Za-z_][A-Za-z0-9_]*` で切り出すと `EOF-1` が `EOF` に
+                    # 縮み、終端に一生出会えないまま残り全部を本文として捨てる。区切り語は
+                    # 「空白とリダイレクト・区切りの記号以外がひと続き」として読む
+                    if (heredoc_probe ~ /<<-?[[:space:]]*[^[:space:];&|<>()]/) {
+                        # `<<-` かどうかと、開いた行の字下げを控える（終端の判定に使う）
+                        heredoc_dash = (heredoc_probe ~ /<<-/)
+                        heredoc_indent = match(line, /[^[:space:]]/) - 1
+                        heredoc_end = heredoc_probe
+                        sub(/^.*<<-?[[:space:]]*/, "", heredoc_end)
+                        sub(/[[:space:];&|<>()].*$/, "", heredoc_end)
+                        # 引用符は `unquote_heredoc` が外しているが、外し損ねた分も落としておく
+                        gsub(/["\047]/, "", heredoc_end)
                     }
                 } else if (in_env) {
                     # **空白で区切って 1 エントリずつ**控える。折りたたみブロックは最終的に
@@ -416,7 +805,7 @@ ci_workflow_extract() {
             # コメントを落としてから構造を判定する
             # （`if: false  # 理由` のように理由を添えるのが最も自然な書き方なので、
             #   コメント付きを取りこぼすと「止めたステップが動いている」ことになる）
-            probe = strip_comment(line)
+            probe = unquote_key(strip_comment(line))
             # 空になった行（コメントだけの行）は構造として扱わない
             if (trim(probe) == "") { next }
             # 字下げ幅を測る（入れ子の深さの判定に使う）
@@ -426,6 +815,33 @@ ci_workflow_extract() {
             # **中に居る間の深さは env の桁を基準に測る**（`steps:` の桁を基準にすると、
             # `steps:` より後ろに書かれた `env:` の中身が「ステップの鍵」に見えて読み落とす）
             if (env_indent >= 0 && indent <= env_indent) { env_indent = -1 }
+            # 同じ理由で `defaults:` ブロックも、同じか浅い桁の鍵が来たら終わっている
+            if (defaults_indent >= 0 && indent <= defaults_indent) { defaults_indent = -1 }
+
+            # **`jobs:` と同じかそれより浅い鍵が来たら、jobs マッピングの外に出ている。**
+            # ここでジョブの解釈を閉じないと、`jobs:` の後ろに置かれたトップレベルの
+            # `defaults:` の中の `run:` が「run という名前の新しいジョブ」に見え、
+            # 直前のジョブが確定されたうえで既定シェルも読めなくなる（レビューで実測）
+            if (jobs_indent >= 0 && job_indent >= 0 && indent <= jobs_indent) {
+                flush_job()
+                # **`jobs:` の位置も忘れる。** 覚えたままだと、`jobs:` の後ろに置かれた
+                # 別のトップレベルのブロックの中身が新しいジョブとして読まれ、
+                # `jobs:` の外にある `run:` が「CI が実行するコマンド」として記録される（レビューで実測）
+                jobs_indent = -1
+                job_indent = -1
+                steps_indent = -1
+                step_dash_indent = -1
+                step_key_indent = -1
+                env_indent = -1
+            }
+
+            # ダッシュだけの行で始まったステップは、次に現れた鍵の桁をステップの鍵の桁とする
+            if (step_dash_indent >= 0 && step_key_indent < 0 && indent > step_dash_indent) {
+                step_key_indent = indent
+            }
+
+            # ジョブに入って最初に現れた鍵の桁を、そのジョブ直下の鍵の桁として覚える
+            if (job_indent >= 0 && job_key_indent < 0 && indent > job_indent) { job_key_indent = indent }
 
             # `jobs:` の位置を覚える
             if (jobs_indent < 0 && probe ~ /^[[:space:]]*jobs:[[:space:]]*$/) { jobs_indent = indent; next }
@@ -439,17 +855,69 @@ ci_workflow_extract() {
                 # ジョブ名を控える（末尾のコロンを落とした識別子がそのまま名前）
                 jobname = trim(probe)
                 sub(/:$/, "", jobname)
+                # 次に現れる鍵の桁が、このジョブ直下の鍵の桁になる
+                job_key_indent = -1
                 steps_indent = -1
                 step_dash_indent = -1
                 step_key_indent = -1
                 env_indent = -1
+                defaults_indent = -1
+                job_shell = ""
                 next
             }
 
-            # `steps:` の位置を覚える（以降の同じ深さのダッシュがステップの区切り）
-            if (job_indent >= 0 && indent > job_indent && probe ~ /^[[:space:]]*steps:[[:space:]]*$/) {
+            # `steps:` の位置を覚える（以降の同じ深さのダッシュがステップの区切り）。
+            # **ジョブ直下の `steps:` だけを見る**——`with:` の下に `steps:` という名前の入力があると、
+            # そこを新しいステップの並びと読み、入れ子の `- run:` が実行として拾われる（レビューで実測）
+            if (job_indent >= 0 && indent > job_indent && probe ~ /^[[:space:]]*steps:[[:space:]]*$/ \
+                && (steps_indent < 0 || key_scope(probe, indent) == "job")) {
                 steps_indent = indent
                 step_dash_indent = -1
+                next
+            }
+
+            # `defaults:` ブロックの開始。ワークフロー直下なら全ジョブ、ジョブ直下ならそのジョブの既定。
+            # **ステップの `shell:` だけを見ても網は閉じない**——`defaults: run: shell: bash {0}` を
+            # 3 行足せば全ステップから `-e` が消え、どのステップも自分では `shell:` を書いていない
+            # ので「既定どおり」と読まれてしまう（レビューで実測）
+            # **ステップの中の `defaults` は別物**（action への入力や env の名前でありうる）。
+            # 桁で見分けないと、`with: defaults: enabled` の 1 行でそのジョブ全体が
+            # 合否の証拠から外れ、すべてのスイートが「配線されていない」と誤報される
+            if (probe ~ /^[[:space:]]*defaults:/ && key_scope(probe, indent) == "job") {
+                # ジョブに入った後のジョブ直下ならそのジョブ限定、それ以外はワークフロー全体
+                defaults_scope = (job_indent >= 0 && indent > job_indent) ? "job" : "workflow"
+                # ワークフロー直下のものは BEGIN の先読みが既に拾っているので、ここでは触らない
+                if (defaults_scope == "workflow") { next }
+                if (probe ~ /^[[:space:]]*defaults:[[:space:]]*$/) {
+                    # ブロック形式。以降の深い行から `shell:` を読む
+                    defaults_indent = indent
+                } else {
+                    # **フロー形式（`defaults: {run: {shell: bash {0}}}`）は 1 行に畳まれていて、
+                    # 中の `shell:` を構造行として読めない。** 確かめられない以上「既定どおり
+                    # `bash -e` で走る」とは主張できないので、未知のシェル扱いにして
+                    # そのジョブ（またはワークフロー全体）の実行を合否の証拠から外す
+                    job_shell = "?"
+                }
+                next
+            }
+
+            # `defaults:` の中の `run:` がフロー形式（`run: {shell: bash {0}}`）なら、
+            # 中の `shell:` は構造行として現れない。確かめられない以上は未知のシェル扱いにする
+            # （ブロック形式だけを見ていると、2 行で全ステップから `-e` を外せる。レビューで実測）
+            if (defaults_indent >= 0 && indent > defaults_indent \
+                && probe ~ /^[[:space:]]*run:[[:space:]]*[^[:space:]]/) {
+                # `defaults_indent` はジョブ直下の `defaults:` でしか立たない
+                # （ワークフロー直下は BEGIN の先読みが持つ）ので、ここは常にジョブ側
+                job_shell = "?"
+                next
+            }
+
+            # `defaults:` の中に書かれた `shell:` を既定として控える
+            if (defaults_indent >= 0 && indent > defaults_indent \
+                && probe ~ /^[[:space:]]*shell:[[:space:]]*[^[:space:]]/) {
+                shell_value = read_shell_value(probe)
+                # 適用範囲に応じて控え先を分ける（ジョブ側はジョブが変わればリセットされる）
+                job_shell = shell_value
                 next
             }
 
@@ -457,7 +925,7 @@ ci_workflow_extract() {
             # **`steps:` の後ろに書かれていても読む。** YAML のキー順は自由なので `env:` を後ろへ
             # 動かすのは意味を変えない整形だが、読み落とすと「定義 0 件」＝一覧が壊れたという
             # 事実と違う診断で落ちる。ステップ自身の `env:`（より深い桁）とは桁で見分ける
-            if (job_indent >= 0 && indent > job_indent && !is_step_level(probe, indent) \
+            if (job_indent >= 0 && indent > job_indent && key_scope(probe, indent) == "job" \
                 && probe ~ /^[[:space:]]*env:[[:space:]]*$/) {
                 env_indent = indent
                 next
@@ -468,7 +936,7 @@ ci_workflow_extract() {
             # 一覧だけを合流させて読むと、別のジョブへ移された一覧が「載っている」と見える一方、
             # lint するジョブから見た `$SHELL_FILES` は空になる（レビューで実測）
             if (env_indent >= 0 && indent > env_indent \
-                && probe ~ /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*:[[:space:]]*[|>][0-9]*[+-]?[[:space:]]*$/) {
+                && probe ~ /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*:[[:space:]]*[|>]([0-9]*[+-]?|[+-]?[0-9]*)[[:space:]]*$/) {
                 # 変数名を取り出す（コロンより前が名前）
                 env_var = trim(probe)
                 sub(/:.*$/, "", env_var)
@@ -480,7 +948,7 @@ ci_workflow_extract() {
             }
 
             # ステップの区切り（`steps:` の下で最初に現れたダッシュと**同じ字下げ**のダッシュ）
-            if (steps_indent >= 0 && probe ~ /^[[:space:]]*-[[:space:]]/) {
+            if (steps_indent >= 0 && probe ~ /^[[:space:]]*-([[:space:]]|$)/) {
                 # 最初のダッシュの字下げを、このジョブのステップの基準にする
                 if (step_dash_indent < 0) { step_dash_indent = indent }
                 # 基準と同じ深さのときだけ新しいステップとして扱う（入れ子の並びでは切らない）
@@ -490,8 +958,14 @@ ci_workflow_extract() {
                     # **ステップ自身の鍵が並ぶ桁**を覚える（`- ` の直後の桁）。
                     # `run:` をこの桁に限らないと、`with:` の下に書かれた `run:` という
                     # **action への入力**まで「実行されるコマンド」として拾う（レビューで実測）
-                    match(probe, /^[[:space:]]*-[[:space:]]+/)
-                    step_key_indent = RLENGTH
+                    # **鍵がダッシュと同じ行にあるとは限らない。** `-` だけの行で始めるのも
+                    # 正当な YAML で、その場合は次に現れた鍵の桁がステップの鍵の桁になる
+                    if (probe ~ /^[[:space:]]*-[[:space:]]*$/) {
+                        step_key_indent = -1
+                    } else {
+                        match(probe, /^[[:space:]]*-[[:space:]]+/)
+                        step_key_indent = RLENGTH
+                    }
                 }
             }
 
@@ -501,21 +975,31 @@ ci_workflow_extract() {
             # ジョブ直下の鍵がステップの鍵と同じ深さになり、**ジョブ全体を止めるキーが
             # 最後の 1 ステップしか止めない**（レビューで実測。round 11 で塞いだはずの形が書式違いで開く）
             if (is_disabling(probe)) {
-                if (is_step_level(probe, indent)) {
-                    # ステップの中ならそのステップだけを止める
-                    step_disabled = 1
-                } else {
-                    # ジョブ直下ならそのジョブの全ステップが対象
-                    job_disabled = 1
-                }
+                scope = key_scope(probe, indent)
+                # ステップ自身の鍵ならそのステップだけを止める
+                if (scope == "step") { step_disabled = 1 }
+                # ジョブ直下ならそのジョブの全ステップが対象
+                else if (scope == "job") { job_disabled = 1 }
+                # 入れ子の中身（action への入力など）はワークフローの制御ではないので何もしない
                 next
             }
 
             # ここから先は run: の取り出し。ステップの中でなければ関係ない
             if (step_dash_indent < 0) { next }
 
-            # ステップ自身の鍵でない `run:`（`with:` 配下の入力など）は実行ではない
-            if (probe !~ /^[[:space:]]*-[[:space:]]/ && indent != step_key_indent) { next }
+            # ステップ自身の鍵でない `run:` / `shell:`（`with:` 配下の入力など）は実行の指定ではない。
+            # ダッシュ始まりを無条件に通すと、入れ子の並びの `- run:` が実行として拾われる（レビューで実測）
+            if (key_scope(probe, indent) != "step") { next }
+
+            # **そのステップがどのシェルで走るかを控える。** 既定（Linux）は `bash -e {0}` なので
+            # コマンドが落ちればステップも落ちるが、`shell: bash {0}` のように**テンプレートを
+            # 自分で書くと `-e` が消える**——ループの途中の失敗が握り潰され、最後の 1 回の結果だけが
+            # ステップの成否になる。1 行足すだけでリンタがゲートでなくなる形なので、
+            # 確かめられない綴りは「合否に効かない」側へ倒す（fail-closed）
+            if (probe ~ /^[[:space:]]*-?[[:space:]]*shell:[[:space:]]*[^[:space:]]/) {
+                shells[step_id] = read_shell_value(probe)
+                next
+            }
 
             # `run: |` / `run: >` のブロック開始。以降の非構造行が本体
             if (probe ~ /^[[:space:]]*-?[[:space:]]*run:[[:space:]]*[|>]/) {
@@ -570,16 +1054,25 @@ ci_workflow_load() {
 ci_workflow_gating_commands() {
     # 絞り込むジョブ名（空なら絞り込まない）
     local job_filter="${1-}"
-    # 走査中の 1 行・`ジョブ名#ステップ番号`・ゲートに効くかの印・コマンド本文
-    local record key gate text
+    # 第 2 引数に `top` を渡すと、制御構造（`if` / ループ / 関数）の**中**にある断片を除く。
+    # 「本当に実行されるか」を問う照会（スクリプトの実行）はこれを使う——中身が走るかは
+    # 条件や呼び出し元を読まないと決まらないため。一方でリンタの形を見る照会は
+    # `for … do bash -n "$f"` のようにループの**中**を見たいので、除かない
+    local top_only="${2-}"
+    # 走査中の 1 行・`ジョブ名#ステップ番号`・ゲートに効くかの印・制御構造の深さ・コマンド本文
+    local record key gate depth text
     while IFS= read -r record; do
-        # 1 行を「キー」「ゲート印」「本文」の 3 列に分ける
+        # 1 行を「キー」「ゲート印」「深さ」「本文」の 4 列に分ける
         key="${record%%$'\t'*}"
         record="${record#*$'\t'}"
         gate="${record%%$'\t'*}"
+        record="${record#*$'\t'}"
+        depth="${record%%$'\t'*}"
         text="${record#*$'\t'}"
         # 失敗が job に伝わらないコマンドは、実行の証拠として数えない
         [ "${gate}" = "1" ] || continue
+        # 最上位だけを求められていれば、制御構造の中は除く
+        [ "${top_only}" != "top" ] || [ "${depth}" = "0" ] || continue
         # ジョブの絞り込みが指定されていれば、そのジョブのものだけを通す
         [ -z "${job_filter}" ] || [ "${key%%#*}" = "${job_filter}" ] || continue
         # 呼び出し側が読む形（キーと本文）で書き出す
@@ -707,7 +1200,9 @@ ci_workflow_step_matches() {
 # 第 1 引数がスクリプトのパス、第 2 引数（省略可）が絞り込むジョブ名。
 #
 # 一方で呼び出しの書き方の揺れ（`bash -x path` / `bash ./path` / `bash "path"` /
-# `FOO=1 bash path` / 実行権限に頼った `./path`）は吸収する。厳密な `bash <path>` だけを認めると、
+# `FOO=1 bash path` / `timeout 300 bash path` / 実行権限に頼った `./path`）は吸収する。
+# **条件部（`if ! bash path` など）は吸収しない**——下の `wrapper` の説明のとおり、
+# 条件に置かれたコマンドは落ちても job を止めないため。厳密な `bash <path>` だけを認めると、
 # 意味の変わらない書き換えで「どこからも呼ばれていない」という事実と逆の診断とともに赤くなる
 ci_workflow_runs_script() {
     # パスを正規表現リテラルとしてエスケープする
@@ -719,10 +1214,13 @@ ci_workflow_runs_script() {
     # 実行を許すオプションの綴り。短いまとめ書き（`-x` / `-eu`）は **n を含まないもの**だけ——
     # `-n` / `-nx` は構文を見るだけで実行しない。長いオプション（`--norc` 等）は許すが、
     # `--noexec` は下で別に弾く（`n` を含む長オプションを一律に拒むと `--norc` が誤って赤くなる）
-    local option='(--[a-zA-Z0-9][a-zA-Z0-9-]*|-[a-mo-zA-MO-Z0-9]+)'
+    # `-o pipefail` のように**引数を取るオプション**も 1 つの綴りとして認める。
+    # 認めないと、`bash -euo pipefail test/x_test.sh` のように厳しくしただけの書き換えで
+    # 「どこからも呼ばれていない」と事実と逆の診断で赤くなる（レビューで実測）
+    local option='(--[a-zA-Z0-9][a-zA-Z0-9-]*|-[a-mo-zA-MO-Z0-9]*o[[:space:]]+[a-z]+|-[a-mo-zA-MO-Z0-9]+)'
     # **区切りで切られた断片の先頭**がコマンドの開始位置（`;` `&&` `||` `|` `&` は分割済み）。
-    # 環境変数の前置きは読み飛ばし、**前置きの語も許す**: `timeout 300 bash x` / `if ! bash x` /
-    # `sudo bash x` はどれも普通にゲートとして働く書き方で、認めないと
+    # 環境変数の前置きは読み飛ばし、**実行ラッパの語も許す**: `timeout 300 bash x` /
+    # `sudo bash x` はどれも終了コードをそのまま通す書き方で、認めないと
     # 「どこからも呼ばれていない」と事実と逆の診断で赤くなる
     # （この repo の e2e も `timeout 5 bash -c …` を使っている）。
     # 許すのは**終了コードをそのまま通す実行ラッパだけ**——`echo` / `ls` を許すと言及が実行に化ける。
@@ -731,13 +1229,20 @@ ci_workflow_runs_script() {
     # のに `then` を許すと「実行されている」と読まれる（2 語足すだけでスイートを止められる。レビューで実測）。
     # 条件やループの本体に置いた呼び出しがゲートになるかは、その本体が何をするかを読まないと決まらない
     # ——読めない以上は主張しない（fail-closed。現行 ci.yml はどのスイートも素の `run: bash …` で呼ぶ）
-    local wrapper='(sudo|env|nice|timeout|command|exec)'
-    local prefix="(${wrapper}[[:space:]]+|[0-9]+[smhd]?[[:space:]]+|[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*"
+    # コマンドの開始位置の綴りは 1 か所（`CI_WORKFLOW_COMMAND_START`）に置いてある
     # パスの直後は空白（引数・リダイレクトが続く）か `)` か断片の終わり。
     # **直後の演算子までここで見ようとしない**のが要点で、`bash x 2>&1 | tee log` のように
     # 間にリダイレクトが 1 つ入るだけで「握り潰し」の判定が外れる。
     # 失敗が job に伝わるかは断片の区切り（`ci_workflow_gating_commands` が渡す印）が答える
-    local invocation="^[(]?[[:space:]]*${prefix}(bash([[:space:]]+${option})*[[:space:]]+)?[\"']?(\./)?${escaped}[\"']?([[:space:]]|[)]|\$)"
+    # パスの前に付く**ワークスペース由来の接頭辞**（`$GITHUB_WORKSPACE/` / `${GITHUB_WORKSPACE}/` /
+    # `${{ github.workspace }}/` / `./`）だけを許す。この ci.yml が既に
+    # `"$GITHUB_WORKSPACE/bin/aidock"` の形を使っており、認めないと同じ書き方へ揃えた瞬間に
+    # 「どこからも呼ばれていない」と事実と逆の診断で赤くなる。
+    # **変数一般に広げない**——`\$HOME/test/x_test.sh` や `\$FIXTURE_DIR/test/x_test.sh` は
+    # 同じ名前の**別のファイル**を指しうるので、それを配線の証拠にしてはいけない
+    # （リテラルのディレクトリを許さないのと同じ理由。レビューで実測）
+    local base='([$]GITHUB_WORKSPACE/|[$][{]GITHUB_WORKSPACE[}]/|[$][{][{][[:space:]]*github\.workspace[[:space:]]*[}][}]/|\./)?'
+    local invocation="${CI_WORKFLOW_COMMAND_START}(bash([[:space:]]+${option})*[[:space:]]+)?[\"']?${base}${escaped}[\"']?([[:space:]]|[)]|\$)"
 
     # 合否に効くコマンドだけを見る（`|| true` や `set +e` の下にあるものは渡ってこない）
     local record text
@@ -746,11 +1251,11 @@ ci_workflow_runs_script() {
         text="${record#*$'\t'}"
         # コマンドの位置に現れていなければ対象外
         [[ "${text}" =~ $invocation ]] || continue
-        # `--noexec` は構文を見るだけなので実行の証拠にならない
-        [[ "${text}" =~ (^|[[:space:]])--noexec([[:space:]]|$) ]] && continue
+        # `--noexec` と `-o noexec`（`-n` の別綴り）は構文を見るだけなので実行の証拠にならない
+        [[ "${text}" =~ (^|[[:space:]])(--noexec|-[a-zA-Z]*o[[:space:]]+noexec)([[:space:]]|$) ]] && continue
         # ここまで来れば「実行され、その結果が job の合否に効く」と言える
         return 0
-    done < <(ci_workflow_gating_commands "${job_filter}")
+    done < <(ci_workflow_gating_commands "${job_filter}" top)
     # 最後まで見つからなければ失敗
     return 1
 }
