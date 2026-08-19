@@ -185,7 +185,7 @@ ci_workflow_extract() {
         # awk の未初期化変数は 0 なので、初期化を落とすと `step_dash_indent` が 0 と読まれ、
         # ジョブ直下の `continue-on-error:` までステップ内のキーとして扱われ、
         # ジョブ単位の無効化が効かなくなる（この初期化を落として実測した）
-        BEGIN { jobs_indent = -1; job_indent = -1; steps_indent = -1; step_dash_indent = -1; env_indent = -1 }
+        BEGIN { jobs_indent = -1; job_indent = -1; steps_indent = -1; step_dash_indent = -1; env_indent = -1; step_key_indent = -1 }
 
         # コメント部分（行頭、または空白に続く # から行末まで）を落とす
         function strip_comment(t) { sub(/(^|[[:space:]])#.*$/, "", t); return t }
@@ -235,6 +235,19 @@ ci_workflow_extract() {
             n++; seg[n] = cur; ops[n] = ""
             # 断片の数を返す（呼び出し側は 1..n だけを読む）
             return n
+        }
+
+        # その構造行がステップの中の鍵かどうかを返す。**ジョブ直下の鍵は `steps:` と同じ桁**に並ぶ
+        # （どちらもジョブというマップの鍵なので）。ダッシュで始まる行はステップの先頭鍵なので中側。
+        function is_step_level(probe, indent) {
+            # `steps:` にまだ入っていなければ、ジョブ直下の鍵しかありえない
+            if (steps_indent < 0 || step_dash_indent < 0) { return 0 }
+            # ダッシュで始まる行はステップの 1 つ目の鍵（`- if: false` の形）
+            if (probe ~ /^[[:space:]]*-[[:space:]]/) { return 1 }
+            # `steps:` と同じ桁の鍵はジョブ直下のもの（`- name:` を同じ桁に書く書式でもここで分かれる）
+            if (indent <= steps_indent) { return 0 }
+            # それより深ければステップの中の鍵
+            return 1
         }
 
         # 溜めた 1 ステップ分を、無効化されていなければジョブの控えへ移す。
@@ -363,10 +376,25 @@ ci_workflow_extract() {
             # 非構造行＝ブロックスカラーの本文。run: の本体か env の折りたたみブロックのときだけ拾う
             if (!structural[NR]) {
                 if (in_run) {
+                    # **heredoc の本文はデータであってコマンドではない。**
+                    # `cat <<EOF` … `bash test/x_test.sh` … `EOF` の中身を実行と読むと、
+                    # ファイルへ書き出しているだけの文字列が「配線されている」証拠に化ける
+                    if (heredoc_end != "") {
+                        # 終端の行に来たら本文の読み飛ばしを終える（`<<-` はタブ字下げを許すので trim して比べる）
+                        if (trim(strip_comment(line)) == heredoc_end || trim(line) == heredoc_end) { heredoc_end = "" }
+                        next
+                    }
                     text = trim(strip_comment(line))
                     # 折りたたみ本文なら直前の行に空白で繋ぎ、そうでなければ新しい 1 行として足す
                     if (text != "" && run_folded && ncmd > 0) { cmds[ncmd] = cmds[ncmd] " " text }
                     else if (text != "") { cmds[++ncmd] = text }
+                    # この行が heredoc を開いていれば、終端までの本文を読み飛ばす
+                    if (text ~ /<<-?[[:space:]]*["\047]?[A-Za-z_][A-Za-z0-9_]*/) {
+                        heredoc_end = text
+                        sub(/^.*<<-?[[:space:]]*["\047]?/, "", heredoc_end)
+                        sub(/["\047].*$/, "", heredoc_end)
+                        sub(/[^A-Za-z0-9_].*$/, "", heredoc_end)
+                    }
                 } else if (in_env) {
                     # **空白で区切って 1 エントリずつ**控える。折りたたみブロックは最終的に
                     # 1 本の空白区切り文字列になり、消費側（`shellcheck $SHELL_FILES` と
@@ -384,6 +412,7 @@ ci_workflow_extract() {
             # 構造行が来た時点で、直前のブロックスカラー本文は終わっている
             in_run = 0
             in_env = 0
+            heredoc_end = ""
             # コメントを落としてから構造を判定する
             # （`if: false  # 理由` のように理由を添えるのが最も自然な書き方なので、
             #   コメント付きを取りこぼすと「止めたステップが動いている」ことになる）
@@ -392,6 +421,11 @@ ci_workflow_extract() {
             if (trim(probe) == "") { next }
             # 字下げ幅を測る（入れ子の深さの判定に使う）
             indent = match(probe, /[^[:space:]]/) - 1
+
+            # `env:` と同じかそれより浅い鍵が来たら、その env ブロックは終わっている。
+            # **中に居る間の深さは env の桁を基準に測る**（`steps:` の桁を基準にすると、
+            # `steps:` より後ろに書かれた `env:` の中身が「ステップの鍵」に見えて読み落とす）
+            if (env_indent >= 0 && indent <= env_indent) { env_indent = -1 }
 
             # `jobs:` の位置を覚える
             if (jobs_indent < 0 && probe ~ /^[[:space:]]*jobs:[[:space:]]*$/) { jobs_indent = indent; next }
@@ -407,6 +441,7 @@ ci_workflow_extract() {
                 sub(/:$/, "", jobname)
                 steps_indent = -1
                 step_dash_indent = -1
+                step_key_indent = -1
                 env_indent = -1
                 next
             }
@@ -419,7 +454,10 @@ ci_workflow_extract() {
             }
 
             # ジョブ直下の `env:` の位置を覚える（この下の折りたたみブロックがそのジョブの変数）
-            if (job_indent >= 0 && indent > job_indent && step_dash_indent < 0 \
+            # **`steps:` の後ろに書かれていても読む。** YAML のキー順は自由なので `env:` を後ろへ
+            # 動かすのは意味を変えない整形だが、読み落とすと「定義 0 件」＝一覧が壊れたという
+            # 事実と違う診断で落ちる。ステップ自身の `env:`（より深い桁）とは桁で見分ける
+            if (job_indent >= 0 && indent > job_indent && !is_step_level(probe, indent) \
                 && probe ~ /^[[:space:]]*env:[[:space:]]*$/) {
                 env_indent = indent
                 next
@@ -429,7 +467,7 @@ ci_workflow_extract() {
             # **どのジョブの env かまで控える**のが要点で、変数は定義したジョブからしか見えない。
             # 一覧だけを合流させて読むと、別のジョブへ移された一覧が「載っている」と見える一方、
             # lint するジョブから見た `$SHELL_FILES` は空になる（レビューで実測）
-            if (env_indent >= 0 && indent > env_indent && step_dash_indent < 0 \
+            if (env_indent >= 0 && indent > env_indent \
                 && probe ~ /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*:[[:space:]]*[|>][0-9]*[+-]?[[:space:]]*$/) {
                 # 変数名を取り出す（コロンより前が名前）
                 env_var = trim(probe)
@@ -446,13 +484,25 @@ ci_workflow_extract() {
                 # 最初のダッシュの字下げを、このジョブのステップの基準にする
                 if (step_dash_indent < 0) { step_dash_indent = indent }
                 # 基準と同じ深さのときだけ新しいステップとして扱う（入れ子の並びでは切らない）
-                if (indent == step_dash_indent) { flush_step(); step_id++ }
+                if (indent == step_dash_indent) {
+                    flush_step()
+                    step_id++
+                    # **ステップ自身の鍵が並ぶ桁**を覚える（`- ` の直後の桁）。
+                    # `run:` をこの桁に限らないと、`with:` の下に書かれた `run:` という
+                    # **action への入力**まで「実行されるコマンド」として拾う（レビューで実測）
+                    match(probe, /^[[:space:]]*-[[:space:]]+/)
+                    step_key_indent = RLENGTH
+                }
             }
 
-            # 無効化キーの扱いは、ステップの中かジョブ直下かで宛先が変わる
+            # 無効化キーの扱いは、ステップの中かジョブ直下かで宛先が変わる。
+            # **判定は「ジョブの鍵と同じ桁か」で行う。** ダッシュの桁との比較で決めると、
+            # `steps:` と `- name:` を同じ桁に書く（YAML として等しく正しい）書式のとき、
+            # ジョブ直下の鍵がステップの鍵と同じ深さになり、**ジョブ全体を止めるキーが
+            # 最後の 1 ステップしか止めない**（レビューで実測。round 11 で塞いだはずの形が書式違いで開く）
             if (is_disabling(probe)) {
-                # ステップの中（基準のダッシュ以上の深さ）ならそのステップだけを止める
-                if (step_dash_indent >= 0 && indent >= step_dash_indent) {
+                if (is_step_level(probe, indent)) {
+                    # ステップの中ならそのステップだけを止める
                     step_disabled = 1
                 } else {
                     # ジョブ直下ならそのジョブの全ステップが対象
@@ -463,6 +513,9 @@ ci_workflow_extract() {
 
             # ここから先は run: の取り出し。ステップの中でなければ関係ない
             if (step_dash_indent < 0) { next }
+
+            # ステップ自身の鍵でない `run:`（`with:` 配下の入力など）は実行ではない
+            if (probe !~ /^[[:space:]]*-[[:space:]]/ && indent != step_key_indent) { next }
 
             # `run: |` / `run: >` のブロック開始。以降の非構造行が本体
             if (probe ~ /^[[:space:]]*-?[[:space:]]*run:[[:space:]]*[|>]/) {
@@ -672,12 +725,13 @@ ci_workflow_runs_script() {
     # `sudo bash x` はどれも普通にゲートとして働く書き方で、認めないと
     # 「どこからも呼ばれていない」と事実と逆の診断で赤くなる
     # （この repo の e2e も `timeout 5 bash -c …` を使っている）。
-    # 許すのは実行ラッパと**本体側**の制御構文だけ——`echo` / `ls` を許すと言及が実行に化ける。
-    # **条件部の語（`if` / `elif` / `while` / `until` / `!`）は許さない。** `if bash x; then …` の
-    # 判定に置かれたコマンドは、落ちても `set -e` を発動させず job も止めない（`|| true` と同じ効果）。
-    # `if ! bash x; then exit 1; fi` のように本体で明示的に落とせばゲートになるが、
-    # 本体が何をするかまでは読めない以上「ゲートしている」とは主張できないので fail-closed に倒す
-    local wrapper='(then|else|do|sudo|env|nice|timeout|command|exec)'
+    # 許すのは**終了コードをそのまま通す実行ラッパだけ**——`echo` / `ls` を許すと言及が実行に化ける。
+    # **制御構文の語は 1 つも許さない。** `if bash x; then …` の判定に置かれたコマンドは落ちても
+    # `set -e` を発動させず job も止めないし、`if false; then bash x; fi` に至っては 1 度も走らない
+    # のに `then` を許すと「実行されている」と読まれる（2 語足すだけでスイートを止められる。レビューで実測）。
+    # 条件やループの本体に置いた呼び出しがゲートになるかは、その本体が何をするかを読まないと決まらない
+    # ——読めない以上は主張しない（fail-closed。現行 ci.yml はどのスイートも素の `run: bash …` で呼ぶ）
+    local wrapper='(sudo|env|nice|timeout|command|exec)'
     local prefix="(${wrapper}[[:space:]]+|[0-9]+[smhd]?[[:space:]]+|[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*"
     # パスの直後は空白（引数・リダイレクトが続く）か `)` か断片の終わり。
     # **直後の演算子までここで見ようとしない**のが要点で、`bash x 2>&1 | tee log` のように

@@ -154,7 +154,8 @@ while IFS= read -r -d '' path; do
         discovered_scripts+=("${path}")
         continue
     fi
-    # 拡張子が無い場合は 1 行目の shebang を見る。**コマンド置換ではなく `read`** で読むのは、
+    # 拡張子が `.sh` でないファイル（拡張子なしの `bin/aidock` も、`.md` や `.gif` も）は
+    # 1 行目の shebang で判定する。**コマンド置換ではなく `read`** で読むのは、
     # 追跡ファイルにはバイナリ（docs/demo/aidock-demo.gif）も含まれ、`$(head -n1 …)` だと
     # bash が「ignored null byte in input」を警告して CI ログを汚すため
     first_line=""
