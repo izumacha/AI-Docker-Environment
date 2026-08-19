@@ -147,7 +147,10 @@ printf 'probe ok: %s GID in base image (%s) is %s\n' "${SENSITIVE_GROUP}" "${bas
 # ビルドログを一時ファイルに控える（終了コードだけでなく**理由**を照合するため）
 build_log="$(mktemp)" || fail_probe "could not create a temporary file for the build log"
 # どの経路で終わっても一時ファイルを残さない
-trap 'rm -f "${build_log}"' EXIT
+# どの経路で終わっても片付ける。**素の `rm` にしない**のが要点で、EXIT トラップの本体も
+# `set -e` の対象であり、削除に失敗するとその終了コードが**成功した実行を乗っ取る**
+# （/tmp が読み取り専用・quota 超過などで、判定は正しかったのに e2e が赤くなる）
+trap 'rm -f "${build_log}" || true' EXIT
 
 # HOST_GID だけを差し替えてビルドする。HOST_UID は呼び出し元の値のまま使い、
 # AC-1 のビルドとレイヤーキャッシュを共有させる（デニーリストの RUN だけが再実行される）。

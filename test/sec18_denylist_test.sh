@@ -47,7 +47,9 @@ TARGET_SCRIPT="${REPO_ROOT}/test/sec18_denylist_e2e.sh"
 # テスト全体で使う一時ディレクトリ（スタブと擬似リポジトリを置く）
 TEST_TMP="$(mktemp -d)"
 # テスト終了時に一時ディレクトリを必ず片付ける
-trap 'rm -rf "${TEST_TMP}"' EXIT
+# **素の `rm` にしない**: EXIT トラップの本体も `set -e` の対象で、削除に失敗すると
+# その終了コードが**成功した実行を乗っ取り**、1 件も失敗していないのに赤くなる
+trap 'rm -rf "${TEST_TMP}" || true' EXIT
 
 # 共有のカウンタ・アサーション群（書き写しを増やさないため lib へ切り出してある）
 # shellcheck source=test/lib/harness.sh
@@ -290,8 +292,35 @@ assert_file_empty "${STUB_DOCKER_LOG}" "Dockerfile 不在: docker を呼ばな�
 assert_file_contains "${TARGET_SCRIPT}" "${DENYLIST_REJECTION_FRAGMENT}" "配線: e2e スクリプトが同じ拒否メッセージ断片を見ている"
 assert_file_contains "${REPO_ROOT}/docker/Dockerfile" "${DENYLIST_REJECTION_FRAGMENT}" "配線: 本物の Dockerfile に拒否メッセージが実在する"
 # CI から実際に呼ばれていることも固定する（スクリプトを置いただけで呼ばれない状態を防ぐ）
-assert_file_contains "${REPO_ROOT}/.github/workflows/ci.yml" "bash test/sec18_denylist_e2e.sh" "配線: e2e ジョブが本スクリプトを実行する"
-assert_file_contains "${REPO_ROOT}/.github/workflows/ci.yml" "bash test/sec18_denylist_test.sh" "配線: type-check ジョブが本テストを実行する"
+# 実行の配線は**共有ライブラリ**で判定する。ここで素の文字列一致を書くと、
+# 行末コメントや `name:` の言及、`if: false` で無効化されたステップでも
+# 「実行されている」と読む弱い版になる（`test/lib/ci_workflow.sh` のヘッダを参照）
+# shellcheck source=test/lib/ci_workflow.sh
+source "${SCRIPT_DIR}/lib/ci_workflow.sh"
+# ci.yml の実行内容を読み込む（読めなければ配線を検査できないので失敗として数える）
+if ci_workflow_load "${REPO_ROOT}/.github/workflows/ci.yml" "${TEST_TMP}/ci-commands"; then
+    # e2e ジョブが e2e スクリプトを実行していること
+    # **ジョブ名まで渡す**のが要点。絞り込まないと、ケース名が主張している
+    # 「e2e ジョブが」の部分だけが誰にも確かめられず、別ジョブへ移しても緑のままになる
+    assert_with ci_workflow_runs_script "配線: e2e ジョブが本スクリプトを実行する" \
+        "ci.yml の e2e ジョブに test/sec18_denylist_e2e.sh を実行する run: ステップが無い（失敗が job に伝わらない形も数えない）" \
+        'test/sec18_denylist_e2e.sh' 'e2e'
+    # type-check ジョブが本テストを実行していること
+    assert_with ci_workflow_runs_script "配線: type-check ジョブが本テストを実行する" \
+        "ci.yml の type-check ジョブに test/sec18_denylist_test.sh を実行する run: ステップが無い（失敗が job に伝わらない形も数えない）" \
+        'test/sec18_denylist_test.sh' 'type-check'
+    # 網羅性テストが実行されていること。**輪を断つためにここでも固定する**:
+    # `ci_coverage_test.sh` の配線は `action_pin_test.sh` が、`action_pin_test.sh` の配線は
+    # `ci_coverage_test.sh` が見ているだけなので、**その 2 つを同時に止めると誰も気付かない**
+    # （検査が走らなければ何も報告しない、という同じ形が 1 段上に移るだけ。レビューで指摘）。
+    # 3 本目の支えを別のスイートに置くと、同時に止める必要のあるステップが 1 つ増える
+    assert_with ci_workflow_runs_script "配線: type-check ジョブが網羅性テストを実行する" \
+        "ci.yml の type-check ジョブに test/ci_coverage_test.sh を実行する run: ステップが無い。これが止まると SHELL_FILES への追記漏れも未配線スイートも検出されなくなる" \
+        'test/ci_coverage_test.sh' 'type-check'
+else
+    report_fail "配線: ci.yml の run: ステップを読み取れる" \
+        "could not read the run: steps from ci.yml, so the wiring of the SEC-18 scripts could not be verified"
+fi
 
 # 集計を出して、失敗が 1 件でもあれば非ゼロで終わる
 harness_summary

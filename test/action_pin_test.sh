@@ -59,6 +59,12 @@ REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." &>/dev/null && pwd)"
 # 検査対象となるワークフロー定義の置き場所を決める
 WORKFLOW_DIR="${REPO_ROOT}/.github/workflows"
 
+# ci.yml の構造読み取り（ブロックスカラー本文を構造と読み違えない `emit_structural_lines` と、
+# 「その run: ステップが実際に何を実行するか」の判定）は共有ライブラリに置いてある。
+# 同じ問いを複数のスイートが持つため、写しを増やさず 1 実装を共有する（§6）
+# shellcheck source=test/lib/ci_workflow.sh
+source "${SCRIPT_DIR}/lib/ci_workflow.sh"
+
 # 必ず特権として扱うワークフローの下限リスト（自動判定が取りこぼしても検査を緩めないための保険）。
 # 通常はファイル内容からの判定で足りるが、FR-9.6(b) が名指しする本体だけは明示的に固定する
 ALWAYS_PRIVILEGED=(
@@ -78,7 +84,9 @@ FAIL=0
 # 特権判定の回帰ケース用に、仮のワークフローを置く一時ディレクトリを 1 つだけ作る
 TEST_TMP="$(mktemp -d)"
 # 途中で中断された場合も含め、終了時に必ず一時ディレクトリを片付ける（他のテストスイートと同じ流儀）
-trap 'rm -rf "${TEST_TMP}"' EXIT
+# **素の `rm` にしない**: EXIT トラップの本体も `set -e` の対象で、削除に失敗すると
+# その終了コードが**成功した実行を乗っ取り**、1 件も失敗していないのに赤くなる
+trap 'rm -rf "${TEST_TMP}" || true' EXIT
 # 仮のワークフローに連番の名前を付けるためのカウンタ
 FIXTURE_SEQ=0
 
@@ -98,72 +106,6 @@ fail() {
     [[ $# -ge 2 ]] && printf '       %s\n' "$2"
     # 失敗件数を 1 つ増やす
     FAIL=$((FAIL + 1))
-}
-
-# ワークフローから「YAML の構造として意味を持つ行」だけを `行番号:行の内容` の形で書き出す関数
-# 第 1 引数: ワークフローファイルのパス
-#
-# 何を落とすか: ブロックスカラー（`run: |` / `prompt: >-` 等）の本文。あれは YAML の構造ではなく
-# ただの文字列なので、そこに書かれた `permissions:` や `uses:` を宣言と読み違えてはいけない。
-# スカラーを開始する行そのもの（`run: |`）は構造なので残す。
-#
-# なぜ 1 か所に集約するか: 特権判定と `uses:` 抽出の**両方**がこの前提を必要とするのに、
-# 片方だけに読み飛ばしを入れると非対称な誤りが出る。実際、判定側だけに入れた段階では
-# `run:` の本文に書かれた `- uses: …@v7` が違反として誤報され、正しくピンされている
-# `post-ci-verify.yml`（`prompt:` に長いブロックスカラーを持つ）で CI が恒常的に赤くなりえた。
-# 出力形式を `grep -n` と同じ `行番号:内容` に揃えてあるので、消費側は行番号を保ったまま使える
-emit_structural_lines() {
-    # 検査対象のファイルパスを変数に入れる
-    local path="$1"
-
-    # 引用符の文字集合は awk の変数として渡す（awk のプログラムはシェルの単一引用符で囲まれており、
-    # その中に `'` を直接書けないため）
-    awk -v quote_chars='["'"'"']' '
-        # ブロックスカラーの本文の中かどうかと、その開始行の字下げ幅を覚える
-        BEGIN { in_scalar = 0; scalar_indent = 0 }
-        {
-            # 判定に使う 1 行分の文字列を作業用の変数へ取り出す
-            line = $0
-            # Windows 改行（CR）が混じっていても末尾の空白判定が狂わないよう取り除く
-            sub(/\r$/, "", line)
-            # 空行は構造を持たないので、状態を変えずに読み飛ばす
-            if (line ~ /^[[:space:]]*$/) next
-
-            # 最初に現れる非空白文字の位置から、その行の字下げ幅を求める
-            indent = match(line, /[^[:space:]]/) - 1
-
-            # ブロックスカラーの本文は、字下げが浅くなるまで丸ごと読み飛ばす
-            if (in_scalar) {
-                if (indent > scalar_indent) next
-                in_scalar = 0
-            }
-
-            # 引用符を落として `"uses":` と `uses:` を同じ形に揃えてから書き出す。
-            # ここで揃えておけば、消費側それぞれが引用の有無を数え上げずに済む
-            emitted = line
-            gsub(quote_chars, "", emitted)
-            # ここまで残った行は構造なので、行番号を付けて書き出す
-            print NR ":" emitted
-
-            # スカラー開始かどうかは、コメント・大文字小文字を揃えた写しで判定する
-            probe = emitted
-            sub(/[[:space:]]*#.*$/, "", probe)
-            probe = tolower(probe)
-            # `run: |` や `prompt: >-` のような行なら、次の行から本文として読み飛ばす
-            if (probe ~ /^[[:space:]]*(-[[:space:]]+)?[a-z_][a-z0-9_.-]*[[:space:]]*:[[:space:]]*[|>][0-9]*[+-]?[[:space:]]*$/) {
-                in_scalar = 1
-                # 本文の範囲は**鍵の桁**で決める。ダッシュの桁で決めると、
-                # `- if: >-` の本文だけでなく**同じ手順の兄弟キー**（次行の `uses:` 等）まで
-                # 飲み込んでしまい、可変タグが検査対象から丸ごと外れる（実測）
-                if (match(probe, /^[[:space:]]*-[[:space:]]+/)) {
-                    # `- ` を含む前置きの長さが、そのまま鍵の桁になる
-                    scalar_indent = RLENGTH
-                } else {
-                    scalar_indent = indent
-                }
-            }
-        }
-    ' "$path"
 }
 
 # ワークフローの構造を 1 度だけ走査し、特権の根拠が本文にあるかどうかを調べる関数
@@ -1690,6 +1632,32 @@ while IFS= read -r wf_path; do
     check_workflow_path "$wf_path"
 # ワークフロー定義ファイルを名前順に列挙する（実行結果を再現しやすくするため）
 done < <(find "$WORKFLOW_DIR" -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) | sort)
+
+# --- 網羅性テスト自身の配線を、別のスイートから固定する -------------------------------
+#
+# `test/ci_coverage_test.sh` は「全スイートが ci.yml から実行されているか」を検査するが、
+# **自分のステップが無効化された場合だけは自分で気付けない**（走らなくなるので何も言わない）。
+# その結果、以後の追記漏れ・未配線スイートが一切検出されないまま CI は緑で通る。
+# 検査の連鎖はどこかで別のスイートに支えさせる必要があるので、常時実行される本スイートから
+# 1 件だけ固定する（`test/sec18_denylist_test.sh` が e2e 側の配線を固定しているのと同じ前例）。
+#
+# 判定は**共有ライブラリに委ねる**（読み込みはこのファイルの冒頭で済ませてある）。
+# ここに独自の grep を書くと、当初そうしたように行末コメントや `name:` の言及でも
+# 「配線されている」と読む弱い版になり、**支え役のはずの表明が最初に破れる**（レビューで実測）
+
+# 抽出結果を置く一時ファイル（このスイートが既に持っている TEST_TMP の下に作る）
+COVERAGE_WIRING_TMP="${TEST_TMP}/ci-commands"
+# ci.yml の実行内容を読み込む
+if ! ci_workflow_load "${WORKFLOW_DIR}/ci.yml" "${COVERAGE_WIRING_TMP}"; then
+    fail 'ci.yml still runs test/ci_coverage_test.sh (coverage net is wired)' \
+        "could not read the run: steps from ${WORKFLOW_DIR}/ci.yml, so the coverage step's wiring could not be verified"
+# 網羅性テストが実際に実行されていることを確かめる
+elif ci_workflow_runs_script 'test/ci_coverage_test.sh'; then
+    pass 'ci.yml still runs test/ci_coverage_test.sh (coverage net is wired)'
+else
+    fail 'ci.yml still runs test/ci_coverage_test.sh (coverage net is wired)' \
+        "the CI coverage step no longer gates in ${WORKFLOW_DIR}/ci.yml; without it, scripts missing from SHELL_FILES and unwired suites stop being detected and CI stays green"
+fi
 
 # 検査結果の合計を、他のテストスイートと同じ書式で出力する
 printf '\n# %d passed, %d failed\n' "$PASS" "$FAIL"
