@@ -717,7 +717,8 @@ if command -v script > /dev/null 2>&1; then
     assert_contains "へ戻せませんでした" \
         "refused restore: tells the operator their terminal was left resized"
 else
-    report 1 "script(1) is available to exercise the terminal-size branches"
+    report_fail "script(1) is available to exercise the terminal-size branches" \
+        "script(1)（util-linux）が見つかりません。端末サイズの分岐を一度も通らないまま緑になるのを避けるため、飛ばさず失敗として数えます（Debian 11+ は bsdextrautils を導入）"
 fi
 
 # 12) 一時ファイル名の**一元管理**: スクリプトは `${GIF_FILE}.tmp` から導く一方、
@@ -730,7 +731,8 @@ if [ -n "${ARTIFACT_BASENAME}" ]; then
     assert_file_contains "${REPO_ROOT}/.gitignore" "docs/demo/${ARTIFACT_BASENAME}.tmp" \
         "the temporary artifact name the script derives is the one .gitignore ignores"
 else
-    report 1 "the artifact name can be read out of record-demo.sh (GIF_FILE)"
+    report_fail "the artifact name can be read out of record-demo.sh (GIF_FILE)" \
+        "record-demo.sh から GIF_FILE の値を読み取れませんでした（変数名か書き方が変わった可能性。成果物のパスを固定できません）"
 fi
 
 # 13) **コミット済みの録画が今のラベルで録られていること**。上のケース群は「今この場で
@@ -753,7 +755,8 @@ if [ -n "${PASS_PREFIX}" ] && [ "${PASS_PREFIX_LINES}" -eq 1 ]; then
     assert_file_contains "${COMMITTED_CAST}" "${PASS_PREFIX}" \
         "the committed recording was made with the label prefix pass() currently prints"
 else
-    report 1 "the check label prefix can be read out of record-demo.sh (pass)"
+    report_fail "the check label prefix can be read out of record-demo.sh (pass)" \
+        "record-demo.sh から合格ラベルの接頭辞を読み取れませんでした（接頭辞の定義が変わった可能性。録画に残る文言を照合できません）"
 fi
 
 # 各 pass 呼び出しの引数を取り出す。**行頭固定にしない**: 呼び出しが `if` の中へ入って
@@ -779,14 +782,16 @@ if [ "${PASS_CALL_COUNT}" -gt 0 ] && [ "${PASS_ARG_COUNT}" -eq "${PASS_CALL_COUN
         # `"` と `\` はブラケット式 1 つにまとめる（`*'\'*` と書くと、shellcheck が
         # 「シングルクォートを escape したいのでは」と読んで SC1003 を出し、CI の lint が落ちる）
         if [ "${#pass_literal}" -lt 8 ] || [[ "${pass_literal}" == *[\"\\]* ]]; then
-            report 1 "the label of this pass call can be cross-checked against the recording: ${pass_arg}"
+            report_fail "the label of this pass call can be cross-checked against the recording: ${pass_arg}" \
+                "この pass 呼び出しのラベルを録画側と突き合わせられませんでした（ラベルの渡し方が変わった可能性）"
             continue
         fi
         assert_file_contains "${COMMITTED_CAST}" "${pass_literal}" \
             "the committed recording shows the current label text: ${pass_literal}"
     done <<< "${PASS_ARGS}"
 else
-    report 1 "every pass call yields a label to cross-check (${PASS_ARG_COUNT}/${PASS_CALL_COUNT} extracted)"
+    report_fail "every pass call yields a label to cross-check (${PASS_ARG_COUNT}/${PASS_CALL_COUNT} extracted)" \
+        "pass 呼び出しの一部からラベルを取り出せませんでした（取り出せた数と呼び出し数が食い違っています）"
 fi
 
 # --- summary ----------------------------------------------------------------
