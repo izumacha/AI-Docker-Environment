@@ -259,6 +259,12 @@ ci_workflow_extract() {
             # 別のシェルで走るので、前のステップの `set +e` / `pipefail` は引き継がれない
             lax = 0
             pipefail = 0
+            # `shell:` の綴りごとの既定を反映する。`bash` キーワードは
+            # `bash --noprofile --norc -eo pipefail {0}` なので pipefail も立つ。
+            # `sh` は `sh -e {0}`。それ以外（`bash {0}` のような自前テンプレート・`python`・`pwsh` 等）は
+            # errexit があるとは限らないので、そのステップの実行は合否の証拠として数えない
+            if (step_shell == "bash") { pipefail = 1 }
+            else if (step_shell != "" && step_shell != "sh") { lax = 1 }
             if (!step_disabled) {
                 # **行末の `\` は次の行へ続く 1 つの論理行。** 物理行のまま切ると、
                 # 次の行に置かれた `|| true` やパイプが呼び出しと結び付かず、
@@ -311,6 +317,7 @@ ci_workflow_extract() {
             for (i = 1; i <= ncmd; i++) { delete cmds[i] }
             ncmd = 0
             step_disabled = 0
+            step_shell = ""
         }
 
         # 溜めた 1 ジョブ分を、ジョブ単位で止められていなければ出力する。
@@ -516,6 +523,18 @@ ci_workflow_extract() {
 
             # ステップ自身の鍵でない `run:`（`with:` 配下の入力など）は実行ではない
             if (probe !~ /^[[:space:]]*-[[:space:]]/ && indent != step_key_indent) { next }
+
+            # **そのステップがどのシェルで走るかを控える。** 既定（Linux）は `bash -e {0}` なので
+            # コマンドが落ちればステップも落ちるが、`shell: bash {0}` のように**テンプレートを
+            # 自分で書くと `-e` が消える**——ループの途中の失敗が握り潰され、最後の 1 回の結果だけが
+            # ステップの成否になる。1 行足すだけでリンタがゲートでなくなる形なので、
+            # 確かめられない綴りは「合否に効かない」側へ倒す（fail-closed）
+            if (probe ~ /^[[:space:]]*-?[[:space:]]*shell:[[:space:]]*[^[:space:]]/) {
+                step_shell = probe
+                sub(/^[[:space:]]*-?[[:space:]]*shell:[[:space:]]*/, "", step_shell)
+                step_shell = trim(step_shell)
+                next
+            }
 
             # `run: |` / `run: >` のブロック開始。以降の非構造行が本体
             if (probe ~ /^[[:space:]]*-?[[:space:]]*run:[[:space:]]*[|>]/) {
@@ -737,7 +756,12 @@ ci_workflow_runs_script() {
     # **直後の演算子までここで見ようとしない**のが要点で、`bash x 2>&1 | tee log` のように
     # 間にリダイレクトが 1 つ入るだけで「握り潰し」の判定が外れる。
     # 失敗が job に伝わるかは断片の区切り（`ci_workflow_gating_commands` が渡す印）が答える
-    local invocation="^[(]?[[:space:]]*${prefix}(bash([[:space:]]+${option})*[[:space:]]+)?[\"']?(\./)?${escaped}[\"']?([[:space:]]|[)]|\$)"
+    # パスの前に付く**変数由来の接頭辞**（`$GITHUB_WORKSPACE/` / `${{ github.workspace }}/` / `./`）は許す。
+    # この ci.yml が既に `"$GITHUB_WORKSPACE/bin/aidock"` の形を使っており、認めないと
+    # 同じ書き方へ揃えた瞬間に「どこからも呼ばれていない」と事実と逆の診断で赤くなる。
+    # **リテラルのディレクトリは許さない**（`vendor/test/x_test.sh` のような別ファイルに当たるため）
+    local base='([$][A-Za-z_][A-Za-z0-9_]*/|[$][{][A-Za-z_][A-Za-z0-9_]*[}]/|[$][{][{][^}]*[}][}]/|\./)?'
+    local invocation="^[(]?[[:space:]]*${prefix}(bash([[:space:]]+${option})*[[:space:]]+)?[\"']?${base}${escaped}[\"']?([[:space:]]|[)]|\$)"
 
     # 合否に効くコマンドだけを見る（`|| true` や `set +e` の下にあるものは渡ってこない）
     local record text
