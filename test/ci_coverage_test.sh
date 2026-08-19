@@ -95,62 +95,29 @@ ci_workflow_load "${CI_WORKFLOW}" "${TMP_DIR}/ci-commands" \
 
 # --- ci.yml から検査対象の一覧を読み出す -------------------------------------------
 
-# type-check ジョブの env にある `SHELL_FILES: >-` ブロックの中身を取り出す。
-# **構造行の判定は共有ライブラリの `emit_structural_lines` に委ねる**（run: の取り出しと同じ扱い）。
-# 生の行を素で探すと、`run: |` の本文に同じ見た目の行（一覧を生成・表示するステップ等）があった場合に
-# そちらへ食い付き、本文を「ファイル一覧」として読んでしまう
-extract_shell_files() {
-    # 構造行の表の用意・後始末は共有ヘルパーに任せ、ここは解析だけを書く。
-    # 中間ファイルの土台は**この関数の出力先とは別の名前**にする（呼び出し側は
-    # `> "${TMP_DIR}/shell-files"` へ書くので、同じ名前を渡すとヘルパーの一時ファイルと
-    # territory が重なる。今は `.structural` を足すだけなので実害は無いが、
-    # ヘルパーが土台そのものに触る実装へ変わった時に静かに壊れる）。
-    # awk のプログラムはシェルに展開させてはいけないので単一引用符で渡す
-    # shellcheck disable=SC2016
-    ci_workflow_run_with_structure "${CI_WORKFLOW}" "${TMP_DIR}/shell-files.extract" '
-        {
-            # 構造行なら、ブロックの開始かどうかだけを見る
-            if (structural[NR]) {
-                # 別の構造行に出会った時点で、直前のブロック本文は終わっている
-                collecting = ($0 ~ /^[[:space:]]*SHELL_FILES:[[:space:]]*>-[[:space:]]*$/)
-                # **定義が何回現れたかを数える。** 一覧が 2 か所に分かれると、
-                # ここで全部を合流させたぶんには「載っている」と見えるのに、
-                # 実際に lint するジョブが読むのは自分の env だけなので、
-                # 片方のジョブに置かれたファイルは誰にも lint されない（レビューで実測）
-                if (collecting) { definitions++ }
-                next
-            }
-            # 本文の収集中でなければ関係ない
-            if (!collecting) { next }
-            # **空白で区切って 1 エントリずつ**出力する。折りたたみブロックは最終的に
-            # 1 本の空白区切り文字列になり、消費側（`shellcheck $SHELL_FILES` と
-            # `for f in $SHELL_FILES`）も空白で分割する。1 行 1 パスと決め打つと、
-            # 2 つを同じ行に書いた（消費側には何の影響も無い）だけで誤報する
-            for (i = 1; i <= NF; i++) { print $i }
-        }
-        # 定義がちょうど 1 つでなければ、この検査の前提（一覧は 1 か所）が崩れている。
-        # 合流させた結果を返すと上記の穴を隠すので、理由を述べて失敗させる
-        END {
-            if (definitions != 1) {
-                printf "SHELL_FILES is defined %d times in the workflow; this test assumes exactly one definition, because entries split across jobs are linted by neither\n", definitions > "/dev/stderr"
-                exit 1
-            }
-        }
-    '
-}
+# 検査対象一覧の変数名。ci.yml 側の env と同じ綴りで、ここでしか書かない（§6）
+SHELL_FILES_VAR="SHELL_FILES"
 
-# 抽出結果をファイルへ落としてから読む。`mapfile < <(…)` のプロセス置換だと
-# **awk の終了コードを誰も見ない**ため、途中で落ちた抽出が「短い一覧」に化け、
-# 載っているファイルを「載っていない」と誤報する（git ls-files 側と同じ扱いに揃える）
-shell_files_raw="${TMP_DIR}/shell-files"
-extract_shell_files > "${shell_files_raw}" \
-    || bail "failed to extract SHELL_FILES from ${CI_WORKFLOW}; this test cannot verify coverage"
-# 1 行 1 パスとして配列へ読み込む
-mapfile -t shell_files < "${shell_files_raw}"
+# `SHELL_FILES` を定義しているジョブを読み出す。**ワークフローを読むのは共有ライブラリだけ**に
+# しておく（ここで独自に探すと YAML の解析器が 2 つになり、`run: |` の本文に同じ見た目の行が
+# あったときに片方だけが食い付く）
+mapfile -t shell_files_jobs < <(ci_workflow_env_records def "${SHELL_FILES_VAR}")
+
+# **定義はちょうど 1 か所であること。** 一覧が 2 か所に分かれると、合流させて読むぶんには
+# 「載っている」と見えるのに、lint するジョブが読むのは自分の env だけなので、
+# もう片方に置かれたファイルは誰にも構文チェックされない（レビューで実測）
+[ "${#shell_files_jobs[@]}" -eq 1 ] \
+    || bail "${SHELL_FILES_VAR} is defined ${#shell_files_jobs[@]} times in ${CI_WORKFLOW}; this test assumes exactly one definition, because entries split across jobs are linted by neither"
+
+# 一覧を定義しているジョブ名。消費側（リンタ）が同じジョブに居ることをケース 1 で確かめる
+shell_files_job="${shell_files_jobs[0]}"
+
+# 一覧の中身を 1 行 1 パスとして配列へ読み込む
+mapfile -t shell_files < <(ci_workflow_env_records val "${SHELL_FILES_VAR}")
 
 # 抽出が空なら、YAML の書式が変わって読めていない
 [ "${#shell_files[@]}" -gt 0 ] \
-    || bail "could not parse SHELL_FILES out of ${CI_WORKFLOW} (the \"SHELL_FILES: >-\" block moved or changed shape); this test cannot verify coverage"
+    || bail "could not parse ${SHELL_FILES_VAR} out of ${CI_WORKFLOW} (the \"${SHELL_FILES_VAR}: >-\" block moved or changed shape); this test cannot verify coverage"
 
 # --- リポジトリ側の実体を数え上げる -------------------------------------------------
 
@@ -252,9 +219,13 @@ SHELL_FILES_REF='[$][{]?SHELL_FILES[}]?([^[:alnum:]_]|$)'
 # ステップ全体で「shellcheck がある」「SHELL_FILES がある」を別々に見ると、
 # `echo "list is $SHELL_FILES"` と `shellcheck bin/aidock` を並べただけで満たせてしまい、
 # 一覧のほとんどが誰にも lint されないまま緑になる（レビューで実測）
-assert_with ci_workflow_line_matches \
+# **一覧を定義したジョブに絞って探す**のも要点。変数は定義したジョブからしか見えないので、
+# 別ジョブのステップが `$SHELL_FILES` を読んでいても、そこでは空に展開される。
+# 絞らずに答えると、一覧を別ジョブへ移しただけの状態を「消費されている」と読む（レビューで実測）
+assert_with ci_workflow_command_matches \
     "リンタ網: shellcheck が SHELL_FILES を受け取って実行される" \
-    "ci.yml に「shellcheck に SHELL_FILES そのものを渡して実行する」コマンドが無い。一覧に載せても lint されない" \
+    "ci.yml に「shellcheck に SHELL_FILES そのものを渡して実行する」コマンドが、一覧を定義したジョブに無い。一覧に載せても lint されない（失敗を握り潰す形も数えない）" \
+    "${shell_files_job}" \
     '(^|[;&|(][[:space:]]*)shellcheck([^[:alnum:]_])' "${SHELL_FILES_REF}"
 
 # `bash -n` はループ変数を経由するため 1 行に収まらない。**同じステップの中に**
@@ -265,7 +236,8 @@ assert_with ci_workflow_line_matches \
 # 実際には 1 ファイルしか構文チェックしていない状態が緑で通る（レビューで実測）
 assert_with ci_workflow_step_matches \
     "リンタ網: bash -n が SHELL_FILES を回して実行される" \
-    "ci.yml に「SHELL_FILES を for ループで回し、その各要素に bash -n を実行する」ステップが無い。一覧に載せても構文チェックされない" \
+    "ci.yml に「SHELL_FILES を for ループで回し、その各要素に bash -n を実行する」ステップが、一覧を定義したジョブに無い。一覧に載せても構文チェックされない（失敗を握り潰す形も数えない）" \
+    "${shell_files_job}" \
     "(^|[;&|(][[:space:]]*)for +[A-Za-z_][A-Za-z0-9_]* +in +[^;&|]*${SHELL_FILES_REF}" \
     '(^|[;&|(][[:space:]]*)bash +-n([^[:alnum:]_]|$)'
 
