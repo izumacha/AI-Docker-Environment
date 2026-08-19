@@ -241,23 +241,40 @@ ci_workflow_extract() {
         # **ここでは出力しない**のが要点で、ジョブ単位の無効化キー（`if: false` 等）は
         # YAML のキー順が自由である以上 `steps:` の**後ろ**にも書ける。書いた時点で
         # 出力済みのステップは取り消せないため、ジョブ 1 つ分を溜めてから出す
-        function flush_step(   i, j, nseg, gate, seg, ops, text, lax, pipefail) {
+        function flush_step(   i, j, nseg, gate, seg, ops, text, lax, pipefail, joined, njoined, carry) {
             # **シェルのオプションはステップごとにリセットする。** ステップは 1 つずつ
             # 別のシェルで走るので、前のステップの `set +e` / `pipefail` は引き継がれない
             lax = 0
             pipefail = 0
             if (!step_disabled) {
+                # **行末の `\` は次の行へ続く 1 つの論理行。** 物理行のまま切ると、
+                # 次の行に置かれた `|| true` やパイプが呼び出しと結び付かず、
+                # 握り潰された実行を「ゲートしている」と読む（レビューで実測）
+                njoined = 0
+                carry = ""
                 for (i = 1; i <= ncmd; i++) {
-                    # 1 行を断片に切る
-                    nseg = split_commands(cmds[i], seg, ops)
+                    # 前の行が継続していれば、その続きとして繋ぐ
+                    text = (carry != "") ? carry " " cmds[i] : cmds[i]
+                    # まだ `\` で終わっていれば、次の行を待つ
+                    if (text ~ /\\$/) { carry = substr(text, 1, length(text) - 1); continue }
+                    # continuation が閉じたので 1 本の論理行として確定する
+                    carry = ""
+                    joined[++njoined] = text
+                }
+                # 最後の行が `\` で終わっていても取りこぼさない
+                if (carry != "") { joined[++njoined] = carry }
+
+                for (i = 1; i <= njoined; i++) {
+                    # 1 つの論理行を断片に切る
+                    nseg = split_commands(joined[i], seg, ops)
                     for (j = 1; j <= nseg; j++) {
                         # 前後の空白を落として本文だけにする
                         text = trim(seg[j])
                         # `set +e` 以降はエラーが伝わらない。`set -e` で元に戻る
                         # （`set +e … set -e` で囲った検査を「ゲートしない」と決め付けると、
                         #   実際には落ちるステップが「配線されていない」と逆の診断で赤くなる）
-                        if (text ~ /^set[[:space:]]+\+[a-z]*e([[:space:]]|$)/) { lax = 1 }
-                        else if (text ~ /^set[[:space:]]+-[a-z]*e([[:space:]]|$)/) { lax = 0 }
+                        if (text ~ /^set[[:space:]]+\+[a-z]*e[a-z]*([[:space:]]|$)/) { lax = 1 }
+                        else if (text ~ /^set[[:space:]]+-[a-z]*e[a-z]*([[:space:]]|$)/) { lax = 0 }
                         # `pipefail` が立っていればパイプ越しでも失敗が伝わる
                         if (text ~ /^set[[:space:]]+-[a-z]*o[[:space:]]+pipefail([[:space:]]|$)/) { pipefail = 1 }
                         else if (text ~ /^set[[:space:]]+\+[a-z]*o[[:space:]]+pipefail([[:space:]]|$)/) { pipefail = 0 }
@@ -313,22 +330,29 @@ ci_workflow_extract() {
         # 素の `if: false` と同じスカラーとして読み、GitHub Actions は `FALSE` / `False` も
         # 偽として評価する。素の綴りだけを見ると、**止めたステップが「実行されている」と読まれる**
         # ——本ライブラリが塞ぐと宣言している当の穴が、引用符 2 つで開く（レビューで実測）
-        function is_disabling(t,   probe) {
-            # 引用符を落とし、小文字に揃えた写しで判定する
+        function is_disabling(t,   probe, value) {
+            # 引用符を落とし、小文字に揃えた写しで判定する。YAML は引用符付きの偽を素の
+            # `if: false` と同じスカラーとして読み、Actions は `FALSE` / `False` も偽として評価する
             probe = t
             gsub(/["\047]/, "", probe)
             probe = tolower(probe)
-            # **値がブロックスカラー（`if: >-` / `continue-on-error: |`）なら中身は構造行に現れない。**
-            # 確かめられない以上「実行される」とは主張できないので、無効化側へ倒す（fail-closed）。
-            # `action_pin_test.sh` が `permissions:` をブロックスカラーで書かれたとき特権側へ倒すのと同じ判断
-            if (probe ~ /^[[:space:]]*-?[[:space:]]*(if|continue-on-error):[[:space:]]*[|>][0-9]*[+-]?[[:space:]]*$/) { return 1 }
-            # `if: false` は決して実行されない（式で書かれた `${{ false }}` も同じ）
-            if (probe ~ /^[[:space:]]*-?[[:space:]]*if:[[:space:]]*(false|.\{\{[[:space:]]*false[[:space:]]*\}\})[[:space:]]*$/) { return 1 }
-            # `continue-on-error: true` は走るが失敗してもジョブを止めない＝ゲートにならない。
-            # **式の形も同じ**（`if:` 側だけ式を見て `continue-on-error:` を見ないと、1 行でゲートが外れる）
-            if (probe ~ /^[[:space:]]*-?[[:space:]]*continue-on-error:[[:space:]]*(true|.\{\{[[:space:]]*true[[:space:]]*\}\})[[:space:]]*$/) { return 1 }
-            # それ以外は無効化ではない
-            return 0
+            # `if:` / `continue-on-error:` の行でなければ、そもそも無効化の話ではない
+            if (probe !~ /^[[:space:]]*-?[[:space:]]*(if|continue-on-error):/) { return 0 }
+            # 鍵を取り除いて値だけにする
+            value = probe
+            sub(/^[[:space:]]*-?[[:space:]]*(if|continue-on-error):[[:space:]]*/, "", value)
+            value = trim(value)
+            # **「止めていない」と確かめられる形だけを通し、残りはすべて無効化として扱う（fail-closed）。**
+            # 値が式（`${{ … }}`）やブロックスカラー（`>-`）だと、その場では真偽を評価できない。
+            # 評価できないものを「実行され、しかも合否に効く」と主張する資格はこのライブラリに無い
+            # ——`action_pin_test.sh` が `permissions:` をブロックスカラーで書かれたとき特権側へ倒すのと同じ判断。
+            # 逆に倒すと、`continue-on-error: ${{ … }}` の 1 行でゲートを外しながら全表明が緑のままになる（レビューで実測）
+            if (probe ~ /^[[:space:]]*-?[[:space:]]*if:/) {
+                # `if: true` だけが「止めていない」と言い切れる形
+                return (value == "true") ? 0 : 1
+            }
+            # `continue-on-error: false` だけが「失敗が job に伝わる」と言い切れる形
+            return (value == "false") ? 0 : 1
         }
 
         {
@@ -340,7 +364,9 @@ ci_workflow_extract() {
             if (!structural[NR]) {
                 if (in_run) {
                     text = trim(strip_comment(line))
-                    if (text != "") { cmds[++ncmd] = text }
+                    # 折りたたみ本文なら直前の行に空白で繋ぎ、そうでなければ新しい 1 行として足す
+                    if (text != "" && run_folded && ncmd > 0) { cmds[ncmd] = cmds[ncmd] " " text }
+                    else if (text != "") { cmds[++ncmd] = text }
                 } else if (in_env) {
                     # **空白で区切って 1 エントリずつ**控える。折りたたみブロックは最終的に
                     # 1 本の空白区切り文字列になり、消費側（`shellcheck $SHELL_FILES` と
@@ -439,7 +465,16 @@ ci_workflow_extract() {
             if (step_dash_indent < 0) { next }
 
             # `run: |` / `run: >` のブロック開始。以降の非構造行が本体
-            if (probe ~ /^[[:space:]]*-?[[:space:]]*run:[[:space:]]*[|>]/) { in_run = 1; next }
+            if (probe ~ /^[[:space:]]*-?[[:space:]]*run:[[:space:]]*[|>]/) {
+                in_run = 1
+                # **`>` は「折りたたみ」で、本文の改行は空白に畳まれて 1 つのコマンドになる。**
+                # 1 行ずつ別のコマンドとして読むと、次の行に置かれた `|| true` が
+                # 呼び出しと結び付かず、握り潰された実行を「ゲートしている」と読む（レビューで実測）。
+                # 段落の区切り（空行）まで再現はしないので、そこでも繋いだ結果は
+                # 「握り潰されている」側＝より安全な方に倒れる
+                run_folded = (probe ~ /^[[:space:]]*-?[[:space:]]*run:[[:space:]]*>/)
+                next
+            }
 
             # 1 行で書かれた `run: <command>`
             if (probe ~ /^[[:space:]]*-?[[:space:]]*run:[[:space:]]*[^|>[:space:]]/) {
@@ -637,8 +672,12 @@ ci_workflow_runs_script() {
     # `sudo bash x` はどれも普通にゲートとして働く書き方で、認めないと
     # 「どこからも呼ばれていない」と事実と逆の診断で赤くなる
     # （この repo の e2e も `timeout 5 bash -c …` を使っている）。
-    # 許すのは制御構文と実行ラッパだけ——`echo` / `ls` を許すと言及が実行に化ける
-    local wrapper='(!|if|then|else|elif|do|while|until|sudo|env|nice|timeout|command|exec)'
+    # 許すのは実行ラッパと**本体側**の制御構文だけ——`echo` / `ls` を許すと言及が実行に化ける。
+    # **条件部の語（`if` / `elif` / `while` / `until` / `!`）は許さない。** `if bash x; then …` の
+    # 判定に置かれたコマンドは、落ちても `set -e` を発動させず job も止めない（`|| true` と同じ効果）。
+    # `if ! bash x; then exit 1; fi` のように本体で明示的に落とせばゲートになるが、
+    # 本体が何をするかまでは読めない以上「ゲートしている」とは主張できないので fail-closed に倒す
+    local wrapper='(then|else|do|sudo|env|nice|timeout|command|exec)'
     local prefix="(${wrapper}[[:space:]]+|[0-9]+[smhd]?[[:space:]]+|[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*"
     # パスの直後は空白（引数・リダイレクトが続く）か `)` か断片の終わり。
     # **直後の演算子までここで見ようとしない**のが要点で、`bash x 2>&1 | tee log` のように

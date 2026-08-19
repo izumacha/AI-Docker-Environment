@@ -210,7 +210,7 @@ array_contains() {
 # 本テストは緑のまま通る（レビューで実測）
 # 変数参照は `$SHELL_FILES` と `${SHELL_FILES}` のどちらの書き方でも同じ意味なので両方を認め、
 # **直後が識別子の文字でないこと**まで見る（`$SHELL_FILES_FAST` のような別変数に当たらないように）
-SHELL_FILES_REF='[$][{]?SHELL_FILES[}]?([^[:alnum:]_]|$)'
+SHELL_FILES_REF="[$][{]?${SHELL_FILES_VAR}[}]?([^[:alnum:]_]|$)"
 # 検査するのは「そのステップが SHELL_FILES を消費しているか」だけにする。
 # `shellcheck` の直後の空白やループ変数名まで固定すると、`shellcheck -x $SHELL_FILES` や
 # `for file in $SHELL_FILES` のような**意味の変わらない書き換え**で赤くなり、
