@@ -290,11 +290,18 @@ ci_workflow_extract() {
         function flush_job(   i) {
             # 未確定のステップをジョブの控えへ移してから判断する
             flush_step()
-            # ジョブごと止められていなければ、控えをまとめて出す
+            # **env の記録は無効化に関わらず出す。** これは「何が実行されるか」ではなく
+            # 「そのジョブがどんな変数を定義しているか」という構造の記述であり、
+            # 止まっているジョブの定義を「定義が 0 件」と報告すると、
+            # 一覧の書式が壊れたのか job が止まっているのかを取り違えた診断になる
+            for (i = 1; i <= nenv; i++) { print jobname "#" envbuf[i] }
+            # ジョブごと止められていなければ、コマンドの控えをまとめて出す
             if (!job_disabled) {
                 for (i = 1; i <= nbuf; i++) { print jobname "#" buf[i] }
             }
             # 次のジョブに備えて控えと状態を捨てる
+            for (i = 1; i <= nenv; i++) { delete envbuf[i] }
+            nenv = 0
             for (i = 1; i <= nbuf; i++) { delete buf[i] }
             nbuf = 0
             job_disabled = 0
@@ -342,7 +349,7 @@ ci_workflow_extract() {
                     text = trim(strip_comment(line))
                     nvalue = split(text, values, /[[:space:]]+/)
                     for (vi = 1; vi <= nvalue; vi++) {
-                        if (values[vi] != "") { buf[++nbuf] = "env\tval\t" env_var " " values[vi] }
+                        if (values[vi] != "") { envbuf[++nenv] = "env\tval\t" env_var " " values[vi] }
                     }
                 }
                 next
@@ -402,7 +409,7 @@ ci_workflow_extract() {
                 env_var = trim(probe)
                 sub(/:.*$/, "", env_var)
                 # 定義が現れたこと自体を 1 件として控える（定義箇所の数はこれで数えられる）
-                buf[++nbuf] = "env\tdef\t" env_var
+                envbuf[++nenv] = "env\tdef\t" env_var
                 # 以降の非構造行がこの変数の値
                 in_env = 1
                 next
