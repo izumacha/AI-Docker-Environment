@@ -506,6 +506,30 @@ split_uses_occurrences() {
             # 存在しないタグを上流へ問い合わせて原因を指し違えた診断を出す
             return (w ~ /^v/ || index(w, ".") > 0)
         }
+        # 参照の後ろに続く文字列から版注記（`# vX.Y.Z`）を取り出す関数。
+        # **参照より後ろに現れる `#` を順に見て、最初に「版らしい語」が続くものを注記とする。**
+        # 1 つ目で打ち切らないのは、引用符が落ちた `, name: release #1}  # v4` のように
+        # 値の中の `#` が先に来ることがあるため（そこで打ち切ると `1}` を注記と誤読する）。
+        # 逆に最後まで貪欲に採ると `# v1.2.3 (fixes #42)` で `42)` を拾うので「版らしい形か」で選ぶ。
+        # 単一行の参照（値の後ろ）と、値を次行に置いた参照（続きの行）の**両方**がこれを使う（§6 DRY）
+        function marker_from(tail,   body, word) {
+            # `#` を順に探し、直後の最初の語が版らしければそれを注記として返す
+            while (match(tail, /(^|[[:space:]])#/)) {
+                # `#` の直後から後ろをコメント本文の候補として取り出す
+                body = substr(tail, RSTART + RLENGTH)
+                # 候補の先頭にある空白を落として、最初の語の頭に合わせる
+                sub(/^[[:space:]]*/, "", body)
+                # 最初の語（次の空白まで）を切り出す
+                word = body
+                sub(/[[:space:]].*$/, "", word)
+                # 版らしい形ならそれを注記として採用する
+                if (looks_like_marker(word)) { return word }
+                # そうでなければ、この `#` の次の文字から探索を続ける
+                tail = body
+            }
+            # どの `#` も版らしくなければ注記なし
+            return ""
+        }
         {
             # 「行番号:行の内容」の形なので、最初のコロンで 2 つに分ける
             pos = index($0, ":")
@@ -513,6 +537,39 @@ split_uses_occurrences() {
             lineno = substr($0, 1, pos - 1)
             # コロンより後ろが行の内容
             content = substr($0, pos + 1)
+            # この行の字下げ幅（先頭の非空白文字の位置）を求める。値を次行に置く記法の判定に使う
+            line_indent = match(content, /[^[:space:]]/) - 1
+
+            # 直前の行が「値をこの行に持たない uses:」だったら、この行で値を解決する（issue #104）。
+            # YAML は `- uses:` の値を次の行に**より深く字下げして**置ける。片行しか見ないと、
+            # その値（可変タグを含みうる）が抽出から丸ごと落ち、ピン検査を静かに素通りする
+            if (pending) {
+                # より深く字下げされた行だけが、その uses: の値（次行記法）になりうる
+                if (line_indent > pend_indent) {
+                    # 先頭の字下げを落として値の先頭に合わせる
+                    cval = content
+                    sub(/^[[:space:]]+/, "", cval)
+                    # 値は最初の区切り（空白・`,`・`}`・`]`）までとする（単一行の切り出しと同じ規則）
+                    token = cval
+                    sub(/[][[:space:],}].*$/, "", token)
+                    # 版注記は値の後ろのコメントから取る（単一行と共通の関数を使う）
+                    marker = marker_from(cval)
+                    if (token != "") {
+                        # 参照が読めたので、uses: の行番号のものとして書き出す
+                        print pend_line "\t" token "\t" marker
+                    } else {
+                        # 深いが参照が読めない＝黙って飛ばさず失敗させる（fail-closed）
+                        print pend_line "\t" "\t"
+                    }
+                    # この保留は解決したので閉じ、この行は値として消費済みなので通常走査しない
+                    pending = 0
+                    next
+                }
+                # 続きが無い（浅い／兄弟キー）＝ uses: に値が無い。空欄で書き出し検査を赤くする（fail-closed）
+                print pend_line "\t" "\t"
+                pending = 0
+                # この行そのものは通常どおり走査を続ける（自身の uses: を持ちうる）
+            }
 
             # 行を先頭から走査し、見つけた `uses:` の値をいったん配列へ集める。
             # **コメントの手前で行を切らない**: 引用符は抽出時に一律で落ちるため、
@@ -522,6 +579,8 @@ split_uses_occurrences() {
             # コメント中の `uses:` は下の位置規則（行頭 / 集合内の `{` `,` の直後）で自然に除かれる
             n = 0
             rest = content
+            # 値をこの行に持たない uses: 鍵を見つけたかどうか（次行に値がある記法の候補）
+            empty_uses = 0
             # `rest` より前にある文字数（絶対位置を求めるために持ち歩く）
             scanned = 0
             # 行頭の形（字下げ＋任意の `- `）を許すのは**最初の 1 回だけ**。
@@ -562,17 +621,38 @@ split_uses_occurrences() {
                     values[++n] = value
                     # 値の終わりが行の何文字目かを覚えておく（版注記をこの後ろから探すため）
                     value_end = scanned + RSTART + RLENGTH + length(value) - 1
+                } else {
+                    # 鍵はあるが値がこの行に無い。値を次の行に置く記法かもしれないので控える（issue #104）
+                    empty_uses = 1
+                    # 値は**鍵より深く**字下げされていなければならない（`- uses:` の場合、鍵の桁は
+                    # ダッシュではなく `uses` の位置）。ここでは matched 部分から `uses` の桁を取り出す
+                    matched = substr(rest, RSTART, RLENGTH)
+                    prefix = matched
+                    sub(/uses.*/, "", prefix)
+                    empty_uses_indent = length(prefix)
                 }
                 # 次の `uses:` を探すため、いま処理した位置より後ろへ進める
                 scanned += RSTART + RLENGTH - 1
                 rest = after
             }
 
+            # 値をこの行に持たない uses: だけで、他に参照が無ければ、次の行を値として解決するため保留する。
+            # **他に参照があるときは保留しない**（`n == 0` の条件）: 値の無い鍵は誤検出の断片かもしれず、
+            # 同じ行に本物の参照があるなら次行を巻き込む必要はない。保留したら以降の走査は次の行で行う
+            if (empty_uses && n == 0) {
+                pending = 1
+                pend_line = lineno
+                # **鍵より深く字下げされている行だけ**をその値と見なす（YAML の block mapping 規則）。
+                # ダッシュの桁で比べると、同じ手順の兄弟キー（`with:` など）まで飲み込んでしまう
+                pend_indent = empty_uses_indent
+                # この行に出力すべき参照は無いので、そのまま次の行へ進む
+                delete values
+                next
+            }
+
             # バージョンマーカーを行末コメントから取り出す（`v` 接頭辞は付かない上流もあるため任意）。
             # **参照より後ろだけを探す**: 先頭から最初のコメント開始を探すと、引用符が落ちた
             # `- {name: release #1, uses: …}  # v4` で値の中の `#1` を拾い、`1,` をマーカーと誤読する。
-            # 逆に貪欲に最後の `#` を採ると `# v1.2.3 (fixes #42)` で `42)` を拾う。
-            # 注記は参照に付くものなので、参照の直後から最初のコメント開始を探すのが正しい
             # **1 行に複数の参照があるときは注記を誰にも渡さない**（`n == 1` の条件）:
             # どの参照を指す注記か決められないため。全件へ配ると (a) 別々の SHA に同じ版を
             # 突き合わせて偽の改竄警告を出し、(b) 自分の注記を持たない参照が隣の注記を借りて
@@ -580,26 +660,8 @@ split_uses_occurrences() {
             # 曖昧な書き方は素直に赤くなる（fail-closed）
             marker = ""
             if (n == 1) {
-                # 参照の終わりより後ろの部分だけを取り出す
-                tail = substr(content, value_end + 1)
-                # 参照より後ろに現れる `#` を順に見て、**最初に「版らしい語」が続くもの**を注記とする。
-                # 1 つ目で打ち切らないのは、引用符が落ちた `, name: release #1}  # v4` のように
-                # 値の中の `#` が先に来ることがあるため（そこで打ち切ると `1}` を注記と誤読する）。
-                # 逆に最後まで貪欲に採ると `# v1.2.3 (fixes #42)` で `42)` を拾うので、
-                # 「版らしい形か」で選ぶ。どれも該当しなければ注記なし＝マーカー必須検査で赤くなる
-                while (match(tail, /(^|[[:space:]])#/)) {
-                    # `#` の直後から後ろをコメント本文の候補として取り出す
-                    body = substr(tail, RSTART + RLENGTH)
-                    # 候補の先頭にある空白を落として、最初の語の頭に合わせる
-                    sub(/^[[:space:]]*/, "", body)
-                    # 最初の語（次の空白まで）を切り出す
-                    word = body
-                    sub(/[[:space:]].*$/, "", word)
-                    # 版らしい形ならそれを注記として採用し、探索を終える
-                    if (looks_like_marker(word)) { marker = word; break }
-                    # そうでなければ、この `#` の次の文字から探索を続ける
-                    tail = body
-                }
+                # 参照の終わりより後ろの部分だけを渡して、版注記を取り出す
+                marker = marker_from(substr(content, value_end + 1))
             }
 
             # 集めた値を 1 件ずつ書き出す
@@ -609,6 +671,10 @@ split_uses_occurrences() {
             }
             # 次の行のために、この行で使った配列を空にする
             delete values
+        }
+        END {
+            # ファイルの末尾が「値の無い uses:」で終わっていたら、黙って落とさず失敗させる（fail-closed）
+            if (pending) { print pend_line "\t" "\t" }
         }
     '
 }
@@ -1487,6 +1553,50 @@ jobs:
     steps: [
       name: a, uses: actions/checkout@v7
     ]'
+
+# `uses:` の**値を次の行に置く**記法（YAML として正当）でも参照を取り逃がさないこと（issue #104）。
+# 片行しか見ないと、次行の可変タグ（`@v7`）がピン検査から丸ごと外れる。しかも同じワークフローに
+# 別の `uses:` が 1 つでもあれば `seen` が立つため「`uses:` が 1 つも無い」歯止めも鳴らず、
+# その参照についてだけ供給網ピンが静かに無効化される（「不在＝合格」への逆戻り。実測）。
+# 健全な `uses:` を 1 行足しておくのは、取りこぼしたときに歯止め側が先に鳴るのを避けるため
+assert_pin_enforcement enforced 'mutable tag whose value sits on the next line' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/local
+      - uses:
+          actions/checkout@v7'
+
+# 値を次行に置いた参照の**行末コメントの版注記**も、その参照のものとして取り出すこと。
+# 抽出を単一行の値と共通化したので、注記の付け方は同じ規則で読める
+assert_split_output 'a ref whose value sits on the next line keeps its trailing marker' \
+"7"$'\t'"actions/checkout@1111111111111111111111111111111111111111"$'\t'"v4" \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses:
+          actions/checkout@1111111111111111111111111111111111111111  # v4'
+
+# `uses:` に値が一切無い（次行にも値が来ない）壊れた形は、黙って飛ばさず参照なしで書き出して
+# 検査を赤くすること（fail-closed）。GitHub Actions では `uses:` の空値はそもそも実行不能で、
+# 「読めなかった＝合格」に倒すのはこのファイルが繰り返し塞いできた「不在＝合格」そのもの
+assert_split_output 'a uses key with no value at all yields a failing empty reference' \
+"7"$'\t'$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses:
+        with:
+          token: x'
 
 # 式で組み立てた**動的な参照**も検査対象から外さないこと。`${{ … }}` は実際に動く書き方であり、
 # 版を固定できていないので特権ワークフローでは違反。値の形で絞り込む実装にすると
