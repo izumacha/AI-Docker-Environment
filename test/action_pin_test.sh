@@ -686,10 +686,15 @@ split_uses_occurrences() {
                 rest = after
             }
 
-            # 値をこの行に持たない uses: だけで、他に参照が無ければ、次の行を値として解決するため保留する。
-            # **他に参照があるときは保留しない**（`n == 0` の条件）: 値の無い鍵は誤検出の断片かもしれず、
-            # 同じ行に本物の参照があるなら次行を巻き込む必要はない。保留したら以降の走査は次の行で行う
-            if (empty_uses && n == 0) {
+            # 値をこの行に持たない uses: があれば、次の行を値として解決するため保留する。
+            # **同じ行に別の参照があっても保留する**: 一度「他に参照があるなら保留しない」と
+            # したところ、`[{name: a, uses:` の次行に値を置き、その行の末尾にもう 1 つ
+            # 値なしの `uses:` を置いた形で、後者の値（次々行）が抽出から丸ごと落ちた。
+            # しかも先頭がローカル action だと違反 0 件になり、**main では歯止め
+            # （`uses:` が 1 つも無い）が鳴っていたものが静かに通る**（実測）。
+            # 逆に余計に保留しても、解決できなければ空参照で赤くなり、誤って食べた行は
+            # 偽の参照として赤くなるだけで、見逃しには倒れない（fail-closed）
+            if (empty_uses) {
                 pending = 1
                 pend_line = lineno
                 # **鍵の行より深く字下げされている行だけ**をその値と見なす（YAML の字下げ規則）。
@@ -697,10 +702,6 @@ split_uses_occurrences() {
                 # （`steps: [{name: a, uses:` の次行に値）で値の側のほうが浅くなり取り逃がす。
                 # 兄弟キーを飲み込まないための歯止めは深さではなく `is_key_line()` が担う
                 pend_indent = line_indent
-                # この行に出力すべき参照は無いので、そのまま次の行へ進む
-                delete values
-                delete vline
-                next
             }
 
             # バージョンマーカーを行末コメントから取り出す（`v` 接頭辞は付かない上流もあるため任意）。
@@ -1725,7 +1726,44 @@ jobs:
     steps: [{name: a, uses:
       ./.github/actions/local}, {uses: actions/evil@v1}]'
 
-# 上の 4 つは抽出の話なので、**検査まで通したときに実際に赤くなる**ことも別途固定する。
+# 同じ行に**本物の参照と、値なしの `uses:` の両方**があるときも、後者の次行の値を解決すること。
+# 「他に参照があるなら保留しない」としていた頃はこの値が抽出から丸ごと落ちていた
+assert_split_output 'a line with both a ref and a valueless uses: still resolves the next line' \
+"6"$'\t'"./.github/actions/local"$'\t'$'\n'"6"$'\t'"actions/evil@v1"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps: [{uses: ./.github/actions/local}, {name: b, uses:
+      actions/evil@v1}]'
+
+# 値なしの `uses:` が**次行の値を解決した行の末尾にもう 1 つ**ある形。読めない値は空参照で赤くする。
+# これを保留しないと違反 0 件になり、main では歯止め（`uses:` が 1 つも無い）が鳴っていたものが
+# 静かに通る。可変タグ名までは復元できないが、**合格に倒れないこと**を固定する（fail-closed）
+assert_split_output 'a second valueless uses: after a resolved value still fails closed' \
+"6"$'\t'"./.github/actions/local"$'\t'$'\n'"7"$'\t'$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps: [{name: a, uses:
+      ./.github/actions/local}, {uses:
+      actions/evil@v1}]'
+
+# 上の形は「先頭がローカル action なので違反 0 件＝合格」に化けうる。検査まで通して赤いことを固定する
+assert_pin_enforcement enforced 'a second valueless uses: cannot turn the workflow green' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps: [{name: a, uses:
+      ./.github/actions/local}, {uses:
+      actions/evil@v1}]'
+
+# 上の 6 つは抽出の話なので、**検査まで通したときに実際に赤くなる**ことも別途固定する。
 # 抽出が直っても配線が切れていれば違反は報告されない（このファイルが繰り返し塞いできた形）
 assert_pin_enforcement enforced 'mutable tag hidden behind a comment line' \
 'name: X
