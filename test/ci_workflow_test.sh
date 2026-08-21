@@ -1406,6 +1406,11 @@ jobs:
 # YAML のブロックスカラーはスペースで字下げされるため、この 2 つは実際に意味が違う
 TAB=$'\t'
 
+# 区切り語の**後ろ**に置く空白を表す定数（`DOLLAR` と同じ意図）。
+# 行末の空白は多くのエディタと lint が黙って落とすため、ここに直接書くと
+# 検査したい形が保存のたびに消える。名前を付けて意図した literal だと示す
+SPACE=' '
+
 # `<<-` はスペース字下げされた区切り語を終端と認めない（落とすのはタブだけ）。
 # 認めてしまうと、本文の途中で読み飛ばしが終わり、以降の本文が実行と読まれる
 assert_not_wired "<<- でもスペース字下げされた区切り語は終端ではない" "name: ci
@@ -1468,6 +1473,52 @@ jobs:
           bash ${SUITE_PATH}
           MARK
           fi"
+
+# **`<<-` かどうかの区別そのものを固定する。** タブを落とすのは `<<-` のときだけで、
+# 素の `<<` はタブ字下げされた区切り語を終端と認めない（bash で実測）。
+# この対が無いと `if (dash)` のガードを消しても全件緑のまま通り、区別が削除可能になる
+assert_not_wired "素の << はタブ字下げされた区切り語を終端と認めない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          cat <<MARK
+          one
+          ${TAB}MARK
+          bash ${SUITE_PATH}
+          MARK"
+
+# **「区切り語ちょうど」の末尾側も固定する。** bash は `MARK ` を終端と認めない。
+# 比較の前に右トリムを足すと通ってしまうが、末尾空白は目に見えないぶん実際の
+# ワークフローに混入しやすく、混入した瞬間に本文が「実行されたコマンド」に化ける
+assert_not_wired "行末に空白が付いた区切り語は終端ではない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          cat <<MARK
+          MARK${SPACE}
+          bash ${SUITE_PATH}
+          MARK"
+
+# **明示字下げ指示子（`run: |2`）があれば基準字下げはそちらが決める。**
+# YAML は指示子の桁までしか落とさないので、本文をそれより深く書くと深い分は内容に残り、
+# `  MARK` は終端ではない。最初の非空行から基準を決めると落としすぎてここが穴になる
+assert_not_wired "明示字下げ指示子つきブロックでは深い区切り語は終端ではない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |2
+            cat <<MARK
+            one
+            MARK
+            bash ${SUITE_PATH}"
 
 # 逆向きの歯止め: 基準字下げに置かれた区切り語はちゃんと終端で、その後ろの呼び出しは実行。
 # 落とす量を「開いた行の桁」から絞ったせいで本物の終端を見落とすと、ここが赤くなる
