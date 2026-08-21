@@ -547,6 +547,18 @@ split_uses_occurrences() {
         # 「その `uses:` には値が無かった」と確定できる。
         # **コロンの後ろに空白か行末を要求する**のが要点: これが無いと `docker://alpine:3` の
         # ような値まで鍵と読んで捨ててしまう（YAML でも鍵のコロンは空白か行末が続く）
+        # 保留していた `uses:` を「値が読めなかった」ものとして閉じる関数。
+        # 参照の欄を空で書き出すことで、消費側の `@` 検査が必ず落ちる（fail-closed）。
+        # **書き出す形をここ 1 か所に持たせる**: 同じ 1 行を 3 か所へ写していたので、
+        # 列を足すなどして形を変えたとき 1 か所でも直し忘れると、消費側のタブ区切り読み取りが
+        # 列をずらして読み、壊れた行が静かに別の意味になる（§6 一元管理）
+        # 注: このプログラムはシェルの単一引用符の中にあるので、コメントにも単一引用符を書けない
+        function flush_pending_unresolved() {
+            # 行番号だけを持ち、参照も注記も空の行を書き出す
+            print pend_line "\t" "\t"
+            # 保留は閉じた
+            pending = 0
+        }
         function is_key_line(s) {
             # 先頭の `- `（シーケンス項目）を挟んでよい。鍵の名前のあと、コロン＋空白／行末なら鍵
             return (s ~ /^(-[[:space:]]+)?[A-Za-z_][A-Za-z0-9_.-]*[[:space:]]*:([[:space:]]|$)/)
@@ -564,6 +576,13 @@ split_uses_occurrences() {
             # 直前の行が「値をこの行に持たない uses:」だったら、この行で値を解決する（issue #104）。
             # YAML は `- uses:` の値を次の行に**より深く字下げして**置ける。片行しか見ないと、
             # その値（可変タグを含みうる）が抽出から丸ごと落ち、ピン検査を静かに素通りする
+            # この行で見つけた参照の件数と、走査の開始位置。**保留の解決も同じ勘定に乗せる**ので、
+            # 通常走査より前に初期化しておく（値を消費した続きから走査を再開するため）
+            n = 0
+            rest = content
+            scanned = 0
+            at_line_head = 1
+
             if (pending) {
                 # 先頭の字下げを落として、行の中身の先頭に合わせる
                 cval = content
@@ -580,23 +599,33 @@ split_uses_occurrences() {
                 if (line_indent > pend_indent && !is_key_line(cval)) {
                     # 値は最初の区切り（空白・`,`・`}`・`]`）までとする（単一行と共通の関数を使う）
                     token = value_upto_delimiter(cval)
-                    # 版注記は値の後ろのコメントから取る（単一行と共通の関数を使う）
-                    marker = marker_from(cval)
                     if (token != "") {
-                        # 参照が読めたので、uses: の行番号のものとして書き出す
-                        print pend_line "\t" token "\t" marker
+                        # 参照が読めた。**行末で書き出す通常の勘定に乗せる**（行番号は uses: の側）。
+                        # ここで即座に書き出すと、この行にもう 1 件参照があったときに
+                        # 「1 行 1 件のときだけ注記を渡す」規則をすり抜けて注記が二重に付く
+                        values[++n] = token
+                        vline[n] = pend_line
+                        # 値の終わりが行の何文字目かを覚えておく（版注記をこの後ろから探すため）
+                        value_end = line_indent + length(token)
                     } else {
                         # 深いが参照が読めない＝黙って飛ばさず失敗させる（fail-closed）
-                        print pend_line "\t" "\t"
+                        flush_pending_unresolved()
                     }
-                    # この保留は解決したので閉じ、この行は値として消費済みなので通常走査しない
+                    # この保留はここで閉じる（読めた場合は上の勘定に乗った）
                     pending = 0
-                    next
+                    # **消費した値の後ろから通常走査を続ける**。ここで行ごと読み飛ばすと、
+                    # 同じ行に続く別の `uses:`（`…local}, {uses: actions/x@v1}]`）が
+                    # 抽出から丸ごと落ち、可変タグが検査を静かに素通りする（実測）
+                    scanned = line_indent + length(token)
+                    rest = substr(content, scanned + 1)
+                    # 走査位置が行の途中になったので、以降は行頭の形を認めない
+                    at_line_head = 0
+                } else {
+                    # 続きが無い（浅い／兄弟キー）＝ uses: に値が無い。
+                    # 空欄で書き出し検査を赤くする（fail-closed）
+                    flush_pending_unresolved()
+                    # この行そのものは行頭から通常どおり走査する（自身の uses: を持ちうる）
                 }
-                # 続きが無い（浅い／兄弟キー）＝ uses: に値が無い。空欄で書き出し検査を赤くする（fail-closed）
-                print pend_line "\t" "\t"
-                pending = 0
-                # この行そのものは通常どおり走査を続ける（自身の uses: を持ちうる）
             }
 
             # 行を先頭から走査し、見つけた `uses:` の値をいったん配列へ集める。
@@ -605,15 +634,13 @@ split_uses_occurrences() {
             # そこで切ると後ろの本物の参照ごと捨ててしまい、未ピンの可変タグが検査から消える
             # （＝このファイルが繰り返し塞いできた「不在＝合格」に戻る）。
             # コメント中の `uses:` は下の位置規則（行頭 / 集合内の `{` `,` の直後）で自然に除かれる
-            n = 0
-            rest = content
+            # 走査位置（`n` / `rest` / `scanned` / `at_line_head`）は保留の解決より前に用意済み。
+            # 保留を解決した行では、消費した値の直後から続きを走査する。
+            # なお `at_line_head`（行頭の形を認めるのは最初の 1 回だけ）も同じ理由で
+            # そちら側が調整する: 途中から再開した位置を行頭と扱うと値の続きを鍵と読みかねない
+            #
             # 値をこの行に持たない uses: 鍵を見つけたかどうか（次行に値がある記法の候補）
             empty_uses = 0
-            # `rest` より前にある文字数（絶対位置を求めるために持ち歩く）
-            scanned = 0
-            # 行頭の形（字下げ＋任意の `- `）を許すのは**最初の 1 回だけ**。
-            # 2 個目以降は走査位置が行の途中なので、行頭扱いにすると値の続きを鍵と読みかねない
-            at_line_head = 1
             while (1) {
                 # 見つかったかどうかを初期化する
                 found = 0
@@ -645,6 +672,9 @@ split_uses_occurrences() {
                 # 散文の取り違えは「余分に赤くなる」だけだが、こちらは見逃しを生む
                 if (value != "") {
                     values[++n] = value
+                    # この参照はこの行のものなので、この行の行番号を紐づける
+                    # （保留の解決で入った分だけは `uses:` 鍵の側の行番号を持つ）
+                    vline[n] = lineno
                     # 値の終わりが行の何文字目かを覚えておく（版注記をこの後ろから探すため）
                     value_end = scanned + RSTART + RLENGTH + length(value) - 1
                 } else {
@@ -669,6 +699,7 @@ split_uses_occurrences() {
                 pend_indent = line_indent
                 # この行に出力すべき参照は無いので、そのまま次の行へ進む
                 delete values
+                delete vline
                 next
             }
 
@@ -689,14 +720,16 @@ split_uses_occurrences() {
             # 集めた値を 1 件ずつ書き出す
             # （`marker` は上の `n == 1` の中でしか埋まらないので、複数件の行では必ず空になる）
             for (i = 1; i <= n; i++) {
-                print lineno "\t" values[i] "\t" marker
+                # 行番号は参照ごとに持つ（次行記法で解決した分は `uses:` 鍵の行を指す）
+                print vline[i] "\t" values[i] "\t" marker
             }
             # 次の行のために、この行で使った配列を空にする
             delete values
+            delete vline
         }
         END {
             # ファイルの末尾が「値の無い uses:」で終わっていたら、黙って落とさず失敗させる（fail-closed）
-            if (pending) { print pend_line "\t" "\t" }
+            if (pending) { flush_pending_unresolved() }
         }
     '
 }
@@ -1667,7 +1700,32 @@ jobs:
     steps: [{name: a, uses:
       actions/checkout@v7}]'
 
-# 上の 3 つは抽出の話なので、**検査まで通したときに実際に赤くなる**ことも別途固定する。
+# 次行の値を消費したあと、**同じ行に続く別の `uses:`** も取りこぼさないこと。
+# 値を読んだ時点で行ごと読み飛ばすと、続きの参照が抽出から丸ごと落ちる。しかも先頭の参照が
+# ローカル action（検査対象外＝合格）だと**違反 0 件で通ってしまう**ため、可変タグが
+# 静かにピン検査を素通りする（実測: main は `actions/evil@v1` を検出し、読み飛ばす実装は見逃した）
+assert_split_output 'a continuation line keeps its own trailing uses: too' \
+"6"$'\t'"./.github/actions/local"$'\t'$'\n'"7"$'\t'"actions/evil@v1"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps: [{name: a, uses:
+      ./.github/actions/local}, {uses: actions/evil@v1}]'
+
+# 上の取りこぼしは「合格」に化けるので、**検査まで通して実際に赤くなる**ことも固定する。
+# 先頭がローカル action なので、続きの参照を落とすと違反 0 件になり静かに通る
+assert_pin_enforcement enforced 'mutable tag following a consumed next-line value' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps: [{name: a, uses:
+      ./.github/actions/local}, {uses: actions/evil@v1}]'
+
+# 上の 4 つは抽出の話なので、**検査まで通したときに実際に赤くなる**ことも別途固定する。
 # 抽出が直っても配線が切れていれば違反は報告されない（このファイルが繰り返し塞いできた形）
 assert_pin_enforcement enforced 'mutable tag hidden behind a comment line' \
 'name: X
