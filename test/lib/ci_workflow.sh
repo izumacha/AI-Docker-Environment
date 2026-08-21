@@ -285,19 +285,19 @@ ci_workflow_extract() {
         # ヒアドキュメントの中で名前を挙げられているだけで「実行されている」と通る
         # ——このライブラリが塞ぐために作られた「不在＝合格」そのものの形になる。
         # 判定できないものは呼び出し側で「本文が続く」に倒れる（fail-closed）。
-        # 引数: raw=生の行 / dash=`<<-` で開いたか / indent=開いた行の字下げ幅 / word=区切り語
-        function heredoc_terminates(raw, dash, indent, word,   rest, dropped, head) {
+        # 引数: raw=生の行 / dash=`<<-` で開いたか / indent=ブロックスカラーの基準字下げ /
+        #       word=区切り語
+        function heredoc_terminates(raw, dash, indent, word,   lead, drop, rest) {
             # YAML のブロックスカラーは本文全体が字下げされている。bash が実際に見るのは
-            # その共通分を落とした後の行なので、開いた行と同じ深さまでを先に落として揃える
-            rest = raw
-            dropped = 0
-            while (dropped < indent) {
-                head = substr(rest, 1, 1)
-                # 字下げが尽きたら（＝共通分より浅い行なら）そこで止める
-                if (head != " " && head != "\t") { break }
-                rest = substr(rest, 2)
-                dropped++
-            }
+            # **その基準字下げ分だけ**を落とした後の行なので、まず同じ分を落として揃える。
+            # 先頭の空白の長さを 1 度測り、基準字下げとの小さい方だけを落とす
+            # （基準より深い字下げは bash にも残るので、ここでも残す）
+            lead = match(raw, /[^ \t]/)
+            lead = (lead ? lead - 1 : length(raw))
+            drop = (lead < indent) ? lead : indent
+            # 基準字下げが未確定（本文がまだ 1 行も来ていない）なら何も落とさない
+            if (drop < 0) { drop = 0 }
+            rest = substr(raw, drop + 1)
             # **`<<-` が落とすのは先頭のタブだけで、スペースは落とさない。**
             # YAML の字下げはスペースなので、ここを「字下げは何でも許す」と緩めると、
             # 実際のワークフローで書ける唯一の形がちょうど検査を素通りする（issue #108）
@@ -759,6 +759,16 @@ ci_workflow_extract() {
             # 非構造行＝ブロックスカラーの本文。run: の本体か env の折りたたみブロックのときだけ拾う
             if (!structural[NR]) {
                 if (in_run) {
+                    # **ブロックスカラーの基準字下げは最初の非空行が決める**（YAML の規則）。
+                    # bash が実際に受け取るのはこの分を落とした後の本文なので、
+                    # ヒアドキュメントの終端判定もここを基準にする。
+                    # **開いた行の桁を基準にすると落としすぎる**——`if …; then` の中など
+                    # 基準より深い位置で開いたヒアドキュメントでは、本文中の字下げされた
+                    # 区切り語まで終端と読み、以降の本文（＝ただのデータ）が実行と読まれる
+                    # （issue #108 と同じ穴が入れ子の形で開く。レビューで実測）
+                    if (run_base_indent < 0 && line ~ /[^[:space:]]/) {
+                        run_base_indent = match(line, /[^[:space:]]/) - 1
+                    }
                     # **heredoc の本文はデータであってコマンドではない。**
                     # `cat <<EOF` … `bash test/x_test.sh` … `EOF` の中身を実行と読むと、
                     # ファイルへ書き出しているだけの文字列が「配線されている」証拠に化ける
@@ -766,7 +776,7 @@ ci_workflow_extract() {
                         # 終端の行に来たら本文の読み飛ばしを終える。判定は `heredoc_terminates`
                         # に集約してあり、**bash と同じく「区切り語だけの行」だけを終端と認める**。
                         # 見つけられなければ「本文が続く」に倒れるので、判定は fail-closed 側に寄る
-                        if (heredoc_terminates(line, heredoc_dash, heredoc_indent, heredoc_end)) {
+                        if (heredoc_terminates(line, heredoc_dash, run_base_indent, heredoc_end)) {
                             heredoc_end = ""
                         }
                         next
@@ -801,9 +811,9 @@ ci_workflow_extract() {
                     # 縮み、終端に一生出会えないまま残り全部を本文として捨てる。区切り語は
                     # 「空白とリダイレクト・区切りの記号以外がひと続き」として読む
                     if (heredoc_probe ~ /<<-?[[:space:]]*[^[:space:];&|<>()]/) {
-                        # `<<-` かどうかと、開いた行の字下げを控える（終端の判定に使う）
+                        # `<<-` かどうかを控える（終端の判定に使う。字下げの基準は
+                        # 開いた行ではなくブロックスカラーの `run_base_indent`）
                         heredoc_dash = (heredoc_probe ~ /<<-/)
-                        heredoc_indent = match(line, /[^[:space:]]/) - 1
                         heredoc_end = heredoc_probe
                         sub(/^.*<<-?[[:space:]]*/, "", heredoc_end)
                         sub(/[[:space:];&|<>()].*$/, "", heredoc_end)
@@ -1030,6 +1040,8 @@ ci_workflow_extract() {
             # `run: |` / `run: >` のブロック開始。以降の非構造行が本体
             if (probe ~ /^[[:space:]]*-?[[:space:]]*run:[[:space:]]*[|>]/) {
                 in_run = 1
+                # 基準字下げは、このブロックの最初の非空行を見るまで未確定（-1）
+                run_base_indent = -1
                 # **`>` は「折りたたみ」で、本文の改行は空白に畳まれて 1 つのコマンドになる。**
                 # 1 行ずつ別のコマンドとして読むと、次の行に置かれた `|| true` が
                 # 呼び出しと結び付かず、握り潰された実行を「ゲートしている」と読む（レビューで実測）。

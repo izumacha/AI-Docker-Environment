@@ -1450,19 +1450,40 @@ jobs:
           ${TAB}MARK
           bash ${SUITE_PATH}"
 
-# 素の `<<` は開いた行と同じ深さの区切り語を終端と認める（YAML の共通字下げ分だけは許す）。
-# ここまで締めると、ワークフローに書ける普通のヒアドキュメントが 1 つも閉じられなくなる
-assert_wired "素の << は開いた行と同じ深さの区切り語で終端する" "name: ci
+# 字下げを落とす基準は**ブロックスカラーの基準字下げ**（＝最初の非空行）であって、
+# ヒアドキュメントを開いた行の桁ではない。開いた行を基準にすると、`if …; then` の中など
+# 基準より深い位置で開いたときに落としすぎ、本文中の字下げされた区切り語まで終端と読む。
+# 実際の bash は基準分しか落とさないので `  MARK` は本文のままで、後ろの行も本文
+assert_not_wired "入れ子で開いた heredoc は深い字下げの区切り語で終端しない" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
     steps:
       - name: subject
         run: |
-          cat <<MARK > note.txt
-          one
+          if true; then
+            cat <<MARK
+          body
+            MARK
+          bash ${SUITE_PATH}
           MARK
-          bash ${SUITE_PATH}"
+          fi"
+
+# 逆向きの歯止め: 基準字下げに置かれた区切り語はちゃんと終端で、その後ろの呼び出しは実行。
+# 落とす量を「開いた行の桁」から絞ったせいで本物の終端を見落とすと、ここが赤くなる
+assert_wired "入れ子で開いた heredoc も基準字下げの区切り語で終端する" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          if true; then
+            cat <<MARK
+          body
+          MARK
+          bash ${SUITE_PATH}
+          fi"
 
 # 存在しないファイルも同じ扱い（読めないまま先へ進ませない）
 if ci_workflow_load "${TMP_DIR}/does-not-exist.yml" "${TMP_DIR}/missing-out" 2> /dev/null; then
