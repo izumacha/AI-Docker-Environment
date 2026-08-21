@@ -1395,6 +1395,75 @@ jobs:
     steps:
       - uses: actions/checkout@v7'
 
+# --- ヒアドキュメントの終端判定（bash と同じ厳しさで読む / issue #108）------------------
+#
+# 終端の判定が bash より緩いと、**本文（＝実行されない文字列）が「実行されるコマンド」に化ける**。
+# `ci_coverage_test.sh` の「全スイートが実行されるか」の網はこの記録を根拠に判定するので、
+# ワークフローから外されたスイートが、ヒアドキュメントの中で名前を挙げられているだけで
+# 「実行されている」と通る——このライブラリが塞ぐために作られた「不在＝合格」そのものの形になる。
+
+# 終端の照合に使うタブ。`<<-` が落とすのは**先頭のタブだけ**で、スペースは落とさない。
+# YAML のブロックスカラーはスペースで字下げされるため、この 2 つは実際に意味が違う
+TAB=$'\t'
+
+# `<<-` はスペース字下げされた区切り語を終端と認めない（落とすのはタブだけ）。
+# 認めてしまうと、本文の途中で読み飛ばしが終わり、以降の本文が実行と読まれる
+assert_not_wired "<<- でもスペース字下げされた区切り語は終端ではない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          cat > note.txt <<-MARK
+          one
+            MARK
+          bash ${SUITE_PATH}
+          MARK"
+
+# bash は「区切り語だけの行」しか終端と認めない。行末コメントが付いた行は本文のまま。
+# コメントを剥がしてから照合すると、ここで読み飛ばしが終わって以降の本文が実行と読まれる
+assert_not_wired "行末コメントの付いた区切り語は終端ではない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          cat <<MARK > note.txt
+          MARK # ここはまだ本文
+          bash ${SUITE_PATH}
+          MARK"
+
+# 逆向きも押さえる: 締めすぎると本物の終端に出会えず、heredoc の**後ろ**にある実行まで
+# 本文として捨てられ、「配線されていない」と事実と逆に診断される。
+# `<<-` のタブ字下げは bash が落とすので、これは正しく終端である
+assert_wired "<<- のタブ字下げされた区切り語は終端である" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          cat > note.txt <<-MARK
+          one
+          ${TAB}MARK
+          bash ${SUITE_PATH}"
+
+# 素の `<<` は開いた行と同じ深さの区切り語を終端と認める（YAML の共通字下げ分だけは許す）。
+# ここまで締めると、ワークフローに書ける普通のヒアドキュメントが 1 つも閉じられなくなる
+assert_wired "素の << は開いた行と同じ深さの区切り語で終端する" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          cat <<MARK > note.txt
+          one
+          MARK
+          bash ${SUITE_PATH}"
+
 # 存在しないファイルも同じ扱い（読めないまま先へ進ませない）
 if ci_workflow_load "${TMP_DIR}/does-not-exist.yml" "${TMP_DIR}/missing-out" 2> /dev/null; then
     report_fail "存在しないワークフローは読み込み失敗として返る" "読めないファイルなのに成功が返った"

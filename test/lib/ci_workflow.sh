@@ -276,6 +276,37 @@ ci_workflow_extract() {
         # 前後の空白を落とす
         function trim(t) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", t); return t }
 
+        # **ヒアドキュメントの終端行かどうかを bash と同じ厳しさで判定する。**
+        # bash が終端と認めるのは「区切り語だけが置かれた行」だけで、行末コメントが
+        # 付いた行や余分な字下げが残る行は本文のまま。ここを緩くすると本文の途中で
+        # 読み飛ばしが終わり、**ただのデータが「実行されるコマンド」に化ける**
+        # （issue #108）。`ci_coverage_test.sh` はこの記録を根拠に「全スイートが
+        # 実行されるか」を判定するので、ワークフローから外されたスイートが
+        # ヒアドキュメントの中で名前を挙げられているだけで「実行されている」と通る
+        # ——このライブラリが塞ぐために作られた「不在＝合格」そのものの形になる。
+        # 判定できないものは呼び出し側で「本文が続く」に倒れる（fail-closed）。
+        # 引数: raw=生の行 / dash=`<<-` で開いたか / indent=開いた行の字下げ幅 / word=区切り語
+        function heredoc_terminates(raw, dash, indent, word,   rest, dropped, head) {
+            # YAML のブロックスカラーは本文全体が字下げされている。bash が実際に見るのは
+            # その共通分を落とした後の行なので、開いた行と同じ深さまでを先に落として揃える
+            rest = raw
+            dropped = 0
+            while (dropped < indent) {
+                head = substr(rest, 1, 1)
+                # 字下げが尽きたら（＝共通分より浅い行なら）そこで止める
+                if (head != " " && head != "\t") { break }
+                rest = substr(rest, 2)
+                dropped++
+            }
+            # **`<<-` が落とすのは先頭のタブだけで、スペースは落とさない。**
+            # YAML の字下げはスペースなので、ここを「字下げは何でも許す」と緩めると、
+            # 実際のワークフローで書ける唯一の形がちょうど検査を素通りする（issue #108）
+            if (dash) { sub(/^\t+/, "", rest) }
+            # 残りが区切り語ちょうどのときだけ終端。**コメントを剥がしてから比べない**
+            # ——`MARK # 説明` は bash にとって本文であって終端ではない
+            return (rest == word)
+        }
+
         # **鍵を囲む引用符を落として揃える。** YAML は `"shell": bash` を `shell: bash` と
         # 同じ鍵として読むので、素の綴りだけを見ると引用符 2 つで検出をすり抜けられる。
         # 値には触らない（値の引用符は `read_shell_value` / `is_disabling` 側で扱う）
@@ -732,16 +763,11 @@ ci_workflow_extract() {
                     # `cat <<EOF` … `bash test/x_test.sh` … `EOF` の中身を実行と読むと、
                     # ファイルへ書き出しているだけの文字列が「配線されている」証拠に化ける
                     if (heredoc_end != "") {
-                        # 終端の行に来たら本文の読み飛ばしを終える。
-                        # **素の `<<` は字下げされた区切り語を終端と認めない**（`<<-` だけが許す）。
-                        # ここを緩くすると、本文中の字下げされた区切り語で読み飛ばしが早く終わり、
-                        # 以降の本文（＝ただのデータ）が実行と読まれる（レビューで実測）。
-                        # YAML のブロックスカラーは全体が字下げされているので、
-                        # 「開いた行より深くない」ことを条件にする
-                        if (trim(strip_comment(line)) == heredoc_end || trim(line) == heredoc_end) {
-                            if (heredoc_dash || (match(line, /[^[:space:]]/) - 1) <= heredoc_indent) {
-                                heredoc_end = ""
-                            }
+                        # 終端の行に来たら本文の読み飛ばしを終える。判定は `heredoc_terminates`
+                        # に集約してあり、**bash と同じく「区切り語だけの行」だけを終端と認める**。
+                        # 見つけられなければ「本文が続く」に倒れるので、判定は fail-closed 側に寄る
+                        if (heredoc_terminates(line, heredoc_dash, heredoc_indent, heredoc_end)) {
+                            heredoc_end = ""
                         }
                         next
                     }
