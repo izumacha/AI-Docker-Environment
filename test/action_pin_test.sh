@@ -530,6 +530,27 @@ split_uses_occurrences() {
             # どの `#` も版らしくなければ注記なし
             return ""
         }
+        # 値の先頭から「最初の区切り文字の手前まで」を参照として切り出す関数。
+        # 区切りは空白・`,`・`}`・`]`（フロー形式では値の直後にこれらが続く）。
+        # **この規則をここ 1 か所だけに持たせる**: 単一行の値と、値を次行に置いた記法の
+        # 両方が同じ切り出しを必要とするため、書き写すと片方だけ古くなる（§6 一元管理）。
+        # `]` は文字集合の先頭に置くことで、範囲指定ではなくリテラルの `]` として扱わせている
+        function value_upto_delimiter(s) {
+            # 最初の区切り文字から後ろを丸ごと落とす
+            sub(/[][[:space:],}].*$/, "", s)
+            # 残った先頭部分が参照の値
+            return s
+        }
+        # その行が「YAML の鍵で始まる行」かどうかを調べる関数（字下げは落とした形で渡す）。
+        # 値を次行に置いた `uses:` を解決するとき、**兄弟の鍵（`with:` や次の手順の `uses:`）を
+        # 値と読み違えない**ための歯止め。鍵は値になれないので、これに当たる行が来た時点で
+        # 「その `uses:` には値が無かった」と確定できる。
+        # **コロンの後ろに空白か行末を要求する**のが要点: これが無いと `docker://alpine:3` の
+        # ような値まで鍵と読んで捨ててしまう（YAML でも鍵のコロンは空白か行末が続く）
+        function is_key_line(s) {
+            # 先頭の `- `（シーケンス項目）を挟んでよい。鍵の名前のあと、コロン＋空白／行末なら鍵
+            return (s ~ /^(-[[:space:]]+)?[A-Za-z_][A-Za-z0-9_.-]*[[:space:]]*:([[:space:]]|$)/)
+        }
         {
             # 「行番号:行の内容」の形なので、最初のコロンで 2 つに分ける
             pos = index($0, ":")
@@ -544,14 +565,21 @@ split_uses_occurrences() {
             # YAML は `- uses:` の値を次の行に**より深く字下げして**置ける。片行しか見ないと、
             # その値（可変タグを含みうる）が抽出から丸ごと落ち、ピン検査を静かに素通りする
             if (pending) {
-                # より深く字下げされた行だけが、その uses: の値（次行記法）になりうる
-                if (line_indent > pend_indent) {
-                    # 先頭の字下げを落として値の先頭に合わせる
-                    cval = content
-                    sub(/^[[:space:]]+/, "", cval)
-                    # 値は最初の区切り（空白・`,`・`}`・`]`）までとする（単一行の切り出しと同じ規則）
-                    token = cval
-                    sub(/[][[:space:],}].*$/, "", token)
+                # 先頭の字下げを落として、行の中身の先頭に合わせる
+                cval = content
+                sub(/^[[:space:]]+/, "", cval)
+                # **コメントだけの行は値ではない**ので、保留を閉じずに読み飛ばす。
+                # YAML のコメントは字下げの深さに関係なくどこにでも置け、鍵と値の間にも入る
+                # （`- uses:` の次行に `# pinned below` を書くのは実在する書き方）。
+                # これを値として食べると、本物の参照が載った次の行が走査から丸ごと落ちる（実測）
+                if (cval ~ /^#/) next
+                # その `uses:` の値になれるのは、**鍵の行より深く字下げされていて、
+                # かつそれ自身が鍵で始まらない行**だけ。深さだけで決めると、同じ手順の
+                # 兄弟キー（`with:`）や、散文の手順名の直後に来る本物の `uses:` 行まで
+                # 値として食べてしまい、その行の参照が抽出から丸ごと落ちる（実測）
+                if (line_indent > pend_indent && !is_key_line(cval)) {
+                    # 値は最初の区切り（空白・`,`・`}`・`]`）までとする（単一行と共通の関数を使う）
+                    token = value_upto_delimiter(cval)
                     # 版注記は値の後ろのコメントから取る（単一行と共通の関数を使う）
                     marker = marker_from(cval)
                     if (token != "") {
@@ -608,10 +636,8 @@ split_uses_occurrences() {
                 at_line_head = 0
                 # マッチの直後から値が始まるので、そこから後ろを取り出す
                 after = substr(rest, RSTART + RLENGTH)
-                # 値の候補をいったん丸ごと受け取る
-                value = after
                 # フロー形式では値の直後に区切り（空白・`,`・`}`・`]`）が続くので、そこまでを値とする
-                sub(/[][[:space:],}].*$/, "", value)
+                value = value_upto_delimiter(after)
                 # 値が取れたものだけを控える（鍵だけで値が無い行は対象外）。
                 # **「参照らしい形か」で絞り込まない**: 一度その絞り込みを入れたところ、
                 # `uses: ${{ inputs.action_ref }}` のような**実際に動く動的参照**まで落として
@@ -624,12 +650,6 @@ split_uses_occurrences() {
                 } else {
                     # 鍵はあるが値がこの行に無い。値を次の行に置く記法かもしれないので控える（issue #104）
                     empty_uses = 1
-                    # 値は**鍵より深く**字下げされていなければならない（`- uses:` の場合、鍵の桁は
-                    # ダッシュではなく `uses` の位置）。ここでは matched 部分から `uses` の桁を取り出す
-                    matched = substr(rest, RSTART, RLENGTH)
-                    prefix = matched
-                    sub(/uses.*/, "", prefix)
-                    empty_uses_indent = length(prefix)
                 }
                 # 次の `uses:` を探すため、いま処理した位置より後ろへ進める
                 scanned += RSTART + RLENGTH - 1
@@ -642,9 +662,11 @@ split_uses_occurrences() {
             if (empty_uses && n == 0) {
                 pending = 1
                 pend_line = lineno
-                # **鍵より深く字下げされている行だけ**をその値と見なす（YAML の block mapping 規則）。
-                # ダッシュの桁で比べると、同じ手順の兄弟キー（`with:` など）まで飲み込んでしまう
-                pend_indent = empty_uses_indent
+                # **鍵の行より深く字下げされている行だけ**をその値と見なす（YAML の字下げ規則）。
+                # 桁は鍵の行そのものの字下げで測る。`uses` という語の桁を使うと、フロー形式
+                # （`steps: [{name: a, uses:` の次行に値）で値の側のほうが浅くなり取り逃がす。
+                # 兄弟キーを飲み込まないための歯止めは深さではなく `is_key_line()` が担う
+                pend_indent = line_indent
                 # この行に出力すべき参照は無いので、そのまま次の行へ進む
                 delete values
                 next
@@ -1597,6 +1619,67 @@ jobs:
       - uses:
         with:
           token: x'
+
+# `uses:` の鍵を**フロー形式の区切り（`,`）の直後**で見つけた場合も、次行記法の判定に使う桁を
+# **行頭からの絶対桁**で持つこと。`RSTART` は走査中の残り文字列の中の位置なので、素直に使うと
+# 桁を実際よりずっと小さく見積もる。すると直後の無関係な行（ここでは本物の `uses:` を載せた
+# 兄弟キーの行）まで「値」と見なして食べてしまい、**その行の参照が抽出から丸ごと落ちる**。
+# 引用符は抽出時に一律で落ちるため、`- name: "Check pins, uses:"` のような**散文の手順名**が
+# この形で届く（実測: 修正前は 8 行目の `@v7` が消え、7 行目に偽の参照だけが出ていた）。
+# 7 行目が空参照で赤くなるのは散文の取り違えによる「余分な赤」で、見逃しより安全側
+assert_split_output 'a comma-preceded empty uses: does not swallow the next line' \
+"7"$'\t'$'\t'$'\n'"8"$'\t'"actions/checkout@v7"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: "Check pins, uses:"
+        uses: actions/checkout@v7'
+
+# 鍵と次行の値の**あいだに置かれたコメント行**は値ではないので、保留を閉じずに読み飛ばすこと。
+# YAML のコメントは字下げの深さに関係なくどこにでも置ける。これを値として食べると、
+# 本物の参照が載った次の行が走査から落ち、可変タグがピン検査を素通りする
+# （実測: 修正前は参照が `#` になり、9 行目の `@v7` が消えていた）
+assert_split_output 'a comment between a uses: key and its next-line value is skipped' \
+"7"$'\t'"actions/checkout@v7"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses:
+          # pinned below
+          actions/checkout@v7'
+
+# フロー形式（`steps: [{…}]`）でも値を次の行に置ける。このとき値の側は `uses` という語より
+# **浅い**桁に来るので、桁を「`uses` の語の位置」で測ると取り逃がす。鍵の行の字下げで測れば拾える。
+# 兄弟キーを飲み込まない役目は深さではなく `is_key_line()` が担う、という分担を固定する
+assert_split_output 'a flow-style uses: resolves a value that sits on the next line' \
+"6"$'\t'"actions/checkout@v7"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps: [{name: a, uses:
+      actions/checkout@v7}]'
+
+# 上の 3 つは抽出の話なので、**検査まで通したときに実際に赤くなる**ことも別途固定する。
+# 抽出が直っても配線が切れていれば違反は報告されない（このファイルが繰り返し塞いできた形）
+assert_pin_enforcement enforced 'mutable tag hidden behind a comment line' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/local
+      - uses:
+          # pinned below
+          actions/checkout@v7'
 
 # 式で組み立てた**動的な参照**も検査対象から外さないこと。`${{ … }}` は実際に動く書き方であり、
 # 版を固定できていないので特権ワークフローでは違反。値の形で絞り込む実装にすると
