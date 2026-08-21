@@ -506,6 +506,62 @@ split_uses_occurrences() {
             # 存在しないタグを上流へ問い合わせて原因を指し違えた診断を出す
             return (w ~ /^v/ || index(w, ".") > 0)
         }
+        # 参照の後ろに続く文字列から版注記（`# vX.Y.Z`）を取り出す関数。
+        # **参照より後ろに現れる `#` を順に見て、最初に「版らしい語」が続くものを注記とする。**
+        # 1 つ目で打ち切らないのは、引用符が落ちた `, name: release #1}  # v4` のように
+        # 値の中の `#` が先に来ることがあるため（そこで打ち切ると `1}` を注記と誤読する）。
+        # 逆に最後まで貪欲に採ると `# v1.2.3 (fixes #42)` で `42)` を拾うので「版らしい形か」で選ぶ。
+        # 単一行の参照（値の後ろ）と、値を次行に置いた参照（続きの行）の**両方**がこれを使う（§6 DRY）
+        function marker_from(tail,   body, word) {
+            # `#` を順に探し、直後の最初の語が版らしければそれを注記として返す
+            while (match(tail, /(^|[[:space:]])#/)) {
+                # `#` の直後から後ろをコメント本文の候補として取り出す
+                body = substr(tail, RSTART + RLENGTH)
+                # 候補の先頭にある空白を落として、最初の語の頭に合わせる
+                sub(/^[[:space:]]*/, "", body)
+                # 最初の語（次の空白まで）を切り出す
+                word = body
+                sub(/[[:space:]].*$/, "", word)
+                # 版らしい形ならそれを注記として採用する
+                if (looks_like_marker(word)) { return word }
+                # そうでなければ、この `#` の次の文字から探索を続ける
+                tail = body
+            }
+            # どの `#` も版らしくなければ注記なし
+            return ""
+        }
+        # 値の先頭から「最初の区切り文字の手前まで」を参照として切り出す関数。
+        # 区切りは空白・`,`・`}`・`]`（フロー形式では値の直後にこれらが続く）。
+        # **この規則をここ 1 か所だけに持たせる**: 単一行の値と、値を次行に置いた記法の
+        # 両方が同じ切り出しを必要とするため、書き写すと片方だけ古くなる（§6 一元管理）。
+        # `]` は文字集合の先頭に置くことで、範囲指定ではなくリテラルの `]` として扱わせている
+        function value_upto_delimiter(s) {
+            # 最初の区切り文字から後ろを丸ごと落とす
+            sub(/[][[:space:],}].*$/, "", s)
+            # 残った先頭部分が参照の値
+            return s
+        }
+        # その行が「YAML の鍵で始まる行」かどうかを調べる関数（字下げは落とした形で渡す）。
+        # 値を次行に置いた `uses:` を解決するとき、**兄弟の鍵（`with:` や次の手順の `uses:`）を
+        # 値と読み違えない**ための歯止め。鍵は値になれないので、これに当たる行が来た時点で
+        # 「その `uses:` には値が無かった」と確定できる。
+        # **コロンの後ろに空白か行末を要求する**のが要点: これが無いと `docker://alpine:3` の
+        # ような値まで鍵と読んで捨ててしまう（YAML でも鍵のコロンは空白か行末が続く）
+        function is_key_line(s) {
+            # 先頭の `- `（シーケンス項目）を挟んでよい。鍵の名前のあと、コロン＋空白／行末なら鍵
+            return (s ~ /^(-[[:space:]]+)?[A-Za-z_][A-Za-z0-9_.-]*[[:space:]]*:([[:space:]]|$)/)
+        }
+        # 保留していた `uses:` を「値が読めなかった」ものとして閉じる関数。
+        # 参照の欄を空で書き出すことで、消費側の `@` 検査が必ず落ちる（fail-closed）。
+        # **書き出す形をここ 1 か所に持たせる**: 同じ 1 行を 3 か所へ写していたので、
+        # 列を足すなどして形を変えたとき 1 か所でも直し忘れると、消費側のタブ区切り読み取りが
+        # 列をずらして読み、壊れた行が静かに別の意味になる（§6 一元管理）
+        function flush_pending_unresolved() {
+            # 行番号だけを持ち、参照も注記も空の行を書き出す
+            print pend_line "\t" "\t"
+            # 保留は閉じた
+            pending = 0
+        }
         {
             # 「行番号:行の内容」の形なので、最初のコロンで 2 つに分ける
             pos = index($0, ":")
@@ -513,20 +569,76 @@ split_uses_occurrences() {
             lineno = substr($0, 1, pos - 1)
             # コロンより後ろが行の内容
             content = substr($0, pos + 1)
+            # この行の字下げ幅（先頭の非空白文字の位置）を求める。値を次行に置く記法の判定に使う
+            line_indent = match(content, /[^[:space:]]/) - 1
+
+            # この行で見つけた参照の件数と、走査の開始位置。
+            # **保留の解決もこの勘定に乗せる**ので、下の走査ループより前にここで初期化しておく
+            # （保留を解決した行では、消費した値の直後から走査を再開したいため）。
+            # `at_line_head` は「行頭の形（字下げ＋任意の `- `）を認めるのは最初の 1 回だけ」を表す
+            n = 0
+            rest = content
+            scanned = 0
+            at_line_head = 1
+
+            # 直前の行が「値をこの行に持たない uses:」だったら、この行で値を解決する（issue #104）。
+            # YAML は `- uses:` の値を次の行に**より深く字下げして**置ける。片行しか見ないと、
+            # その値（可変タグを含みうる）が抽出から丸ごと落ち、ピン検査を静かに素通りする
+            if (pending) {
+                # 先頭の字下げを落として、行の中身の先頭に合わせる
+                cval = content
+                sub(/^[[:space:]]+/, "", cval)
+                # **コメントだけの行は値ではない**ので、保留を閉じずに読み飛ばす。
+                # YAML のコメントは字下げの深さに関係なくどこにでも置け、鍵と値の間にも入る
+                # （`- uses:` の次行に `# pinned below` を書くのは実在する書き方）。
+                # これを値として食べると、本物の参照が載った次の行が走査から丸ごと落ちる（実測）
+                if (cval ~ /^#/) next
+                # その `uses:` の値になれるのは、**鍵の行より深く字下げされていて、
+                # かつそれ自身が鍵で始まらない行**だけ。深さだけで決めると、同じ手順の
+                # 兄弟キー（`with:`）や、散文の手順名の直後に来る本物の `uses:` 行まで
+                # 値として食べてしまい、その行の参照が抽出から丸ごと落ちる（実測）
+                if (line_indent > pend_indent && !is_key_line(cval)) {
+                    # 値は最初の区切り（空白・`,`・`}`・`]`）までとする（単一行と共通の関数を使う）
+                    token = value_upto_delimiter(cval)
+                    if (token != "") {
+                        # 参照が読めた。**行末で書き出す通常の勘定に乗せる**（行番号は uses: の側）。
+                        # ここで即座に書き出すと、この行にもう 1 件参照があったときに
+                        # 「1 行 1 件のときだけ注記を渡す」規則をすり抜けて注記が二重に付く
+                        values[++n] = token
+                        vline[n] = pend_line
+                        # 値の終わりが行の何文字目かを覚えておく（版注記をこの後ろから探すため）
+                        value_end = line_indent + length(token)
+                    } else {
+                        # 深いが参照が読めない＝黙って飛ばさず失敗させる（fail-closed）
+                        flush_pending_unresolved()
+                    }
+                    # この保留はここで閉じる（読めた場合は上の勘定に乗った）
+                    pending = 0
+                    # **消費した値の後ろから通常走査を続ける**。ここで行ごと読み飛ばすと、
+                    # 同じ行に続く別の `uses:`（`…local}, {uses: actions/x@v1}]`）が
+                    # 抽出から丸ごと落ち、可変タグが検査を静かに素通りする（実測）
+                    scanned = line_indent + length(token)
+                    rest = substr(content, scanned + 1)
+                    # 走査位置が行の途中になったので、以降は行頭の形を認めない
+                    at_line_head = 0
+                } else {
+                    # 続きが無い（浅い／兄弟キー）＝ uses: に値が無い。
+                    # 空欄で書き出し検査を赤くする（fail-closed）
+                    flush_pending_unresolved()
+                    # この行そのものは行頭から通常どおり走査する（自身の uses: を持ちうる）
+                }
+            }
 
             # 行を先頭から走査し、見つけた `uses:` の値をいったん配列へ集める。
             # **コメントの手前で行を切らない**: 引用符は抽出時に一律で落ちるため、
             # `- {name: release #1, uses: actions/checkout@v1}` の `#` は素の文字として届く。
             # そこで切ると後ろの本物の参照ごと捨ててしまい、未ピンの可変タグが検査から消える
             # （＝このファイルが繰り返し塞いできた「不在＝合格」に戻る）。
-            # コメント中の `uses:` は下の位置規則（行頭 / 集合内の `{` `,` の直後）で自然に除かれる
-            n = 0
-            rest = content
-            # `rest` より前にある文字数（絶対位置を求めるために持ち歩く）
-            scanned = 0
-            # 行頭の形（字下げ＋任意の `- `）を許すのは**最初の 1 回だけ**。
-            # 2 個目以降は走査位置が行の途中なので、行頭扱いにすると値の続きを鍵と読みかねない
-            at_line_head = 1
+            # コメント中の `uses:` は下の位置規則（行頭 / 集合内の `{` `,` の直後）で自然に除かれる。
+            # 走査位置（`n` / `rest` / `scanned` / `at_line_head`）は上の保留処理までに用意済み
+            #
+            # 値をこの行に持たない uses: 鍵を見つけたかどうか（次行に値がある記法の候補）
+            empty_uses = 0
             while (1) {
                 # 見つかったかどうかを初期化する
                 found = 0
@@ -549,10 +661,8 @@ split_uses_occurrences() {
                 at_line_head = 0
                 # マッチの直後から値が始まるので、そこから後ろを取り出す
                 after = substr(rest, RSTART + RLENGTH)
-                # 値の候補をいったん丸ごと受け取る
-                value = after
                 # フロー形式では値の直後に区切り（空白・`,`・`}`・`]`）が続くので、そこまでを値とする
-                sub(/[][[:space:],}].*$/, "", value)
+                value = value_upto_delimiter(after)
                 # 値が取れたものだけを控える（鍵だけで値が無い行は対象外）。
                 # **「参照らしい形か」で絞り込まない**: 一度その絞り込みを入れたところ、
                 # `uses: ${{ inputs.action_ref }}` のような**実際に動く動的参照**まで落として
@@ -560,19 +670,41 @@ split_uses_occurrences() {
                 # 散文の取り違えは「余分に赤くなる」だけだが、こちらは見逃しを生む
                 if (value != "") {
                     values[++n] = value
+                    # この参照はこの行のものなので、この行の行番号を紐づける
+                    # （保留の解決で入った分だけは `uses:` 鍵の側の行番号を持つ）
+                    vline[n] = lineno
                     # 値の終わりが行の何文字目かを覚えておく（版注記をこの後ろから探すため）
                     value_end = scanned + RSTART + RLENGTH + length(value) - 1
+                } else {
+                    # 鍵はあるが値がこの行に無い。値を次の行に置く記法かもしれないので控える（issue #104）
+                    empty_uses = 1
                 }
                 # 次の `uses:` を探すため、いま処理した位置より後ろへ進める
                 scanned += RSTART + RLENGTH - 1
                 rest = after
             }
 
+            # 値をこの行に持たない uses: があれば、次の行を値として解決するため保留する。
+            # **同じ行に別の参照があっても保留する**: 一度「他に参照があるなら保留しない」と
+            # したところ、`[{name: a, uses:` の次行に値を置き、その行の末尾にもう 1 つ
+            # 値なしの `uses:` を置いた形で、後者の値（次々行）が抽出から丸ごと落ちた。
+            # しかも先頭がローカル action だと違反 0 件になり、**main では歯止め
+            # （`uses:` が 1 つも無い）が鳴っていたものが静かに通る**（実測）。
+            # 逆に余計に保留しても、解決できなければ空参照で赤くなり、誤って食べた行は
+            # 偽の参照として赤くなるだけで、見逃しには倒れない（fail-closed）
+            if (empty_uses) {
+                pending = 1
+                pend_line = lineno
+                # **鍵の行より深く字下げされている行だけ**をその値と見なす（YAML の字下げ規則）。
+                # 桁は鍵の行そのものの字下げで測る。`uses` という語の桁を使うと、フロー形式
+                # （`steps: [{name: a, uses:` の次行に値）で値の側のほうが浅くなり取り逃がす。
+                # 兄弟キーを飲み込まないための歯止めは深さではなく `is_key_line()` が担う
+                pend_indent = line_indent
+            }
+
             # バージョンマーカーを行末コメントから取り出す（`v` 接頭辞は付かない上流もあるため任意）。
             # **参照より後ろだけを探す**: 先頭から最初のコメント開始を探すと、引用符が落ちた
             # `- {name: release #1, uses: …}  # v4` で値の中の `#1` を拾い、`1,` をマーカーと誤読する。
-            # 逆に貪欲に最後の `#` を採ると `# v1.2.3 (fixes #42)` で `42)` を拾う。
-            # 注記は参照に付くものなので、参照の直後から最初のコメント開始を探すのが正しい
             # **1 行に複数の参照があるときは注記を誰にも渡さない**（`n == 1` の条件）:
             # どの参照を指す注記か決められないため。全件へ配ると (a) 別々の SHA に同じ版を
             # 突き合わせて偽の改竄警告を出し、(b) 自分の注記を持たない参照が隣の注記を借りて
@@ -580,35 +712,23 @@ split_uses_occurrences() {
             # 曖昧な書き方は素直に赤くなる（fail-closed）
             marker = ""
             if (n == 1) {
-                # 参照の終わりより後ろの部分だけを取り出す
-                tail = substr(content, value_end + 1)
-                # 参照より後ろに現れる `#` を順に見て、**最初に「版らしい語」が続くもの**を注記とする。
-                # 1 つ目で打ち切らないのは、引用符が落ちた `, name: release #1}  # v4` のように
-                # 値の中の `#` が先に来ることがあるため（そこで打ち切ると `1}` を注記と誤読する）。
-                # 逆に最後まで貪欲に採ると `# v1.2.3 (fixes #42)` で `42)` を拾うので、
-                # 「版らしい形か」で選ぶ。どれも該当しなければ注記なし＝マーカー必須検査で赤くなる
-                while (match(tail, /(^|[[:space:]])#/)) {
-                    # `#` の直後から後ろをコメント本文の候補として取り出す
-                    body = substr(tail, RSTART + RLENGTH)
-                    # 候補の先頭にある空白を落として、最初の語の頭に合わせる
-                    sub(/^[[:space:]]*/, "", body)
-                    # 最初の語（次の空白まで）を切り出す
-                    word = body
-                    sub(/[[:space:]].*$/, "", word)
-                    # 版らしい形ならそれを注記として採用し、探索を終える
-                    if (looks_like_marker(word)) { marker = word; break }
-                    # そうでなければ、この `#` の次の文字から探索を続ける
-                    tail = body
-                }
+                # 参照の終わりより後ろの部分だけを渡して、版注記を取り出す
+                marker = marker_from(substr(content, value_end + 1))
             }
 
             # 集めた値を 1 件ずつ書き出す
             # （`marker` は上の `n == 1` の中でしか埋まらないので、複数件の行では必ず空になる）
             for (i = 1; i <= n; i++) {
-                print lineno "\t" values[i] "\t" marker
+                # 行番号は参照ごとに持つ（次行記法で解決した分は `uses:` 鍵の行を指す）
+                print vline[i] "\t" values[i] "\t" marker
             }
             # 次の行のために、この行で使った配列を空にする
             delete values
+            delete vline
+        }
+        END {
+            # ファイルの末尾が「値の無い uses:」で終わっていたら、黙って落とさず失敗させる（fail-closed）
+            if (pending) { flush_pending_unresolved() }
         }
     '
 }
@@ -1487,6 +1607,173 @@ jobs:
     steps: [
       name: a, uses: actions/checkout@v7
     ]'
+
+# `uses:` の**値を次の行に置く**記法（YAML として正当）でも参照を取り逃がさないこと（issue #104）。
+# 片行しか見ないと、次行の可変タグ（`@v7`）がピン検査から丸ごと外れる。しかも同じワークフローに
+# 別の `uses:` が 1 つでもあれば `seen` が立つため「`uses:` が 1 つも無い」歯止めも鳴らず、
+# その参照についてだけ供給網ピンが静かに無効化される（「不在＝合格」への逆戻り。実測）。
+# 健全な `uses:` を 1 行足しておくのは、取りこぼしたときに歯止め側が先に鳴るのを避けるため
+assert_pin_enforcement enforced 'mutable tag whose value sits on the next line' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/local
+      - uses:
+          actions/checkout@v7'
+
+# 値を次行に置いた参照の**行末コメントの版注記**も、その参照のものとして取り出すこと。
+# 抽出を単一行の値と共通化したので、注記の付け方は同じ規則で読める
+assert_split_output 'a ref whose value sits on the next line keeps its trailing marker' \
+"7"$'\t'"actions/checkout@1111111111111111111111111111111111111111"$'\t'"v4" \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses:
+          actions/checkout@1111111111111111111111111111111111111111  # v4'
+
+# `uses:` に値が一切無い（次行にも値が来ない）壊れた形は、黙って飛ばさず参照なしで書き出して
+# 検査を赤くすること（fail-closed）。GitHub Actions では `uses:` の空値はそもそも実行不能で、
+# 「読めなかった＝合格」に倒すのはこのファイルが繰り返し塞いできた「不在＝合格」そのもの
+assert_split_output 'a uses key with no value at all yields a failing empty reference' \
+"7"$'\t'$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses:
+        with:
+          token: x'
+
+# `uses:` の鍵を**フロー形式の区切り（`,`）の直後**で見つけた場合も、次行記法の判定に使う桁を
+# **行頭からの絶対桁**で持つこと。`RSTART` は走査中の残り文字列の中の位置なので、素直に使うと
+# 桁を実際よりずっと小さく見積もる。すると直後の無関係な行（ここでは本物の `uses:` を載せた
+# 兄弟キーの行）まで「値」と見なして食べてしまい、**その行の参照が抽出から丸ごと落ちる**。
+# 引用符は抽出時に一律で落ちるため、`- name: "Check pins, uses:"` のような**散文の手順名**が
+# この形で届く（実測: 修正前は 8 行目の `@v7` が消え、7 行目に偽の参照だけが出ていた）。
+# 7 行目が空参照で赤くなるのは散文の取り違えによる「余分な赤」で、見逃しより安全側
+assert_split_output 'a comma-preceded empty uses: does not swallow the next line' \
+"7"$'\t'$'\t'$'\n'"8"$'\t'"actions/checkout@v7"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: "Check pins, uses:"
+        uses: actions/checkout@v7'
+
+# 鍵と次行の値の**あいだに置かれたコメント行**は値ではないので、保留を閉じずに読み飛ばすこと。
+# YAML のコメントは字下げの深さに関係なくどこにでも置ける。これを値として食べると、
+# 本物の参照が載った次の行が走査から落ち、可変タグがピン検査を素通りする
+# （実測: 修正前は参照が `#` になり、9 行目の `@v7` が消えていた）
+assert_split_output 'a comment between a uses: key and its next-line value is skipped' \
+"7"$'\t'"actions/checkout@v7"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses:
+          # pinned below
+          actions/checkout@v7'
+
+# フロー形式（`steps: [{…}]`）でも値を次の行に置ける。このとき値の側は `uses` という語より
+# **浅い**桁に来るので、桁を「`uses` の語の位置」で測ると取り逃がす。鍵の行の字下げで測れば拾える。
+# 兄弟キーを飲み込まない役目は深さではなく `is_key_line()` が担う、という分担を固定する
+assert_split_output 'a flow-style uses: resolves a value that sits on the next line' \
+"6"$'\t'"actions/checkout@v7"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps: [{name: a, uses:
+      actions/checkout@v7}]'
+
+# 次行の値を消費したあと、**同じ行に続く別の `uses:`** も取りこぼさないこと。
+# 値を読んだ時点で行ごと読み飛ばすと、続きの参照が抽出から丸ごと落ちる。しかも先頭の参照が
+# ローカル action（検査対象外＝合格）だと**違反 0 件で通ってしまう**ため、可変タグが
+# 静かにピン検査を素通りする（実測: main は `actions/evil@v1` を検出し、読み飛ばす実装は見逃した）
+assert_split_output 'a continuation line keeps its own trailing uses: too' \
+"6"$'\t'"./.github/actions/local"$'\t'$'\n'"7"$'\t'"actions/evil@v1"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps: [{name: a, uses:
+      ./.github/actions/local}, {uses: actions/evil@v1}]'
+
+# 上の取りこぼしは「合格」に化けるので、**検査まで通して実際に赤くなる**ことも固定する。
+# 先頭がローカル action なので、続きの参照を落とすと違反 0 件になり静かに通る
+assert_pin_enforcement enforced 'mutable tag following a consumed next-line value' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps: [{name: a, uses:
+      ./.github/actions/local}, {uses: actions/evil@v1}]'
+
+# 同じ行に**本物の参照と、値なしの `uses:` の両方**があるときも、後者の次行の値を解決すること。
+# 「他に参照があるなら保留しない」としていた頃はこの値が抽出から丸ごと落ちていた
+assert_split_output 'a line with both a ref and a valueless uses: still resolves the next line' \
+"6"$'\t'"./.github/actions/local"$'\t'$'\n'"6"$'\t'"actions/evil@v1"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps: [{uses: ./.github/actions/local}, {name: b, uses:
+      actions/evil@v1}]'
+
+# 値なしの `uses:` が**次行の値を解決した行の末尾にもう 1 つ**ある形。読めない値は空参照で赤くする。
+# これを保留しないと違反 0 件になり、main では歯止め（`uses:` が 1 つも無い）が鳴っていたものが
+# 静かに通る。可変タグ名までは復元できないが、**合格に倒れないこと**を固定する（fail-closed）
+assert_split_output 'a second valueless uses: after a resolved value still fails closed' \
+"6"$'\t'"./.github/actions/local"$'\t'$'\n'"7"$'\t'$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps: [{name: a, uses:
+      ./.github/actions/local}, {uses:
+      actions/evil@v1}]'
+
+# 上の形は「先頭がローカル action なので違反 0 件＝合格」に化けうる。検査まで通して赤いことを固定する
+assert_pin_enforcement enforced 'a second valueless uses: cannot turn the workflow green' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps: [{name: a, uses:
+      ./.github/actions/local}, {uses:
+      actions/evil@v1}]'
+
+# 上の 6 つは抽出の話なので、**検査まで通したときに実際に赤くなる**ことも別途固定する。
+# 抽出が直っても配線が切れていれば違反は報告されない（このファイルが繰り返し塞いできた形）
+assert_pin_enforcement enforced 'mutable tag hidden behind a comment line' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/local
+      - uses:
+          # pinned below
+          actions/checkout@v7'
 
 # 式で組み立てた**動的な参照**も検査対象から外さないこと。`${{ … }}` は実際に動く書き方であり、
 # 版を固定できていないので特権ワークフローでは違反。値の形で絞り込む実装にすると
