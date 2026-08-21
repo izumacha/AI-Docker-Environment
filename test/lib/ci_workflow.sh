@@ -194,6 +194,9 @@ ci_workflow_extract() {
         BEGIN {
             jobs_indent = -1; job_indent = -1; steps_indent = -1
             step_dash_indent = -1; env_indent = -1; step_key_indent = -1; defaults_indent = -1; job_key_indent = -1
+            # ブロックスカラーの基準字下げも同じ規約（-1 = まだ決まっていない）。
+            # 0 で始まると「基準は 0 桁と確定済み」の意味になり、字下げを 1 桁も落とさなくなる
+            run_base_indent = -1
 
             # **ワークフロー直下の `defaults:` は先に 1 度だけ読んでおく。**
             # 出力はジョブ 1 つ分を確定させてから行うため、`jobs:` より後ろに書かれた既定を
@@ -290,9 +293,11 @@ ci_workflow_extract() {
         function heredoc_terminates(raw, dash, indent, word,   lead, drop, rest) {
             # YAML のブロックスカラーは本文全体が字下げされている。bash が実際に見るのは
             # **その基準字下げ分だけ**を落とした後の行なので、まず同じ分を落として揃える。
-            # 先頭の空白の長さを 1 度測り、基準字下げとの小さい方だけを落とす
-            # （基準より深い字下げは bash にも残るので、ここでも残す）
-            lead = match(raw, /[^ \t]/)
+            # 先頭の**スペース**の長さを 1 度測り、基準字下げとの小さい方だけを落とす
+            # （基準より深い字下げは bash にも残るので、ここでも残す）。
+            # タブは YAML の字下げではなく内容なので、ここでは落とさない
+            # ——落とすのは `<<-` の規則に従って下で行う
+            lead = match(raw, /[^ ]/)
             lead = (lead ? lead - 1 : length(raw))
             drop = (lead < indent) ? lead : indent
             # 基準字下げが未確定（本文がまだ 1 行も来ていない）なら何も落とさない
@@ -766,8 +771,11 @@ ci_workflow_extract() {
                     # 基準より深い位置で開いたヒアドキュメントでは、本文中の字下げされた
                     # 区切り語まで終端と読み、以降の本文（＝ただのデータ）が実行と読まれる
                     # （issue #108 と同じ穴が入れ子の形で開く。レビューで実測）
+                    # **字下げはスペースだけで測る。** YAML の字下げにタブは使えないので、
+                    # 本文の先頭に現れたタブは字下げではなく**内容の一部**。これを字下げと
+                    # 数えると後で落としすぎ、タブ字下げされた区切り語を終端と読む（実測）
                     if (run_base_indent < 0 && line ~ /[^[:space:]]/) {
-                        run_base_indent = match(line, /[^[:space:]]/) - 1
+                        run_base_indent = match(line, /[^ ]/) - 1
                     }
                     # **heredoc の本文はデータであってコマンドではない。**
                     # `cat <<EOF` … `bash test/x_test.sh` … `EOF` の中身を実行と読むと、
