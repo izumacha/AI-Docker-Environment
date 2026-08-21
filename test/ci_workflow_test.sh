@@ -49,6 +49,15 @@ SUITE_PATH="test/subject_test.sh"
 # 意図した literal であることをこの 1 か所で表しておく
 DOLLAR='$'
 
+# 終端の照合に使うタブ。`<<-` が落とすのは**先頭のタブだけ**で、スペースは落とさない。
+# YAML のブロックスカラーはスペースで字下げされるため、この 2 つは実際に意味が違う
+TAB=$'\t'
+
+# 区切り語の**後ろ**に置く空白を表す定数（`DOLLAR` と同じ意図）。
+# 行末の空白は多くのエディタと lint が黙って落とすため、ここに直接書くと
+# 検査したい形が保存のたびに消える。名前を付けて意図した literal だと示す
+SPACE=' '
+
 # どの合成ワークフローにも足す、常に 1 つコマンドを持つジョブ。
 # これが無いと「対象のジョブを丸ごと無効化した」ケースで抽出結果が空になり、
 # 解析器が壊れて何も取れない状態と区別が付かなくなる（`workflow_verdict` の説明を参照）
@@ -1394,6 +1403,193 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7'
+
+# --- ヒアドキュメントの終端判定（bash と同じ厳しさで読む / issue #108）------------------
+#
+# 終端の判定が bash より緩いと、**本文（＝実行されない文字列）が「実行されるコマンド」に化ける**。
+# `ci_coverage_test.sh` の「全スイートが実行されるか」の網はこの記録を根拠に判定するので、
+# ワークフローから外されたスイートが、ヒアドキュメントの中で名前を挙げられているだけで
+# 「実行されている」と通る——このライブラリが塞ぐために作られた「不在＝合格」そのものの形になる。
+
+
+# `<<-` はスペース字下げされた区切り語を終端と認めない（落とすのはタブだけ）。
+# 認めてしまうと、本文の途中で読み飛ばしが終わり、以降の本文が実行と読まれる
+assert_not_wired "<<- でもスペース字下げされた区切り語は終端ではない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          cat > note.txt <<-MARK
+          one
+            MARK
+          bash ${SUITE_PATH}
+          MARK"
+
+# bash は「区切り語だけの行」しか終端と認めない。行末コメントが付いた行は本文のまま。
+# コメントを剥がしてから照合すると、ここで読み飛ばしが終わって以降の本文が実行と読まれる
+assert_not_wired "行末コメントの付いた区切り語は終端ではない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          cat <<MARK > note.txt
+          MARK # ここはまだ本文
+          bash ${SUITE_PATH}
+          MARK"
+
+# 逆向きも押さえる: 締めすぎると本物の終端に出会えず、heredoc の**後ろ**にある実行まで
+# 本文として捨てられ、「配線されていない」と事実と逆に診断される。
+# `<<-` のタブ字下げは bash が落とすので、これは正しく終端である
+assert_wired "<<- のタブ字下げされた区切り語は終端である" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          cat > note.txt <<-MARK
+          one
+          ${TAB}MARK
+          bash ${SUITE_PATH}"
+
+# 字下げを落とす基準は**ブロックスカラーの基準字下げ**（＝最初の非空行）であって、
+# ヒアドキュメントを開いた行の桁ではない。開いた行を基準にすると、`if …; then` の中など
+# 基準より深い位置で開いたときに落としすぎ、本文中の字下げされた区切り語まで終端と読む。
+# 実際の bash は基準分しか落とさないので `  MARK` は本文のままで、後ろの行も本文
+assert_not_wired "入れ子で開いた heredoc は深い字下げの区切り語で終端しない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          if true; then
+            cat <<MARK
+          body
+            MARK
+          bash ${SUITE_PATH}
+          MARK
+          fi"
+
+# **`<<-` かどうかの区別そのものを固定する。** タブを落とすのは `<<-` のときだけで、
+# 素の `<<` はタブ字下げされた区切り語を終端と認めない（bash で実測）。
+# この対が無いと `if (dash)` のガードを消しても全件緑のまま通り、区別が削除可能になる
+assert_not_wired "素の << はタブ字下げされた区切り語を終端と認めない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          cat <<MARK
+          one
+          ${TAB}MARK
+          bash ${SUITE_PATH}
+          MARK"
+
+# **「区切り語ちょうど」の末尾側も固定する。** bash は `MARK ` を終端と認めない。
+# 比較の前に右トリムを足すと通ってしまうが、末尾空白は目に見えないぶん実際の
+# ワークフローに混入しやすく、混入した瞬間に本文が「実行されたコマンド」に化ける
+assert_not_wired "行末に空白が付いた区切り語は終端ではない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          cat <<MARK
+          MARK${SPACE}
+          bash ${SUITE_PATH}
+          MARK"
+
+# **明示字下げ指示子（`run: |2`）があれば基準字下げはそちらが決める。**
+# YAML は指示子の桁までしか落とさないので、本文をそれより深く書くと深い分は内容に残り、
+# `  MARK` は終端ではない。最初の非空行から基準を決めると落としすぎてここが穴になる
+assert_not_wired "明示字下げ指示子つきブロックでは深い区切り語は終端ではない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |2
+            cat <<MARK
+            one
+            MARK
+            bash ${SUITE_PATH}"
+
+# **指示子の基準は「鍵の桁」であって「ダッシュの桁」ではない。** `- run: |2` では
+# `run` の桁（8）に 2 を足した 10 が内容の字下げになる。ダッシュの桁（6）から数えると
+# 基準が 2 桁浅く出て本物の終端を見落とし、後ろの呼び出しまで本文として捨てる。
+# 上の `|2` のケースはダッシュの無い書き方なので、この区別はここでしか固定されない
+assert_wired "ダッシュ付きの鍵でも指示子の基準は鍵の桁から数える" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |2
+          cat <<MARK
+          one
+          MARK
+          bash ${SUITE_PATH}"
+
+# タブは YAML の字下げではなく**内容の一部**（YAML は字下げにタブを使えない）。
+# 基準字下げをタブまで含めて測ると後で落としすぎ、素の `<<` でタブ字下げされた
+# 区切り語を終端と読んで、以降の本文が実行と読まれる（レビューで実測）
+# 区切り語は**基準より 1 桁だけ深く**置くのが要点。基準と同じ桁に置くと、タブを
+# 字下げに数えても数えなくても落とす量が同じに丸まってしまい、この規則を固定できない
+# （基準と同じ桁のケースは上の「素の << はタブ字下げ…」が別途押さえている）
+assert_not_wired "本文先頭のタブは字下げではないので基準字下げに数えない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${TAB}echo hi
+          cat <<MARK
+          one
+           MARK
+          bash ${SUITE_PATH}
+          MARK"
+
+# **基準字下げはステップをまたいで持ち越さない。** `run:` ブロックごとに測り直さないと、
+# 前のステップの深い基準が残って次のステップで落としすぎ、本文中の区切り語を終端と読む。
+# 前段の `|6` は基準 14 桁、後段は 10 桁なので、持ち越すと 12 桁の区切り語が終端に化ける
+assert_not_wired "基準字下げは run: ブロックごとに測り直す（前段から持ち越さない）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: earlier
+        run: |6
+              echo hi
+      - name: subject
+        run: |
+          cat <<MARK
+          one
+            MARK
+          bash ${SUITE_PATH}
+          MARK"
+
+# 逆向きの歯止め: 基準字下げに置かれた区切り語はちゃんと終端で、その後ろの呼び出しは実行。
+# 落とす量を「開いた行の桁」から絞ったせいで本物の終端を見落とすと、ここが赤くなる
+assert_wired "入れ子で開いた heredoc も基準字下げの区切り語で終端する" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          if true; then
+            cat <<MARK
+          body
+          MARK
+          bash ${SUITE_PATH}
+          fi"
 
 # 存在しないファイルも同じ扱い（読めないまま先へ進ませない）
 if ci_workflow_load "${TMP_DIR}/does-not-exist.yml" "${TMP_DIR}/missing-out" 2> /dev/null; then
