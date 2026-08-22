@@ -1591,6 +1591,130 @@ jobs:
           bash ${SUITE_PATH}
           fi"
 
+# --- ヒアドキュメントの「開き方」の読み取り（issue #110 / #111）------------------------
+#
+# 終端（上の節）と同じくらい、**どこで開いたか・区切り語は何か**の読み取りも合否を左右する。
+# 開き方を読み違えると、本文（＝実行されない文字列）が「実行されるコマンド」に化けるか、
+# 逆に実行している呼び出しが本文として捨てられる。以下の期待値はすべて**実際の bash**で
+# 確かめてある（heredoc の本文を /dev/null へ捨て、副作用のあるコマンドが走ったかで判定）。
+
+# 1 行に 2 つ開いたとき、bash は**先に書いた方の本文を先に**読む。区切り語を 1 つしか
+# 覚えないと、A の本文の中に現れた `B` で読み飛ばしを終え、まだ A の本文である行を
+# 実行として記録する（issue #111 (1)）
+assert_not_wired "1 行に 2 つ開いた heredoc の、先に読まれる本文" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          cat <<A > a.txt; cat <<B > b.txt
+          B
+          bash ${SUITE_PATH}
+          A
+          B"
+
+# 逆向きの歯止め: 2 つとも終端した**後ろ**の呼び出しは実行である。
+# 待ち行列を消化しきれないと、ここが「配線されていない」と事実と逆に診断される
+assert_wired "1 行に 2 つ開いた heredoc の、両方の本文の後ろの呼び出し" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          cat <<A > a.txt; cat <<B > b.txt
+          one
+          A
+          two
+          B
+          bash ${SUITE_PATH}"
+
+# 空の区切り語（`<<\"\"`）も bash では正当な heredoc で、本文は**空行**で終わる。
+# 開いたと認識できないと、本文がそのまま実行として記録される（issue #111 (2)）
+assert_not_wired "空の区切り語（<<\"\"）の本文" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          cat <<\"\" > note.txt
+          bash ${SUITE_PATH}
+
+          echo done"
+
+# 逆向きの歯止め: 空行で終端した後ろの呼び出しは実行である
+assert_wired "空の区切り語（<<\"\"）の本文を終える空行の後ろ" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          cat <<\"\" > note.txt
+          one
+
+          bash ${SUITE_PATH}"
+
+# `<<-` のタブ剥がしは**その区切り語だけ**に効く。行のどこかに `<<-` があるかで決めると、
+# 同じ行の素の `<<` の終端判定にまで伝染し、タブ字下げされた行を終端と読んで
+# まだ本文である行を実行として記録する（issue #111 (3)）
+assert_not_wired "<<- と素の << が同じ行にあるとき、タブ剥がしは素の << に伝染しない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          cat <<-A > a.txt; cat <<B > b.txt
+          ${TAB}B
+          bash ${SUITE_PATH}
+          A
+          B"
+
+# 逆向きの歯止め: `<<-` を付けた当の区切り語には、ちゃんとタブ剥がしが効く。
+# 効かないと A の本文が終わらず、後ろの呼び出しまで捨てられる
+assert_wired "<<- を付けた区切り語自身にはタブ剥がしが効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          cat <<-A > a.txt; cat <<B > b.txt
+          ${TAB}A
+          B
+          bash ${SUITE_PATH}"
+
+# バックスラッシュ引用の区切り語（`<<\\MARK`）は bash では `<<'MARK'` と同じ扱い。
+# 引用を潰す処理に先に食われて区切り語が `ARK` に化けると、終端に一生出会えず
+# **本文の後ろの実行まで捨てる**（issue #110・向きは fail-closed）
+assert_wired "バックスラッシュ引用の区切り語（<<\\MARK）の本文の後ろの呼び出し" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          cat <<\\MARK > note.txt
+          one
+          MARK
+          bash ${SUITE_PATH}"
+
+# 対になる向き: `<<\\MARK` の**本文の中**の呼び出しは実行ではない。
+# 引用の綴りが変わっても本文が本文として読まれることを固定する
+assert_not_wired "バックスラッシュ引用の区切り語（<<\\MARK）の本文" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          cat <<\\MARK > note.txt
+          bash ${SUITE_PATH}
+          MARK"
+
 # 存在しないファイルも同じ扱い（読めないまま先へ進ませない）
 if ci_workflow_load "${TMP_DIR}/does-not-exist.yml" "${TMP_DIR}/missing-out" 2> /dev/null; then
     report_fail "存在しないワークフローは読み込み失敗として返る" "読めないファイルなのに成功が返った"
