@@ -1722,7 +1722,7 @@ jobs:
 # 開始と読むと次のアポストロフィまでが「引用の中」になり、そこに挟まれた**本物の区切り**ごと
 # 伏せてしまう。結果、可変タグが検査から丸ごと消える（fail-open。伏せる実装を入れた初回に実測で
 # 再現し、`actions/evil@v1` が main では検出されるのにこちらでは消えた）。
-# 引用の開始と認めるのは「値が始まりうる位置」＝行頭 / `:` / `,` / `{` / `[` / `-` の直後だけ
+# 引用の開始と認めるのは「値が始まりうる位置」＝行頭 / `{` `[` `,` の直後 / 空白を挟んだ `:` `-` の後
 assert_split_output 'an apostrophe inside a plain scalar does not open a quoted span' \
 "7"$'\t'"actions/evil@v1"$'\t' \
 'name: X
@@ -1733,19 +1733,63 @@ jobs:
     steps:
       - {name: don'"'"'t, uses: actions/evil@v1, desc: it'"'"'s fine}'
 
-# 引用の対応が取れない行（散文のアポストロフィなど）では、伏せずに従来どおりの姿へ倒すこと。
-# ここで伏せてしまうと**本物の区切りを隠して `uses:` を見逃す**恐れがあるため、
-# 「対応が取れないなら手を加えない」を選ぶ（余分に赤くなる側＝fail-closed に倒す）
-assert_split_output 'an unbalanced quote falls back to the previous behaviour' \
-"7"$'\t'$'\t'$'\n'"8"$'\t'"actions/checkout@v7"$'\t' \
+# 上と同じ fail-open の、**`-` を悪用する形**。`-` は「空白が続くとき」だけ並びの区切りで、
+# `pre-'"'"'release` の `-` はただの文字。空白の有無を見ずに `-` の直後を開始と認めると、
+# ここから `it'"'"'s` までが引用の中になり、間の**本物の区切り**ごと伏せて可変タグを見逃す
+# （実測: この形で `actions/evil@v1` が検査から消えた。同じ理由で `:` にも空白を要求する）
+assert_split_output 'a hyphen inside a word does not make the next quote an opener' \
+"7"$'\t'"actions/evil@v1"$'\t' \
 'name: X
 permissions: write-all
 jobs:
   j:
     runs-on: ubuntu-latest
     steps:
-      - {name: don'"'"'t, uses:
-        uses: actions/checkout@v7'
+      - {name: pre-'"'"'release, uses: actions/evil@v1, note: it'"'"'s ok}'
+
+# **単一引用の脱出表記 `'"'"''"'"'` で早く閉じないこと。** YAML ではこれは「文字としてのアポストロフィ」で、
+# スカラーはまだ続いている。最初の 1 個で閉じると残りが引用の外として出てくるため、
+# そこに書かれた読点が区切りとして生き、**issue #93 の 2 件目（幻の参照）がそのまま再現する**
+# （実測: 脱出表記を扱う前の実装では `policy` が報告されていた）
+assert_split_output 'an escaped apostrophe does not close a single-quoted scalar' \
+"9"$'\t'"./.github/actions/local"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: '"'"'don'"'"''"'"'t compare pinning, uses: policy'"'"'
+        run: echo hi
+      - uses: ./.github/actions/local'
+
+# **二重引用の脱出表記 `\"` でも早く閉じないこと。** 理由と結末は上の単一引用と同じ
+assert_split_output 'an escaped double quote does not close a double-quoted scalar' \
+"9"$'\t'"./.github/actions/local"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: "say \"hi\", uses: policy2"
+        run: echo hi
+      - uses: ./.github/actions/local'
+
+# 引用が行内で閉じない場合（複数行にまたがる引用スカラーなど）は、伏せずに従来どおりの姿へ倒すこと。
+# ここで伏せてしまうと**本物の区切りを隠して `uses:` を見逃す**ため、
+# 「対応が取れないなら手を加えない」を選ぶ（余分に赤くなる側＝fail-closed に倒す）。
+# **引用が実際に開くこと**が要点: 開かない書き方で代用すると、この倒し込み自体が検査されない
+# （倒し込みを削っても緑のままになる＝「不在＝合格」の形）
+assert_split_output 'a quote left open on the line falls back to the previous behaviour' \
+"7"$'\t'"actions/evil@v1"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - {name: "oops, uses: actions/evil@v1}'
 
 # 鍵と次行の値の**あいだに置かれたコメント行**は値ではないので、保留を閉じずに読み飛ばすこと。
 # YAML のコメントは字下げの深さに関係なくどこにでも置ける。これを値として食べると、
