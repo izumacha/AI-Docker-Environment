@@ -1911,6 +1911,15 @@ jobs:
     steps:
       - "a" - '"'"'b, uses: actions/evil@v1'"'"'' 6
 
+# 落とした引用符をまたいで**位置の記憶を持ち越さない**こと。持ち越すと、壊れた形で
+# 「引用された鍵の直後の `:`」と誤認して本物の区切りを伏せる（`{"a"" :"b, secrets: …"}` で実測。
+# 特権判定が read-only へ倒れ、ワークフロー内の可変タグが検査から全部外れる **fail-open**）
+assert_structural_line "落とした引用符をまたいで位置の記憶を持ち越さない" \
+    '  j: {a :b, secrets: inherit, runs-on: ubuntu-latest}' \
+    'name: ci
+jobs:
+  j: {"a"" :"b, secrets: inherit", runs-on: ubuntu-latest}' 3
+
 # 開始と認めずに**落とした**引用符でも、行頭の印の並びはそこで終わっていること。
 # 降ろさないと、後ろの `- ` を並びの印と読んで次の引用符を開始と認め、区切りを伏せてしまう
 # （実測: 降ろさない実装では読点が伏せられ、`actions/evil@v1` が抽出から消えた）

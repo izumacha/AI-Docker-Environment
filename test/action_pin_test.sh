@@ -2027,6 +2027,20 @@ jobs:
           and, uses: policy"
         uses: actions/checkout@v9'
 
+# 版注記の取り出しも同じコメント規則（`#` の直前に空白か行頭）に従うこと。
+# ここを緩めると、値の中の `r#v1.2` のような綴りを注記と読み、実在しないタグを上流へ
+# 問い合わせて「SHA と一致しない」と誤報する（必須チェックが恒常的に赤くなる）。
+# 共有定数 `CI_WORKFLOW_COMMENT_START` を使う 4 か所のうち、ここだけが未固定だった
+assert_split_output 'a hash inside a value is not read as a version marker' \
+"7"$'\t'"actions/checkout@1111111111111111111111111111111111111111"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - {uses: actions/checkout@1111111111111111111111111111111111111111, name: r#v1.2 }'
+
 # **既知の残件（行末コメントに書かれた `, uses: …`）。** requirements.md の (b)。
 # 読点に続く形はフロー形式の区切りの規則に当たるため、コメントの中でも参照として報告される。
 # `post-ci-verify.yml` は無条件に特権扱いなので、この形の説明コメントを書くと必須チェックが
