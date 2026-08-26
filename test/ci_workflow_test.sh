@@ -1723,34 +1723,40 @@ jobs:
 # 丸ごと消しても、このスイートも網羅性検査も緑のままだった（実測）。トークナイザの契約が
 # 消費側 1 つの実装詳細に人質を取られている状態なので、ここで直接押さえる。
 
-# 合成したワークフローを `emit_structural_lines` に通し、指定した行の内容を返す
-structural_line() {
-    # 引数を意味の分かる名前に取り出す（本文と、取り出したい行番号）
-    local body="$1" lineno="$2"
-    # 合成ワークフローを一時ファイルへ書き出す
-    printf '%s\n' "${body}" > "${TMP_DIR}/structural.yml"
-    # 構造行を書き出し、目的の行だけを取り出して行番号の接頭辞を落とす
-    # **`exit` で早抜けしない。** 下流が先に閉じると上流が SIGPIPE で死に、
-    # `set -euo pipefail` の下ではパイプライン全体が 141 を返してスイートが途中で止まる
-    # （合計行も失敗したケース名も出ないまま CI が赤くなる）。行番号は一意なので
-    # 最後まで読んでも出力は 1 行だけで、費用も無視できる
-    emit_structural_lines "${TMP_DIR}/structural.yml" | awk -F: -v n="${lineno}" '
-        $1 == n { sub(/^[0-9]+:/, ""); print }'
+# 仮ワークフローの連番（ケースごとに別名にして、失敗した入力がディスクに残るようにする）
+STRUCTURAL_SEQ=0
+
+# 合成したワークフローを `emit_structural_lines` に 1 度だけ通し、全出力を
+# `STRUCTURAL_OUT` に置く。**仮ファイルの名前も呼び出しもここだけが持つ**（呼び出し側が
+# 同じパスを書き写すと、名前の付け方を変えたときに「別のファイルを見て緑」になる）
+structural_emit() {
+    # 引数を意味の分かる名前に取り出す（ワークフロー本文）
+    local body="$1"
+    # 検査ごとに別名の仮ワークフローを作る（失敗したケースの入力がディスクに残るように）
+    STRUCTURAL_SEQ=$((STRUCTURAL_SEQ + 1))
+    local path="${TMP_DIR}/structural-${STRUCTURAL_SEQ}.yml"
+    # 合成ワークフローを書き出す
+    printf '%s\n' "${body}" > "${path}"
+    # 構造行の全出力を控える（emit はこの 1 回だけ）
+    STRUCTURAL_OUT="$(emit_structural_lines "${path}")"
 }
 
 # 構造行が期待どおりかを数える。第 1 引数がケース名、第 2 引数が期待する内容、
 # 第 3 引数がワークフロー本文、第 4 引数が見たい行番号
 assert_structural_line() {
-    # 実際に書き出された行を取る（仮ワークフローは structural_line が書き出す）
-    local actual
-    actual="$(structural_line "$3" "$4")"
-    # **構造行が 1 行でも出ているかを確かめてから中身を比べる。** 期待値が空文字のケース
+    # 仮ワークフローを作って構造行の全出力を取る
+    structural_emit "$3"
+    # **構造行が 1 行でも出ているかを先に確かめる。** 期待値が空文字のケース
     # （ブロックスカラーの本文が漏れないこと）は、解析器が丸ごと壊れて何も出なくなった場合にも
     # 一致してしまう（「不在＝合格」。このリポジトリが繰り返し塞いできた形）
-    if [ -z "$(emit_structural_lines "${TMP_DIR}/structural.yml")" ]; then
+    if [ -z "${STRUCTURAL_OUT}" ]; then
         report_fail "$1" "構造行が 1 行も書き出されなかった（解析器が壊れています。行の中身以前の失敗）"
         return
     fi
+    # 控えた出力から目的の行だけを取り出し、行番号の接頭辞を落とす
+    local actual
+    actual="$(printf '%s\n' "${STRUCTURAL_OUT}" | awk -F: -v n="$4" '
+        $1 == n { sub(/^[0-9]+:/, ""); print }')"
     # 期待と一致すれば合格、違えば両方を見せて落とす
     if [ "${actual}" = "$2" ]; then
         report 0 "$1"
@@ -1938,6 +1944,46 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       -" - '"'"'b, uses: actions/evil@v1'"'"'' 6
+
+# **引用スカラーの続きの行では、どこに引用符があっても伏せない。** 継続行に現れる引用符は
+# 「閉じる側」かもしれず、開始位置の文字（`,` `{` `[` / 空白付きの `:` `-`）の直後に来ると
+# 開始と誤読して後ろの**本物の区切り**ごと伏せる（実測: 可変タグが検査から消えた **fail-open**）。
+# 続きの行かどうかは前の行が引用を開いたままかで分かり、この止め方は
+# **伏せるのをやめる方向にしか効かない**ので、見立てを誤っても余分に赤くなるだけで済む
+assert_structural_line "続きの行では閉じ側の引用符を開始と読まない" \
+    '      ,, uses: actions/evil@v1}]' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps: [{name: "a,
+      ,", uses: "actions/evil@v1"}]' 6
+
+# 続きの行の**脱出表記は終端ではない**こと。`\"` を終端と読むと引用の続きがそこで終わったことになり、
+# 次の行から伏せる判断が復活して、そこにある**本物の区切り**を伏せてしまう
+# （実測: 読点が `~` になり `actions/evil@v1` が抽出から消えた **fail-open**）
+assert_structural_line "続きの行の脱出された引用符は終端ではない" \
+    '      ,, uses: actions/evil@v1}]' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps: [{name: "a,
+      \", b,
+      ,", uses: "actions/evil@v1"}]' 7
+
+# 続きの行が閉じたら、**その次の行からは通常どおり伏せる**こと（止めっぱなしにすると、
+# 以降のふつうの手順名でこの PR が直した幻の参照が戻る）
+assert_structural_line "続きが閉じた次の行では通常どおり伏せる" \
+    '      - {name: b~ uses: policy, uses: ./local}' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - {name: "a,
+      "}
+      - {name: "b, uses: policy", uses: ./local}' 8
 
 # 逆に、**素のスカラーの継続行**の先頭にある引用符は開始ではない（伏せると本物の区切りが消える）
 assert_structural_line "継続行の先頭の引用符では伏せない" \

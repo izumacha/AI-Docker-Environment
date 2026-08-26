@@ -163,7 +163,7 @@ emit_structural_lines() {
             # 「1 文字ずつ読んで同じ文字を書き戻す」だけで、結果は入力と必ず一致する。
             # ワークフローの行の大半（`runs-on: ubuntu-latest` など）がこれに当たり、
             # 素通しすると `emit_structural_lines` の実行時間が実測で約 1/3.6 になる
-            if (index(src, dq) == 0 && index(src, sq) == 0) return src
+            if (index(src, dq) == 0 && index(src, sq) == 0) { MASK_OPEN_TYPE = ""; return src }
             # 確定した出力・引用の中身の写し・開いている引用符の種類を初期化する
             out = ""; raw = ""; quote = ""
             # 引用の外で最後に見た空白以外の文字と、その後ろに空白があったか（開始位置の判定に使う）
@@ -290,12 +290,47 @@ emit_structural_lines() {
             # 行末まで来ても引用が閉じていなければ、伏せずに元の姿で出力する。
             # 複数行にまたがる引用スカラーなど、この行だけでは対応が取れない場合に
             # 伏せてしまうと**本物の区切りを隠して `uses:` を見逃す**ため、従来の挙動へ倒す（fail-closed）
+            # 行末まで閉じなかった引用の**種類**を呼び出し側へ知らせる（awk に多値返却が無いため
+            # グローバルへ置く。既存の `mask_quoted` / `MASK_UNCLOSED` と同じ形）。
+            # 次の行以降は「引用スカラーの続き」なので、伏せる判断を止めるのに使う
+            MASK_OPEN_TYPE = quote
             if (quote != "") out = out raw
             # 組み立てた 1 行を返す
             return out
         }
+        # 引用符を落とすだけで、伏せる処理は一切しない写しを返す（従来の一律削除と同じ結果）。
+        # **複数行にまたがる引用スカラーの「続きの行」に使う**: その行のどこが引用の内側かは
+        # 行だけ見ても決まらないので、伏せずに素の姿で出す＝余分に赤くなる側へ倒す
+        function strip_quotes_only(src,   out, i, ch, len) {
+            # 出力を初期化し、行の長さを求める
+            out = ""; len = length(src)
+            # 1 文字ずつ見て、引用符以外をそのまま写す
+            for (i = 1; i <= len; i++) {
+                ch = substr(src, i, 1)
+                if (ch != dq && ch != sq) out = out ch
+            }
+            # 組み立てた 1 行を返す
+            return out
+        }
+        # 開いたままの引用スカラーが、この行で閉じるかどうかを見る。
+        # 脱出表記（二重引用の `\` と単一引用の `'"'"''"'"'`）は終端ではないので読み飛ばす
+        function closes_span(src, qt,   i, ch, len) {
+            # 行の長さを求めてから 1 文字ずつ見る
+            len = length(src)
+            for (i = 1; i <= len; i++) {
+                ch = substr(src, i, 1)
+                # 二重引用の中では `\` が次の 1 文字を脱出させる
+                if (qt == dq && ch == "\\") { i++; continue }
+                # 単一引用の中では `'"'"''"'"'` が文字としてのアポストロフィ
+                if (qt == sq && ch == sq && substr(src, i + 1, 1) == sq) { i++; continue }
+                # 同じ種類の引用符が素で現れたら、そこで閉じる
+                if (ch == qt) return 1
+            }
+            # 閉じなかった
+            return 0
+        }
         # ブロックスカラーの本文の中かどうかと、その開始行の字下げ幅を覚える
-        BEGIN { in_scalar = 0; scalar_indent = 0 }
+        BEGIN { in_scalar = 0; scalar_indent = 0; open_type = "" }
         {
             # 判定に使う 1 行分の文字列を作業用の変数へ取り出す
             line = $0
@@ -317,7 +352,22 @@ emit_structural_lines() {
             # ここで揃えておけば、消費側それぞれが引用の有無を数え上げずに済む。
             # 併せて、引用の中にあるフロー形式の区切り文字を代役の文字へ伏せる
             # （ただの値に書かれた読点や括弧を構造と読み違えないため。理由は関数側のコメント）
-            emitted = mask_quoted_flow_punctuation(line)
+            # **引用スカラーの続きの行では伏せない。** 行頭側から見ると、その行に現れる引用符は
+            # 「閉じる側」かもしれず、開始と読むと後ろの**本物の区切り**ごと伏せて `uses:` /
+            # `secrets:` を見逃す（実測: `steps: [{name: "a,` の次行 `,", uses: "…"}]` で
+            # 可変タグが検査から消えた。**fail-open**）。この止め方は**伏せるのをやめる方向にしか
+            # 効かない**ので、閉じ位置の見立てを誤っても余分に赤くなるだけで見逃しには倒れない
+            if (open_type != "") {
+                # 続きの行は引用符を落とすだけで出す
+                emitted = strip_quotes_only(line)
+                # この行で閉じるなら、次の行からは通常どおり伏せる判断へ戻す
+                if (closes_span(line, open_type)) open_type = ""
+            } else {
+                # 通常の行は従来どおり伏せる
+                emitted = mask_quoted_flow_punctuation(line)
+                # 行末まで閉じなかったなら、その種類を控えて次の行から続きとして扱う
+                open_type = MASK_OPEN_TYPE
+            }
             # ここまで残った行は構造なので、行番号を付けて書き出す
             print NR ":" emitted
 
