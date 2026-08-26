@@ -2095,6 +2095,57 @@ jobs:
           run: |
             ", uses: actions/evil@v1}' 9
 
+# **行末コメントの中で開いた引用符は、次の行へ引き継がない。** YAML のコメントは行末までなので、
+# そこに書かれた `\"` は複数行にまたがる引用スカラーの始まりではない。引き継ぐと以降の行がすべて
+# 「引用スカラーの続き」と見なされ、**`run: |` がブロックスカラーとして認識されなくなってシェル本文が
+# 構造として漏れ出す**（実測: `run:` の本文の `uses: …@v1` が幻の参照として報告され、本文の
+# `permissions: write-all` を宣言と読んで read-only のワークフローが特権と判定された。
+# 必須チェックが恒常的に赤くなる **fail-open**）。PyYAML はこの入力の 2 つ目の手順を
+# `{'run': 'uses: actions/evil@v1\n'}` と読む＝本文は文字列であって構造ではない
+assert_structural_line "コメントの中の閉じない引用符は次の行へ引き継がない" \
+    '' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./local   # see: "release notes
+      - run: |
+          uses: actions/evil@v1
+      - uses: ./other' 8
+
+# 同じ入力で**本文の後ろの行はきちんと出る**こと（上の空文字が「解析器が止まった」の裏返しに
+# ならないよう、走査が生きていることを同時に押さえる）
+assert_structural_line "コメントの引用符に足を取られても後続の構造行は出る" \
+    '      - uses: ./other' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./local   # see: "release notes
+      - run: |
+          uses: actions/evil@v1
+      - uses: ./other' 9
+
+# **続きの行は「閉じたか」ではなく「末尾で何が開いているか」で見る。** 閉じた時点で打ち切ると、
+# 同じ行の後ろでもう 1 つ引用が開く形を取り逃がし、次の行が「引用の中なのに普通の行」として扱われる。
+# するとそこに書かれた `run: |` がブロックスカラーとして認識され、**続く行が本文として丸ごと落ちる**
+# （**fail-open**。下の入力では 9・10 行目が構造行から消えていた）
+assert_structural_line "続きの行の後ろで開き直した引用も引き継ぐ" \
+    '            uses: actions/checkout@v7' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: "a
+          b" note: '"'"'c
+          run: |
+            uses: actions/checkout@v7
+            more string
+          d'"'"'' 9
+
 # **引用符は 1 つも書き出さない。** 消費側（`scan_workflow_structure`）はこの前提のもとで
 # `"permissions":` と `permissions:` を同じ形として扱っている。ここが崩れると、崩れ方は
 # 「特権ワークフローを非特権と誤判定する」向き（fail-open）なので、契約として明示的に固定する

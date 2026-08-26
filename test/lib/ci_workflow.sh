@@ -112,7 +112,7 @@ emit_structural_lines() {
         #
         # **終端の見立てを 1 か所に集約する**のが要点。同じ規則を必要とする所が 2 つあり
         # （引用の中身を伏せる `mask_quoted_flow_punctuation` と、続きの行で閉じるかを見る
-        # `closes_span`）、以前は同じ 2 行が両方に書き写されていた。片方だけを緩めると
+        # `open_type_after_continuation`）、以前は同じ 2 行が両方に書き写されていた。片方だけを緩めると
         # **向きの違う壊れ方**が同時には見えない: 伏せる側が早く閉じると `- name: '"'"'don'"'"''"'"'t x, uses: p'"'"'`
         # の `p` が幻の参照として報告され（issue #93 の 2 件目そのもの）、閉じ判定側が早く閉じると
         # 続きの行の途中で「もう引用の外」と誤り、次の行から伏せる処理が復活して**本物の区切りごと
@@ -178,7 +178,7 @@ emit_structural_lines() {
         #
         # 引用符そのものは今までどおり落とす（`"permissions":` と `permissions:` を同じ形に
         # 揃える FR-8.1 の前提。脱出表記や入れ子で現れた引用符も同じく落とす）。
-        function mask_quoted_flow_punctuation(src,   out, raw, masked, quote, prev, gap, closed, keyq, seqzone, dashind, i, ch, nxt, len) {
+        function mask_quoted_flow_punctuation(src,   out, raw, masked, quote, prev, gap, closed, keyq, seqzone, dashind, in_comment, i, ch, nxt, len) {
             # **引用符を 1 つも含まない行は、そのまま返す。** その場合この関数がやることは
             # 「1 文字ずつ読んで同じ文字を書き戻す」だけで、結果は入力と必ず一致する。
             # ワークフローの行の大半（`runs-on: ubuntu-latest` など）がこれに当たり、
@@ -190,6 +190,9 @@ emit_structural_lines() {
             prev = ""; gap = 0
             # 直前の非空白が引用スカラーの終わりだったか／いまの `:` がその直後の `:` だったか
             closed = 0; keyq = 0
+            # 引用の外で本物のコメント（`#`）に入ったか。**行末まで閉じない引用を次の行へ引き継ぐか**の
+            # 判断だけに使い、伏せる判断そのものには影響させない（出力は従来どおり）
+            in_comment = 0
             # 行頭からまだ字下げと `-` しか見ていないか（`-` が本物の並びの印かを見分けるのに使う）
             # と、直前の `-` がその位置にあったか
             seqzone = 1; dashind = 0
@@ -255,6 +258,10 @@ emit_structural_lines() {
                     # `gap` が立つので、記憶が無くても開始と認められる）。ここで消すと
                     # issue #93 の 2 件目（幻の参照）がその書き方でだけ戻る
                     if (ch ~ /[[:space:]]/) { gap = 1; continue }
+                    # 引用の外で行頭か空白の直後に来た `#` は、そこから行末までがコメント。
+                    # **コメントの中で開いた引用は、次の行へ続く引用スカラーではない**ので、
+                    # ここを控えておいて末尾の引き継ぎ判断から外す（理由は関数末尾のコメント）
+                    if (ch == "#" && (prev == "" || gap)) in_comment = 1
                     # `:` を見たら「引用された鍵の直後の `:` か」を控える（上の開始判定で使う）
                     if (ch == ":") keyq = closed
                     # `-` を見たら「行頭から字下げと `-` しか見ていない位置か」を控える。
@@ -269,7 +276,7 @@ emit_structural_lines() {
                     continue
                 }
                 # 脱出表記はスカラーの終端ではないので読み飛ばす。
-                # **どれが脱出表記かの判断は `is_escape_at` が唯一の持ち主**（`closes_span` と共有）で、
+                # **どれが脱出表記かの判断は `is_escape_at` が唯一の持ち主**（続きの行の判定と共有）で、
                 # ここが持つのは「読み飛ばすときに写しへ何を残すか」だけ
                 if (is_escape_at(src, i, ch, quote)) {
                     # 単一引用の `'"'"''"'"'`。従来の一律削除に合わせて、写しに足さずに 2 文字ぶん読み飛ばす
@@ -314,7 +321,13 @@ emit_structural_lines() {
             # 行末まで閉じなかった引用の**種類**を呼び出し側へ知らせる（awk に多値返却が無いため
             # グローバルへ置く。既存の `mask_quoted` / `MASK_UNCLOSED` と同じ形）。
             # 次の行以降は「引用スカラーの続き」なので、伏せる判断を止めるのに使う
-            MASK_OPEN_TYPE = quote
+            # **コメントの中で開いた引用は引き継がない。** YAML のコメントは行末までなので、
+            # そこに書かれた `\"` は次の行へ続く引用スカラーの始まりではない。引き継ぐと、以降の行が
+            # すべて「引用スカラーの続き」と見なされ、**`run: |` がブロックスカラーとして認識されなくなり
+            # シェル本文が構造として漏れ出す**（実測: 行末コメントに閉じない `\"` を 1 つ置くだけで、
+            # `run:` の本文にある `uses: …@v1` が幻の参照として報告され、`permissions: write-all` を
+            # 宣言と読んで read-only のワークフローが特権と判定された。**必須チェックが恒常的に赤くなる**）
+            MASK_OPEN_TYPE = in_comment ? "" : quote
             if (quote != "") out = out raw
             # 組み立てた 1 行を返す
             return out
@@ -330,20 +343,33 @@ emit_structural_lines() {
             return out
         }
 
-        # 開いたままの引用スカラーが、この行で閉じるかどうかを見る。
+        # 開いたままの引用スカラー（種類 `qt`）を持つ「続きの行」を読み、**その行の末尾で
+        # 開いたままになっている引用の種類**を返す（開いていなければ空文字）。
+        #
+        # **「閉じたか」ではなく「末尾で何が開いているか」を返す**のが要点。閉じたかどうかだけを見て
+        # そこで打ち切ると、**同じ行の後ろでもう 1 つ引用が開く**形を取り逃がす。すると次の行は
+        # 「引用の中なのに普通の行」として扱われ、そこに書かれた `run: |` がブロックスカラーとして
+        # 認識されて**続く行が本文として丸ごと落ちる**（実測: `- name: \"a` / `  b\" note: '"'"'c` /
+        # `  run: |` と続く入力で、そのあとの 2 行が構造行から消えた。**fail-open**）。
         # 終端かどうかの規則は `is_escape_at` に集約してあり、伏せる処理側と同じものを使う
-        function closes_span(src, qt,   i, ch, len) {
+        function open_type_after_continuation(src, qt,   i, ch, len) {
             # 行の長さを求めてから 1 文字ずつ見る
             len = length(src)
             for (i = 1; i <= len; i++) {
                 ch = substr(src, i, 1)
                 # 脱出表記は終端ではないので 2 文字ぶん読み飛ばす
                 if (is_escape_at(src, i, ch, qt)) { i++; continue }
-                # 同じ種類の引用符が素で現れたら、そこで閉じる
-                if (ch == qt) return 1
+                # 同じ種類の引用符が素で現れたら、そこで閉じる。
+                # **残りは普通の YAML なので、通常の判定にそのままかける**（開始位置の規則も
+                # コメントの扱いも 1 か所に持たせるため。返ってくる行そのものは使わず、
+                # 「末尾で開いたままの引用の種類」だけを受け取る）
+                if (ch == qt) {
+                    mask_quoted_flow_punctuation(substr(src, i + 1))
+                    return MASK_OPEN_TYPE
+                }
             }
-            # 閉じなかった
-            return 0
+            # 閉じなかった＝同じ引用がこの行の末尾でもまだ開いている
+            return qt
         }
         # ブロックスカラーの本文の中かどうかと、その開始行の字下げ幅を覚える
         BEGIN { in_scalar = 0; scalar_indent = 0; open_type = ""; was_continuation = 0 }
@@ -378,8 +404,8 @@ emit_structural_lines() {
             if (open_type != "") {
                 # 続きの行は引用符を落とすだけで出す
                 emitted = strip_quotes_only(line)
-                # この行で閉じるなら、次の行からは通常どおり伏せる判断へ戻す
-                if (closes_span(line, open_type)) open_type = ""
+                # この行の末尾で開いたままの引用を控え直す（閉じていれば空文字＝次の行から通常どおり伏せる）
+                open_type = open_type_after_continuation(line, open_type)
             } else {
                 # 通常の行は従来どおり伏せる
                 emitted = mask_quoted_flow_punctuation(line)
