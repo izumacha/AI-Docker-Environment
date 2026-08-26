@@ -156,7 +156,12 @@ scan_workflow_structure() {
             sub(/[[:space:]]*#.*$/, "", line)
             # 引用符をすべて取り除き、`"permissions":` と `permissions:`、`"write"` と `write` を同じ形に揃える。
             # YAML は鍵も値も引用できるため、引用の有無を綴りとして数え上げると必ず取りこぼす
-            # （`"permissions": write-all` が非特権と誤判定される穴を実測）
+            # （`"permissions": write-all` が非特権と誤判定される穴を実測）。
+            # **正規化の持ち主は `emit_structural_lines()` 側**で、いまはそこが引用符を 1 つも
+            # 出力しないため、この行は実際には何にも当たらない。**それでも残す**: ここが空振りに
+            # なる前提が崩れるのは「上流が引用符を出すようになったとき」で、そのとき静かに壊れるのは
+            # **特権ワークフローを非特権と誤判定する向き（fail-open）**だから。引用の扱いを直すときは
+            # 必ず上流を直すこと（この行は最後の受け皿であって、規則の置き場所ではない）
             gsub(quote_chars, "", line)
             # 大文字小文字の揺れも同様に潰しておく（`WRITE` と `write`、`Secrets:` と `secrets:` を同じ形にする）
             line = tolower(line)
@@ -1674,9 +1679,14 @@ jobs:
 # 兄弟キーの行）まで「値」と見なして食べてしまい、**その行の参照が抽出から丸ごと落ちる**
 # （実測: 修正前は 8 行目の `@v7` が消え、7 行目に偽の参照だけが出ていた）。
 # 7 行目が空参照で赤くなるのは「値の無い `uses:`」に対する正しい fail-closed で、見逃しより安全側。
-# **引用符を使わない形で書く**のが要点: 引用の中の読点は下の issue #93 の対応で伏せられるため、
+# **これは壊れた YAML に対する頑健性の検査**（`yaml.safe_load` は `ParserError` を出し、
+# Actions もこの形は受け付けない）。実在しうる入力を模しているのではなく、
+# 「解釈できない形を渡されても黙って飛ばさない」ことを固定するのが目的なので、
+# 妥当な YAML へ書き換えてはいけない — 閉じたフローマッピングにすると値が解決してしまい、
+# 「次の行を食べない」という当の分岐を通らなくなる。
+# **引用符を使わない形で書く**のも要点: 引用の中の読点は下の issue #93 の対応で伏せられるため、
 # 散文の手順名で代用すると、この桁の回帰そのものを駆動しなくなる
-assert_split_output 'a comma-preceded empty uses: does not swallow the next line' \
+assert_split_output 'a comma-preceded empty uses: does not swallow the next line (malformed input)' \
 "7"$'\t'$'\t'$'\n'"8"$'\t'"actions/checkout@v7"$'\t' \
 'name: X
 permissions: write-all
@@ -1762,6 +1772,24 @@ jobs:
       - name: '"'"'don'"'"''"'"'t compare pinning, uses: policy'"'"'
         run: echo hi
       - uses: ./.github/actions/local'
+
+# 上と同じ fail-open の、**行頭の引用符を悪用する形**。素のスカラーは複数行に続けられ、
+# その継続行は引用符から始まってよい（YAML が禁じるのはスカラーの先頭文字だけ）。
+# 1 行ずつしか見ないこの層では「新しいスカラーの開始」か「継続行の中の 1 文字」かを決められず、
+# 開始と読むと間の**本物の区切り**ごと伏せて可変タグを見逃す
+# （実測: `yaml.safe_load` は 7 行目を `{'"'"'name'"'"': "a '"'"'b", '"'"'uses'"'"': "actions/evil@v1'"'"'"}` と読むのに、
+# 検出側は `./local` しか返さなかった）。
+# **`index()` に空の探し文字列を渡したときの答えが実装で割れる**点にも注意（mawk は 1 を返す）。
+# そのため行頭かどうかは `prev != ""` で明示的に守る
+assert_split_output 'a quote at the start of a continuation line does not open a span' \
+"7"$'\t'"actions/evil@v1"$'\t'$'\n'"7"$'\t'"./local"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps: [{name: a
+      '"'"'b, uses: actions/evil@v1'"'"', z: 1}, {uses: ./local}]'
 
 # 上と同じ fail-open の、**空白で囲んだ `-` を悪用する形**。`- ` が並びの印になるのは
 # **行頭（字下げの直後）だけ**で、スカラーの途中の `Lint - '"'"'tis time` の `-` はただの文字。
