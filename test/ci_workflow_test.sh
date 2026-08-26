@@ -1758,6 +1758,29 @@ jobs:
     steps:
       - name: "compare pinning, uses: policy"' 6
 
+# 伏せる文字は読点だけではない。**波括弧・角括弧も同じく構造としてしか意味を持たない**ので、
+# 引用の中にあれば伏せる。ここを読点だけに絞ると `- name: "a{uses: policy}"` で幻の参照が戻り、
+# `- name: "Rotate {secrets: prod}"` は特権判定を read-only から privileged へ倒してしまう
+# （実測: `flow_re` を `[,]` に狭める変異は、この 1 件を足す前は全スイート緑のまま通った）
+assert_structural_line "引用された値の中の波括弧も伏せられる" \
+    '      - name: a~uses: policy~' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: "a{uses: policy}"' 6
+
+# 角括弧も同様（フロー並びの開き・閉じとして読まれないようにする）
+assert_structural_line "引用された値の中の角括弧も伏せられる" \
+    '      - name: a~uses: policy~' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: "a[uses: policy]"' 6
+
 # 伏せるのは区切り文字だけで、引用された値の綴りには触れない（参照を読めなくしないため）
 assert_structural_line "引用された uses: の値はそのまま残る" \
     '      - uses: actions/checkout@v7' \

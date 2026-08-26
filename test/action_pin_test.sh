@@ -1712,11 +1712,12 @@ jobs:
 # 7 行目が空参照で赤くなるのは「値の無い `uses:`」に対する正しい fail-closed で、見逃しより安全側。
 # **これは壊れた YAML に対する頑健性の検査**（`yaml.safe_load` は `ParserError` を出し、
 # Actions もこの形は受け付けない）。実在しうる入力を模しているのではなく、
-# 「解釈できない形を渡されても黙って飛ばさない」ことを固定するのが目的なので、
-# 妥当な YAML へ書き換えてはいけない — 閉じたフローマッピングにすると値が解決してしまい、
-# 「次の行を食べない」という当の分岐を通らなくなる。
+# 「解釈できない形を渡されても黙って飛ばさない」ことを固定するのが目的。
 # **引用符を使わない形で書く**のも要点: 引用の中の読点は下の issue #93 の対応で伏せられるため、
-# 散文の手順名で代用すると、この桁の回帰そのものを駆動しなくなる
+# 散文の手順名で代用すると `uses:` の鍵そのものが見つからなくなる。
+# なお上のコメントが述べている桁（`RSTART` の取り違え）そのものを駆動しているのは
+# **このケースではない**（`pend_indent` を 0 に落とす変異を入れてもここは緑のまま）。
+# 桁の側は `a second valueless uses: after a resolved value still fails closed` が押さえている
 assert_split_output 'a comma-preceded empty uses: does not swallow the next line (malformed input)' \
 "7"$'\t'$'\t'$'\n'"8"$'\t'"actions/checkout@v7"$'\t' \
 'name: X
@@ -1916,6 +1917,42 @@ jobs:
       - name: "say \"hi\", uses: policy2"
         run: echo hi
       - uses: ./.github/actions/local'
+
+# **既知の残件（issue #93 の 2 件目のうち、複数行にまたがる引用スカラーの形）。**
+# `yaml.safe_load` は下の手順名を `compare pinning and, uses: policy` という 1 つの文字列として
+# 読むが、この層は 1 行ずつしか見ないので 2 行目の読点を伏せられず、幻の参照 `policy` が残る。
+# **倒れる向きは「余分に赤くなる」側**（見逃しではない）なので、行をまたいで引用を追う仕組みを
+# 入れるより現状を明示的に記録することを選ぶ — 追う仕組みは、追い方を誤ると本物の区切りを
+# 伏せる fail-open に化けるため、別途 issue #97 の枠で扱う。
+# ここで固定しておかないと、将来この挙動が変わったとき「直したのか壊したのか」が分からない
+assert_split_output 'KNOWN RESIDUAL: a quoted scalar spanning lines still yields a phantom' \
+"8"$'\t'"policy"$'\t'$'\n'"9"$'\t'"actions/checkout@v9"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: "compare pinning
+          and, uses: policy"
+        uses: actions/checkout@v9'
+
+# **既知の残件（伏せる処理が参照の綴りを変える唯一の形）。**
+# 引用された値そのものが区切り文字を含むと、その値も伏せられる。動的参照を引用符で囲んだ
+# `uses: "${{ inputs.action_ref }}"` はこれに当たり、参照が `$~~` として抽出される。
+# **検査は通らない側へ倒れる**（ピン済みとは扱われない）ので安全側だが、診断に出る綴りが
+# ファイル中の文字列と一致しない。引用しない形は `a reference built from an expression is
+# still checked` が押さえているので、引用した形はこちらで固定する
+# shellcheck disable=SC2016  # YAML の中身をそのまま書くので `${{ }}` は展開させない
+assert_split_output 'KNOWN RESIDUAL: a quoted expression ref is masked in the diagnostic' \
+"7"$'\t'"\$~~"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: "${{ inputs.action_ref }}"'
 
 # 引用が行内で閉じない場合（複数行にまたがる引用スカラーなど）は、伏せずに従来どおりの姿へ倒すこと。
 # ここで伏せてしまうと**本物の区切りを隠して `uses:` を見逃す**ため、
