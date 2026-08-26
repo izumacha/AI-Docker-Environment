@@ -644,7 +644,11 @@ split_uses_occurrences() {
             # `- {name: release #1, uses: actions/checkout@v1}` の `#` は素の文字として届く。
             # そこで切ると後ろの本物の参照ごと捨ててしまい、未ピンの可変タグが検査から消える
             # （＝このファイルが繰り返し塞いできた「不在＝合格」に戻る）。
-            # コメント中の `uses:` は下の位置規則（行頭 / 集合内の `{` `,` の直後）で自然に除かれる。
+            # **コメント中の `uses:` は位置規則では除ききれない**（残件。requirements.md の (b)）:
+            # 読点に続く形（`# … script, uses: actions/cache@v4 …`）はフロー形式の区切りの規則に
+            # 当たってしまい、幻の参照として報告される。コメントの境界はトークナイザ側
+            # （`emit_structural_lines` の `probe`）が既に計算しているので、直すならそれを
+            # 消費側へ渡す形になる（issue #97 の 1 件目）。
             # 走査位置（`n` / `rest` / `scanned` / `at_line_head`）は上の保留処理までに用意済み
             #
             # 値をこの行に持たない uses: 鍵を見つけたかどうか（次行に値がある記法の候補）
@@ -1431,6 +1435,18 @@ permissions: read-all
 jobs:
   j: {name: b, runs-on: ubuntu-latest}  # secrets: inherit'
 
+# 引用を開いたまま終わった行の次の行でも、後ろの本物の `secrets:` を見落とさないこと。
+# **この形はもともと「複数行にまたがるフロー形式は解釈できないので特権に倒す」歯止めにも
+# 掛かる**ので、伏せる側の守り（`MASK_LEFT_OPEN`）だけを外してもここは緑のまま通る。
+# 守りそのものを駆動しているのは `ci_workflow_test.sh` の構造行のケースで、
+# こちらは「最終的な判定が privileged であること」を端から端まで固定する役目
+assert_privilege_classification privileged 'a secrets key after an unterminated quote is still seen' \
+'name: X
+permissions: read-all
+jobs:
+  j: {name: "a:
+    ", secrets: inherit, runs-on: ubuntu-latest}'
+
 # 継続行の先頭に置いた引用符から始まる形でも、後ろの本物の `secrets:` を見落とさないこと
 # （行頭の引用符を開始と誤読すると、間の区切りごと伏せて特権判定が read-only へ化ける）
 assert_privilege_classification privileged 'a real secrets key after a continuation line' \
@@ -1994,6 +2010,22 @@ jobs:
       - name: "compare pinning
           and, uses: policy"
         uses: actions/checkout@v9'
+
+# **既知の残件（行末コメントに書かれた `, uses: …`）。** requirements.md の (b)。
+# 読点に続く形はフロー形式の区切りの規則に当たるため、コメントの中でも参照として報告される。
+# `post-ci-verify.yml` は無条件に特権扱いなので、この形の説明コメントを書くと必須チェックが
+# 恒常的に赤くなる（main も同じ挙動）。コメントの境界を消費側へ渡す直し方は issue #97 の 1 件目。
+# **台帳に挙げている残件はすべてケースで固定する**（挙動が変わったとき気付けるように）
+assert_split_output 'KNOWN RESIDUAL: a comma-preceded uses: in a comment is reported' \
+"7"$'\t'"./local"$'\t'$'\n'"8"$'\t'"actions/cache@v4"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./local
+      # TODO: replace the bespoke script, uses: actions/cache@v4 would do'
 
 # **既知の残件（YAML のアンカー／タグを挟んだ引用値）。**
 # `- name: &n "…"` のようにアンカーを挟むと、引用符の直前が `n` になって開始位置の規則に

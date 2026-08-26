@@ -1864,6 +1864,20 @@ jobs:
       - foo#bar:
           "compare pinning, uses: policy"' 7
 
+# **引用を開いたまま終わった行は「値を持たない鍵」ではない。** 未終端の引用は素の姿へ倒して
+# 書き出すので `steps: [{name: "a:` が `:` で終わって見えるが、次の行の先頭にあるのは
+# **閉じる側**の引用符であって新しい値の始まりではない。ここを鍵と読むと、閉じ側を開始と誤読して
+# 後ろの本物の区切りごと伏せ、`uses:` を見逃す（実測: main は `actions/evil@v1` を検出し、
+# この守りを入れる前のこちらは 1 件も返さなかった。**fail-open**）
+assert_structural_line "引用を開いたまま終わった行の次行では伏せない" \
+    '      , uses: actions/evil@v1, note: x}]' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps: [{name: "a:
+      ", uses: actions/evil@v1, note: "x"}]' 6
+
 # 逆に、**素のスカラーの継続行**の先頭にある引用符は開始ではない（伏せると本物の区切りが消える）
 assert_structural_line "継続行の先頭の引用符では伏せない" \
     '      b, uses: actions/evil@v1, z: 1}, {uses: ./local}]' \
