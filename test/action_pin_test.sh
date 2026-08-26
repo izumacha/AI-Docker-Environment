@@ -157,7 +157,9 @@ scan_workflow_structure() {
             # 値の途中の `#`（`name: "a#b"`）はただの文字。空白を任意にすると、そこで行を切って
             # **後ろにある本物の `secrets:` / `permissions:` を丸ごと捨ててしまい、特権ワークフローを
             # read-only と誤判定する**（fail-open。実測: `{name: "a#b", secrets: inherit, …}` が
-            # read-only になった）。同じ規則は `test/lib/ci_workflow.sh` の `strip_comment` 側にもある
+            # read-only になった）。綴りは `test/lib/ci_workflow.sh` の共有定数
+            # `CI_WORKFLOW_COMMENT_START` が唯一の持ち主で、それを使う 4 か所のうちの 1 つがここ
+            # （`strip_comment()` は**シェルの引用規則**で `#` を判別する別物なので、この定数は使わない）
             sub(comment_re ".*$", "", line)
             # **引用符の正規化はここでは行わない。** `"permissions":` と `permissions:` を同じ形に
             # 揃えるのは `emit_structural_lines()` の役目で、そこが引用符を 1 つも出力しないことは

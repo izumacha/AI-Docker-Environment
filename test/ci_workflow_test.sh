@@ -1972,6 +1972,26 @@ jobs:
       \", b,
       ,", uses: "actions/evil@v1"}]' 7
 
+# 単一引用の側の脱出表記（`'"'"''"'"'` ＝ 2 つ続けたアポストロフィ）も終端ではないこと。
+# **綴りを共有した `is_escape_at` の単一引用側だけを消しても、上の二重引用の case では緑のまま
+# 通った**（実測）ので、両方の綴りをここで押さえる。観測点は「引用スカラーの続きの行は伏せない」
+# という契約で、規則が壊れると 6 行目で span が閉じたことになり、7 行目に伏せる処理が復活して
+# `p, uses: policy` が `p~ uses: policy` に変わる。
+#
+# **7 行目の期待値は幻の参照 `policy` を含む** — これは続きの行を伏せない設計の帰結（residual）で、
+# 「余分に赤くなる」側。PyYAML はこの入力を
+# `{'"'"'name'"'"': "a, '"'"', b, ", '"'"'x'"'"': '"'"'p, uses: policy'"'"', '"'"'uses'"'"': '"'"'actions/evil@v1'"'"'}` と読むので、
+# 本物の参照は `actions/evil@v1` だけ。その参照が同じ行に残っていることも同時に押さえている
+assert_structural_line "続きの行の単一引用の脱出表記も終端ではない" \
+    '      , x: p, uses: policy, uses: actions/evil@v1}]' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps: [{name: '"'"'a,
+      '"'"''"'"', b,
+      '"'"', x: '"'"'p, uses: policy'"'"', uses: actions/evil@v1}]' 7
+
 # 続きの行が閉じたら、**その次の行からは通常どおり伏せる**こと（止めっぱなしにすると、
 # 以降のふつうの手順名でこの PR が直した幻の参照が戻る）
 assert_structural_line "続きが閉じた次の行では通常どおり伏せる" \
@@ -2056,6 +2076,24 @@ jobs:
       - run: |  # 説明
           uses: actions/evil@v1
       - uses: ./local' 8
+
+# **引用スカラーの続きの行は、たとえ `run: |` の形をしていてもブロックスカラーを始めない。**
+# その行は文字列の中身であって構造ではない。ここで始めてしまうと以降の行を本文として読み飛ばし、
+# **その中にある本物の `uses:` が抽出から丸ごと消える**（違反 0 件で通る **fail-open**）。
+# 下の入力は PyYAML では手順が 2 つで、2 つ目が `uses: actions/evil@v1` を持つ
+# （`{'name': 'a run: | ', 'uses': 'actions/evil@v1'}`）。可変タグを載せた 9 行目が
+# 書き出されることを固定する
+assert_structural_line "続きの行が run: | の形でも本文として読み飛ばさない" \
+    '            , uses: actions/evil@v1}' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./local
+      - {name: "a
+          run: |
+            ", uses: actions/evil@v1}' 9
 
 # **引用符は 1 つも書き出さない。** 消費側（`scan_workflow_structure`）はこの前提のもとで
 # `"permissions":` と `permissions:` を同じ形として扱っている。ここが崩れると、崩れ方は
