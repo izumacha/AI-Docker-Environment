@@ -1535,6 +1535,22 @@ jobs:
         run: echo ok
       - uses: ./.github/actions/local'
 
+# issue #93 の 2 件目を、検査経路の端から端まで（`check_workflow_path()`）で固定する。
+# 上の分解単体の検査だけでは、**問題の無いワークフローが赤くならない**という結末そのものを
+# 表明できない。上の検査との違いは手順名の**読点**で、修正前はそれがフロー形式の区切りと読まれ、
+# 幻の参照 `policy` に対して「版を名乗っていない」という違反 1 件が出ていた（実測）。
+# 上流への問い合わせを避けるため、実在の action ではなくローカル action を置く（同スイートの方針）
+assert_pin_enforcement accepted 'a comma in a quoted step name does not invent a violation' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: "compare pinning, uses: policy"
+        run: echo hi
+      - uses: ./.github/actions/local'
+
 # 1 行 1 件のときは、行末の版注記をその参照のものとして渡す（従来どおりの正常系）
 assert_split_output 'a single ref keeps its own trailing version marker' \
 "7"$'\t'"actions/checkout@1111111111111111111111111111111111111111"$'\t'"v4" \
@@ -1655,10 +1671,11 @@ jobs:
 # `uses:` の鍵を**フロー形式の区切り（`,`）の直後**で見つけた場合も、次行記法の判定に使う桁を
 # **行頭からの絶対桁**で持つこと。`RSTART` は走査中の残り文字列の中の位置なので、素直に使うと
 # 桁を実際よりずっと小さく見積もる。すると直後の無関係な行（ここでは本物の `uses:` を載せた
-# 兄弟キーの行）まで「値」と見なして食べてしまい、**その行の参照が抽出から丸ごと落ちる**。
-# 引用符は抽出時に一律で落ちるため、`- name: "Check pins, uses:"` のような**散文の手順名**が
-# この形で届く（実測: 修正前は 8 行目の `@v7` が消え、7 行目に偽の参照だけが出ていた）。
-# 7 行目が空参照で赤くなるのは散文の取り違えによる「余分な赤」で、見逃しより安全側
+# 兄弟キーの行）まで「値」と見なして食べてしまい、**その行の参照が抽出から丸ごと落ちる**
+# （実測: 修正前は 8 行目の `@v7` が消え、7 行目に偽の参照だけが出ていた）。
+# 7 行目が空参照で赤くなるのは「値の無い `uses:`」に対する正しい fail-closed で、見逃しより安全側。
+# **引用符を使わない形で書く**のが要点: 引用の中の読点は下の issue #93 の対応で伏せられるため、
+# 散文の手順名で代用すると、この桁の回帰そのものを駆動しなくなる
 assert_split_output 'a comma-preceded empty uses: does not swallow the next line' \
 "7"$'\t'$'\t'$'\n'"8"$'\t'"actions/checkout@v7"$'\t' \
 'name: X
@@ -1667,7 +1684,67 @@ jobs:
   j:
     runs-on: ubuntu-latest
     steps:
-      - name: "Check pins, uses:"
+      - {name: a, uses:
+        uses: actions/checkout@v7'
+
+# issue #93 の 2 件目: **引用符で囲んだ手順名の中の読点は、フロー形式の区切りではない**。
+# `emit_structural_lines()` が引用符を無条件に落としていた頃は、この手順名が
+# `- name: Check pins, uses: policy` という素の文字列になり、「カンマの直後の `uses:`」という
+# 位置規則に当たって**存在しない参照 `policy` を報告**していた。`post-ci-verify.yml` は
+# 無条件に特権扱いで type-check は必須チェックなので、**この形の手順名を書くだけで、
+# 正しく SHA ピンされたリポジトリの CI が恒常的に赤くなる**（実測）。
+# 引用の中の区切り文字を伏せることで、幻の参照は出ず、同じ手順の本物の参照だけが残る
+assert_split_output 'a comma inside a quoted step name is not a flow delimiter' \
+"8"$'\t'"actions/checkout@v7"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: "compare pinning, uses: policy"
+        uses: actions/checkout@v7'
+
+# 引用の中を伏せても、**引用の中に書かれた本物の参照は読めたままである**こと。
+# 中身ごと伏せる実装にすると `uses: "actions/checkout@v7"` の可変タグが検査を素通りし、
+# このファイルが繰り返し塞いできた fail-open へ逆戻りする（伏せるのは区切り文字だけ）
+assert_split_output 'a quoted uses value is still read as a reference' \
+"7"$'\t'"actions/checkout@v7"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: "actions/checkout@v7"'
+
+# **素のスカラーの途中のアポストロフィを引用の開始と読まないこと。** YAML ではこれはただの文字で、
+# 開始と読むと次のアポストロフィまでが「引用の中」になり、そこに挟まれた**本物の区切り**ごと
+# 伏せてしまう。結果、可変タグが検査から丸ごと消える（fail-open。伏せる実装を入れた初回に実測で
+# 再現し、`actions/evil@v1` が main では検出されるのにこちらでは消えた）。
+# 引用の開始と認めるのは「値が始まりうる位置」＝行頭 / `:` / `,` / `{` / `[` / `-` の直後だけ
+assert_split_output 'an apostrophe inside a plain scalar does not open a quoted span' \
+"7"$'\t'"actions/evil@v1"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - {name: don'"'"'t, uses: actions/evil@v1, desc: it'"'"'s fine}'
+
+# 引用の対応が取れない行（散文のアポストロフィなど）では、伏せずに従来どおりの姿へ倒すこと。
+# ここで伏せてしまうと**本物の区切りを隠して `uses:` を見逃す**恐れがあるため、
+# 「対応が取れないなら手を加えない」を選ぶ（余分に赤くなる側＝fail-closed に倒す）
+assert_split_output 'an unbalanced quote falls back to the previous behaviour' \
+"7"$'\t'$'\t'$'\n'"8"$'\t'"actions/checkout@v7"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - {name: don'"'"'t, uses:
         uses: actions/checkout@v7'
 
 # 鍵と次行の値の**あいだに置かれたコメント行**は値ではないので、保留を閉じずに読み飛ばすこと。
