@@ -1866,14 +1866,18 @@ jobs:
         run: echo hi
       - uses: ./.github/actions/local'
 
-# issue #93 の 2 件目の、**ブロック形式で書いた場合**。値を次の行へ置く書き方も正しい YAML で、
-# `yaml.safe_load` は手順名を `compare pinning, uses: policy` という 1 つの文字列として読む。
-# 行頭の引用符を一律に「開始ではない」と扱うと、この形だけ幻の参照が残ってしまう
-# （実測: 前の行を見る前の実装では 8 行目に `policy` が出ていた）。
-# **前の構造行が値を持たない鍵（`- name:`）で終わっている**なら、YAML は次に新しい節点を
-# 要求するので「続きの行」ではありえない。その場合だけ行頭の引用符を開始と認める
-assert_split_output 'a quoted value on the line after a bare key is not a phantom' \
-"10"$'\t'"./.github/actions/local"$'\t' \
+# **既知の残件（ブロック形式で書いた引用値）。** requirements.md の (d)。
+# 値を次の行へ置く書き方も正しい YAML で、`yaml.safe_load` は手順名を
+# `compare pinning, uses: policy` という 1 つの文字列として読むが、行頭の引用符は
+# 「新しい値の開始」か「素のスカラーの継続行の途中」かが**行だけ見ても決まらない**ため
+# 開始と認めておらず、読点が生きて幻の参照が出る。
+# **前の行が値を持たない鍵かどうかで例外を作る実装は、いったん入れて撤回した**:
+# 引用が複数行にまたがる形（途中の行が `:` で終わる／別種の引用符を含む）で
+# 閉じ側の引用符を開始と誤読し、後ろの区切りごと伏せて `uses:` / `secrets:` を
+# 見逃す fail-open を 3 通り作り込んだため（詳細は requirements.md の同項）。
+# 行をまたいで引用を正しく追うには本物の YAML パーサが要る（issue #97 の (b)）
+assert_split_output 'KNOWN RESIDUAL: a quoted value on the line after a bare key is a phantom' \
+"8"$'\t'"policy"$'\t'$'\n'"10"$'\t'"./.github/actions/local"$'\t' \
 'name: X
 permissions: write-all
 jobs:
@@ -1885,12 +1889,9 @@ jobs:
         run: echo hi
       - uses: ./.github/actions/local'
 
-# 上と同じ形で、**鍵と値のあいだにコメント行が挟まる**場合。YAML のコメントはどこにでも置けるので、
-# ここで「値を持たない鍵で終わった」という記憶を消してしまうと、次の行の引用符が開始と認められず
-# 幻の参照が戻る（実測: コメント行を読み飛ばす前の実装では 9 行目に `policy` が出ていた）。
-# 空行が読み飛ばされるのと同じく、コメントだけの行でも記憶を書き換えない
-assert_split_output 'a comment between a bare key and its quoted value keeps the opener' \
-"11"$'\t'"./.github/actions/local"$'\t' \
+# 上と同じ残件の、**鍵と値のあいだにコメント行が挟まる**派生。挙動は同じ（幻の参照が出る）
+assert_split_output 'KNOWN RESIDUAL: a comment before the quoted value does not change it' \
+"9"$'\t'"policy"$'\t'$'\n'"11"$'\t'"./.github/actions/local"$'\t' \
 'name: X
 permissions: write-all
 jobs:

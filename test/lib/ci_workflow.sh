@@ -151,12 +151,12 @@ emit_structural_lines() {
         #
         # 引用符そのものは今までどおり落とす（`"permissions":` と `permissions:` を同じ形に
         # 揃える FR-8.1 の前提。脱出表記や入れ子で現れた引用符も同じく落とす）。
-        function mask_quoted_flow_punctuation(src, line_start_ok,   out, raw, masked, quote, prev, gap, closed, keyq, seqzone, dashind, i, ch, nxt, len) {
+        function mask_quoted_flow_punctuation(src,   out, raw, masked, quote, prev, gap, closed, keyq, seqzone, dashind, i, ch, nxt, len) {
             # **引用符を 1 つも含まない行は、そのまま返す。** その場合この関数がやることは
             # 「1 文字ずつ読んで同じ文字を書き戻す」だけで、結果は入力と必ず一致する。
             # ワークフローの行の大半（`runs-on: ubuntu-latest` など）がこれに当たり、
             # 素通しすると `emit_structural_lines` の実行時間が実測で約 1/3.6 になる
-            if (index(src, dq) == 0 && index(src, sq) == 0) { MASK_LEFT_OPEN = 0; return src }
+            if (index(src, dq) == 0 && index(src, sq) == 0) return src
             # 確定した出力・引用の中身の写し・開いている引用符の種類を初期化する
             out = ""; raw = ""; quote = ""
             # 引用の外で最後に見た空白以外の文字と、その後ろに空白があったか（開始位置の判定に使う）
@@ -205,10 +205,9 @@ emit_structural_lines() {
                         # つまりこの守りが無いと、行頭（まだ何も見ていない状態）が
                         # 「フローの区切りの直後」と判定され、上に書いた fail-open が
                         # **条件を消しても消えないまま**残る（実測でここに気付いた）
-                        if ((prev == "" && line_start_ok) || \
-                            (prev != "" && (index(tight_openers, prev) > 0 || \
+                        if (prev != "" && (index(tight_openers, prev) > 0 || \
                             (prev == ":" && (gap || keyq)) || \
-                            (prev == "-" && gap && dashind)))) {
+                            (prev == "-" && gap && dashind))) {
                             quote = ch; raw = ""; continue
                         }
                         # 位置が合わない引用符は、従来どおり落とすだけ（伏せない＝今日と同じ挙動）。
@@ -279,17 +278,12 @@ emit_structural_lines() {
             # 行末まで来ても引用が閉じていなければ、伏せずに元の姿で出力する。
             # 複数行にまたがる引用スカラーなど、この行だけでは対応が取れない場合に
             # 伏せてしまうと**本物の区切りを隠して `uses:` を見逃す**ため、従来の挙動へ倒す（fail-closed）
-            # 行末まで引用が閉じなかったことを呼び出し側へ知らせる（awk に多値返却が無いため、
-            # 既存の `mask_quoted` / `MASK_UNCLOSED` と同じ形でグローバルへ置く）。
-            # **次の行の判定に要る**: 引用を開いたまま終わった行の後ろに新しい節点は来ないので、
-            # その行を「値を持たない鍵で終わった」と読んではいけない（下の `bare_key` を参照）
-            MASK_LEFT_OPEN = (quote != "") ? 1 : 0
             if (quote != "") out = out raw
             # 組み立てた 1 行を返す
             return out
         }
         # ブロックスカラーの本文の中かどうかと、その開始行の字下げ幅を覚える
-        BEGIN { in_scalar = 0; scalar_indent = 0; bare_key = 0; open_quote = 0 }
+        BEGIN { in_scalar = 0; scalar_indent = 0 }
         {
             # 判定に使う 1 行分の文字列を作業用の変数へ取り出す
             line = $0
@@ -311,8 +305,7 @@ emit_structural_lines() {
             # ここで揃えておけば、消費側それぞれが引用の有無を数え上げずに済む。
             # 併せて、引用の中にあるフロー形式の区切り文字を代役の文字へ伏せる
             # （ただの値に書かれた読点や括弧を構造と読み違えないため。理由は関数側のコメント）
-            # 行頭の引用符を開始と認めてよいかは**前の構造行**で決まる（下の `bare_key` を参照）
-            emitted = mask_quoted_flow_punctuation(line, bare_key)
+            emitted = mask_quoted_flow_punctuation(line)
             # ここまで残った行は構造なので、行番号を付けて書き出す
             print NR ":" emitted
 
@@ -324,32 +317,6 @@ emit_structural_lines() {
             sub(comment_re ".*$", "", probe)
             probe = tolower(probe)
 
-            # **次の行の行頭にある引用符を開始と認めてよいか**を、この行の形から決めておく。
-            # 素のスカラーは次の行へ続けられるので、行頭の引用符は「新しい値の始まり」かも
-            # 「続きの文字」かもしれず、行だけ見ても区別できない（だから既定では開始と認めない）。
-            # ただし**この行が値を持たない鍵（`- name:` や `steps:`）で終わっていた**なら、
-            # YAML は次に必ず新しい節点を要求する＝続きの行ではありえないので、そのときだけ認める。
-            # これが無いと、`- name:` の次行に引用した手順名を置く**ブロック形式の書き方**で
-            # issue #93 の 2 件目（幻の参照）がそのまま残る（実測）。
-            # **コメントだけの行では記憶を書き換えない。** YAML のコメントは鍵と値のあいだにも置け、
-            # そこで「値を持たない鍵で終わった」ことを忘れると次の行の引用符が開始と認められず、
-            # 同じ幻の参照が戻る（実測。空行が `next` で読み飛ばされるのと同じ扱いに揃える）
-            # **引用を開いたまま終わった行は、値を持たない鍵ではない。** 未終端の引用は
-            # 素の姿へ倒して書き出すので、`steps: [{name: "a:` のような行が `:` で終わって見え、
-            # そのまま鍵と読むと**次の行の「閉じる側」の引用符を開始と誤読**する。すると
-            # その後ろの本物の区切りごと伏せて `uses:` / `secrets:` を見逃す（実測: main は
-            # `actions/evil@v1` を検出し、こちらは 1 件も返さなかった。**fail-open**）
-            # **引用を開いたまま終わった行から、それが閉じる行までは「値を持たない鍵」を認めない。**
-            # 1 行だけ抑止する形では足りない: 引用の中の途中の行（`      b:`）は引用符を含まないため
-            # そこで抑止が解け、`:` で終わって見えるので鍵と誤読される。すると**閉じ側の引用符**を
-            # 開始と読んで後ろの区切りごと伏せ、`uses:` / `secrets:` を見逃す（実測。**fail-open**）。
-            # 閉じたかどうかは行単位では厳密に分からないので、「引用符を含む行が来たら閉じた」と
-            # みなす（外し方を誤っても伏せない側＝余分に赤くなる側へ倒れる）
-            if (MASK_LEFT_OPEN) open_quote = 1
-            else if (open_quote && (index(line, "\"") > 0 || index(line, "'"'"'") > 0)) open_quote = 0
-            # 引用の中にいるあいだは鍵と認めない。それ以外の行だけ、この行の形から判定する
-            if (open_quote || MASK_LEFT_OPEN) bare_key = 0
-            else if (probe !~ /^[[:space:]]*$/) bare_key = (probe ~ /:[[:space:]]*$/) ? 1 : 0
             # `run: |` や `prompt: >-` のような行なら、次の行から本文として読み飛ばす
             if (probe ~ /^[[:space:]]*(-[[:space:]]+)?[a-z_][a-z0-9_.-]*[[:space:]]*:[[:space:]]*[|>]([0-9]*[+-]?|[+-]?[0-9]*)[[:space:]]*$/) {
                 in_scalar = 1

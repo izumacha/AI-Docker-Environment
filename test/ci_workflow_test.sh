@@ -1840,9 +1840,11 @@ jobs:
 # 消費側の位置規則越しでしか検査されていないと、トークナイザ側の契約が
 # `action_pin_test.sh` の正規表現に人質を取られたままになるので、ここでも固定する。
 
-# 値を持たない鍵の**次の行**に置いた引用値は、開始として認めて伏せる（ブロック形式の書き方）
-assert_structural_line "値を持たない鍵の次行の引用値は伏せられる" \
-    '          compare pinning~ uses: policy' \
+# **既知の残件**: 値を持たない鍵の次の行に置いた引用値は、行頭の引用符を開始と認めないため
+# 伏せられない（幻の参照が出る側＝余分に赤くなる）。前の行を見て例外を作る実装は
+# 複数行にまたがる引用で fail-open を 3 通り作ったため撤回した（requirements.md の (d)）
+assert_structural_line "KNOWN RESIDUAL: 値を持たない鍵の次行の引用値は伏せられない" \
+    '          compare pinning, uses: policy' \
     'name: ci
 jobs:
   j:
@@ -1851,18 +1853,6 @@ jobs:
       - name:
           "compare pinning, uses: policy"' 7
 
-# **鍵の行に値が付いていない判定は、行末コメントの規則に依存している。**
-# `#` の直前に空白を要求しないと `- foo#bar:` の `#` で行が切れて「値を持たない鍵」に見えなくなり、
-# 次の行の引用値が伏せられずに幻の参照が出る（この規則を緩める変異をここで捕まえる）
-assert_structural_line "値の途中の # は鍵の行の終わりを隠さない" \
-    '          compare pinning~ uses: policy' \
-    'name: ci
-jobs:
-  j:
-    runs-on: ubuntu-latest
-    steps:
-      - foo#bar:
-          "compare pinning, uses: policy"' 7
 
 # **引用を開いたまま終わった行は「値を持たない鍵」ではない。** 未終端の引用は素の姿へ倒して
 # 書き出すので `steps: [{name: "a:` が `:` で終わって見えるが、次の行の先頭にあるのは
