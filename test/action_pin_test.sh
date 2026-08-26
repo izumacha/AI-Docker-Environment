@@ -152,8 +152,13 @@ scan_workflow_structure() {
             indent = match(line, /[^[:space:]]/) - 1
 
             # 構造として解釈するので、行末コメントを落とす
-            # （`contents: write  # 説明` のような書き方でも値だけを見るため）
-            sub(/[[:space:]]*#.*$/, "", line)
+            # （`contents: write  # 説明` のような書き方でも値だけを見るため）。
+            # **`#` の直前に空白か行頭を要求する。** YAML で `#` がコメントを始めるのはその位置だけで、
+            # 値の途中の `#`（`name: "a#b"`）はただの文字。空白を任意にすると、そこで行を切って
+            # **後ろにある本物の `secrets:` / `permissions:` を丸ごと捨ててしまい、特権ワークフローを
+            # read-only と誤判定する**（fail-open。実測: `{name: "a#b", secrets: inherit, …}` が
+            # read-only になった）。同じ規則は `test/lib/ci_workflow.sh` の `strip_comment` 側にもある
+            sub(/(^|[[:space:]])#.*$/, "", line)
             # 引用符をすべて取り除き、`"permissions":` と `permissions:`、`"write"` と `write` を同じ形に揃える。
             # YAML は鍵も値も引用できるため、引用の有無を綴りとして数え上げると必ず取りこぼす
             # （`"permissions": write-all` が非特権と誤判定される穴を実測）。
@@ -1386,6 +1391,30 @@ permissions: read-all
 jobs:
   j: {name: "a, b", secrets: inherit, runs-on: ubuntu-latest}'
 
+# 値の途中の `#` は**コメントの開始ではない**（YAML でコメントを始めるのは行頭か空白の直後だけ）。
+# ここで行を切ると、後ろにある本物の `secrets:` を丸ごと捨てて read-only と誤判定し、
+# **そのワークフロー内の可変タグが検査から全部外れる**（fail-open。実測で再現）
+assert_privilege_classification privileged 'a hash inside a value does not hide a later secrets key' \
+'name: X
+permissions: read-all
+jobs:
+  j: {name: "a#b", secrets: inherit, runs-on: ubuntu-latest}'
+
+# 引用符の無い形でも同じこと（`#` の直前に空白が無ければコメントではない）
+assert_privilege_classification privileged 'a bare hash inside a value does not hide a later secrets key' \
+'name: X
+permissions: read-all
+jobs:
+  j: {name: b##, secrets: inherit, runs-on: ubuntu-latest}'
+
+# 逆に、**空白の後ろの `#` は本物のコメント**なので、その後ろは構造として読まないこと
+# （ここを厳しくしすぎると、コメントに書いた語で特権へ倒れて CI が恒常的に赤くなる）
+assert_privilege_classification plain 'a real trailing comment is still stripped' \
+'name: X
+permissions: read-all
+jobs:
+  j: {name: b, runs-on: ubuntu-latest}  # secrets: inherit'
+
 # 継続行の先頭に置いた引用符から始まる形でも、後ろの本物の `secrets:` を見落とさないこと
 # （行頭の引用符を開始と誤読すると、間の区切りごと伏せて特権判定が read-only へ化ける）
 assert_privilege_classification privileged 'a real secrets key after a continuation line' \
@@ -1877,6 +1906,19 @@ jobs:
     steps:
       - {name: Lint - '"'"'tis time, uses: actions/evil@v1, note: it'"'"'s ok}
       - uses: ./.github/actions/local'
+
+# JSON 形式のうち、**コロンの前にだけ空白がある**書き方。`{"name" :"…"}` は
+# 「引用された鍵の直後の `:`」なので開始と認める（後ろに空白が無いので `gap` は立たない）。
+# 引用が閉じたことの記憶を空白で消してしまうと、この形でだけ幻の参照が戻る
+assert_split_output 'a JSON-style key with a space only before the colon still opens' \
+"7"$'\t'"./.github/actions/local"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - {"name" :"compare pinning, uses: policy", "uses": ./.github/actions/local}'
 
 # **JSON 形式（`:` の直後に空白が無い）でも引用された値を認識すること。** `{"name":"…"}` は
 # 正しい YAML で、`yaml.safe_load` も `{'"'"'name'"'"': '"'"'…'"'"'}` と読む。空白を一律に要求すると
