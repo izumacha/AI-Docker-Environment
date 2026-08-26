@@ -1364,6 +1364,37 @@ jobs:
     steps:
       - uses: actions/checkout@v7'
 
+# 引用の中を伏せる処理（issue #93）は `emit_structural_lines()` を分類器と共有しているので、
+# **分類の側にも回帰ケースを置く**。ここが無いと、開始位置の規則を後から動かしたときに
+# 「`, secrets: inherit` を含む行が read-only に化ける」向きの取りこぼしを誰も検出しない
+# （requirements.md FR-8.1 が負例・正例を要求しているのはこのため）。
+
+# 引用された手順名の中の `, permissions: write` は**ただの文字列**なので特権ではない。
+# 伏せる処理が入る前は、この読点が区切りと読まれて特権へ倒れていた（過剰な特権判定）
+assert_privilege_classification plain 'a permissions phrase inside a quoted job name' \
+'name: X
+permissions: read-all
+jobs:
+  j: {name: "a, permissions: write", runs-on: ubuntu-latest}'
+
+# 逆に、**引用の外にある本物の `, secrets: inherit`** は今までどおり特権と判定すること。
+# 伏せる範囲を広げすぎると、ここが read-only へ化けてワークフロー内の可変タグが
+# 丸ごと検査対象外になる（fail-open。この向きだけは絶対に緩めない）
+assert_privilege_classification privileged 'a real secrets key after a quoted job name' \
+'name: X
+permissions: read-all
+jobs:
+  j: {name: "a, b", secrets: inherit, runs-on: ubuntu-latest}'
+
+# 継続行の先頭に置いた引用符から始まる形でも、後ろの本物の `secrets:` を見落とさないこと
+# （行頭の引用符を開始と誤読すると、間の区切りごと伏せて特権判定が read-only へ化ける）
+assert_privilege_classification privileged 'a real secrets key after a continuation line' \
+'name: X
+permissions: read-all
+jobs:
+  j: {name: a
+    '"'"'b, secrets: inherit'"'"', runs-on: ubuntu-latest}'
+
 # --- 分類とピン強制の接続（判定結果が実際に規則へ効いているか） ---
 
 # 特権ワークフロー中の可変タグは違反として検出されなければならない（FR-9.6(b) の中心）
@@ -1773,6 +1804,25 @@ jobs:
         run: echo hi
       - uses: ./.github/actions/local'
 
+# issue #93 の 2 件目の、**ブロック形式で書いた場合**。値を次の行へ置く書き方も正しい YAML で、
+# `yaml.safe_load` は手順名を `compare pinning, uses: policy` という 1 つの文字列として読む。
+# 行頭の引用符を一律に「開始ではない」と扱うと、この形だけ幻の参照が残ってしまう
+# （実測: 前の行を見る前の実装では 8 行目に `policy` が出ていた）。
+# **前の構造行が値を持たない鍵（`- name:`）で終わっている**なら、YAML は次に新しい節点を
+# 要求するので「続きの行」ではありえない。その場合だけ行頭の引用符を開始と認める
+assert_split_output 'a quoted value on the line after a bare key is not a phantom' \
+"10"$'\t'"./.github/actions/local"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name:
+          "compare pinning, uses: policy"
+        run: echo hi
+      - uses: ./.github/actions/local'
+
 # 上と同じ fail-open の、**行頭の引用符を悪用する形**。素のスカラーは複数行に続けられ、
 # その継続行は引用符から始まってよい（YAML が禁じるのはスカラーの先頭文字だけ）。
 # 1 行ずつしか見ないこの層では「新しいスカラーの開始」か「継続行の中の 1 文字」かを決められず、
@@ -1780,7 +1830,8 @@ jobs:
 # （実測: `yaml.safe_load` は 7 行目を `{'"'"'name'"'"': "a '"'"'b", '"'"'uses'"'"': "actions/evil@v1'"'"'"}` と読むのに、
 # 検出側は `./local` しか返さなかった）。
 # **`index()` に空の探し文字列を渡したときの答えが実装で割れる**点にも注意（mawk は 1 を返す）。
-# そのため行頭かどうかは `prev != ""` で明示的に守る
+# そのため行頭かどうかは `prev != ""` で明示的に守る。
+# （直前の行が値を持たない鍵で終わっていた場合だけは開始と確定できる。上のケースを参照）
 assert_split_output 'a quote at the start of a continuation line does not open a span' \
 "7"$'\t'"actions/evil@v1"$'\t'$'\n'"7"$'\t'"./local"$'\t' \
 'name: X

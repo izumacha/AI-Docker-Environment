@@ -1715,6 +1715,101 @@ jobs:
           bash ${SUITE_PATH}
           MARK"
 
+# --- 構造行の書き出し（`emit_structural_lines`）の契約 -----------------------------
+#
+# **この共有トークナイザの規則を、消費側の正規表現越しでなく直接固定する。**
+# issue #93 の対応で入れた「引用に囲まれたスカラーの中のフロー区切りを伏せる」処理は、
+# これまで `action_pin_test.sh` の位置規則を通してしか検査されていなかった。つまり伏せる処理を
+# 丸ごと消しても、このスイートも網羅性検査も緑のままだった（実測）。トークナイザの契約が
+# 消費側 1 つの実装詳細に人質を取られている状態なので、ここで直接押さえる。
+
+# 合成したワークフローを `emit_structural_lines` に通し、指定した行の内容を返す
+structural_line() {
+    # 引数を意味の分かる名前に取り出す（本文と、取り出したい行番号）
+    local body="$1" lineno="$2"
+    # 合成ワークフローを一時ファイルへ書き出す
+    printf '%s\n' "${body}" > "${TMP_DIR}/structural.yml"
+    # 構造行を書き出し、目的の行だけを取り出して行番号の接頭辞を落とす
+    emit_structural_lines "${TMP_DIR}/structural.yml" | awk -F: -v n="${lineno}" '
+        $1 == n { sub(/^[0-9]+:/, ""); print; exit }'
+}
+
+# 構造行が期待どおりかを数える。第 1 引数がケース名、第 2 引数が期待する内容、
+# 第 3 引数がワークフロー本文、第 4 引数が見たい行番号
+assert_structural_line() {
+    # 実際に書き出された行を取る
+    local actual
+    actual="$(structural_line "$3" "$4")"
+    # 期待と一致すれば合格、違えば両方を見せて落とす
+    if [ "${actual}" = "$2" ]; then
+        report 0 "$1"
+    else
+        report_fail "$1" "期待«$2» に対して «${actual}» が書き出された"
+    fi
+}
+
+# 引用の中の読点は構造ではないので、代役の文字へ伏せて書き出す（幻の参照を作らないため）
+assert_structural_line "引用された手順名の読点は伏せられる" \
+    '      - name: compare pinning~ uses: policy' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: "compare pinning, uses: policy"' 6
+
+# 伏せるのは区切り文字だけで、引用された値の綴りには触れない（参照を読めなくしないため）
+assert_structural_line "引用された uses: の値はそのまま残る" \
+    '      - uses: actions/checkout@v7' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: "actions/checkout@v7"' 6
+
+# 素のスカラー途中のアポストロフィは引用の開始ではないので、後ろの区切りは生きたまま残る
+assert_structural_line "素のスカラー途中のアポストロフィでは伏せない" \
+    '      - {name: dont, uses: actions/evil@v1, desc: its fine}' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - {name: don'"'"'t, uses: actions/evil@v1, desc: it'"'"'s fine}' 6
+
+# 行内で閉じない引用は伏せずに従来の姿へ倒す（本物の区切りを隠さないため）
+assert_structural_line "閉じない引用は伏せずにそのまま出す" \
+    '      - {name: oops, uses: actions/evil@v1' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - {name: "oops, uses: actions/evil@v1' 6
+
+# **引用符は 1 つも書き出さない。** 消費側（`scan_workflow_structure`）はこの前提のもとで
+# `"permissions":` と `permissions:` を同じ形として扱っている。ここが崩れると、崩れ方は
+# 「特権ワークフローを非特権と誤判定する」向き（fail-open）なので、契約として明示的に固定する
+quote_free_body='name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: "a, b"
+      - name: '"'"'c, d'"'"'
+      - name: "say \"hi\""
+      - name: '"'"'don'"'"''"'"'t'"'"'
+      - {"name":"e, f", "uses": ./local}
+      - name: "unclosed, g'
+printf '%s\n' "${quote_free_body}" > "${TMP_DIR}/quote-free.yml"
+if emit_structural_lines "${TMP_DIR}/quote-free.yml" | grep -q "['\"]"; then
+    report_fail "構造行に引用符を 1 つも残さない" \
+        "書き出された構造行に引用符が残っている（消費側の正規化の前提が崩れ、特権判定が fail-open になる）"
+else
+    report 0 "構造行に引用符を 1 つも残さない"
+fi
+
 # 存在しないファイルも同じ扱い（読めないまま先へ進ませない）
 if ci_workflow_load "${TMP_DIR}/does-not-exist.yml" "${TMP_DIR}/missing-out" 2> /dev/null; then
     report_fail "存在しないワークフローは読み込み失敗として返る" "読めないファイルなのに成功が返った"

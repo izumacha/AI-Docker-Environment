@@ -119,7 +119,7 @@ emit_structural_lines() {
         #
         # 引用符そのものは今までどおり落とす（`"permissions":` と `permissions:` を同じ形に
         # 揃える FR-8.1 の前提。脱出表記や入れ子で現れた引用符も同じく落とす）。
-        function mask_quoted_flow_punctuation(src,   out, raw, masked, quote, prev, gap, closed, keyq, seqzone, dashind, i, ch, nxt, len) {
+        function mask_quoted_flow_punctuation(src, line_start_ok,   out, raw, masked, quote, prev, gap, closed, keyq, seqzone, dashind, i, ch, nxt, len) {
             # 確定した出力・引用の中身の写し・開いている引用符の種類を初期化する
             out = ""; raw = ""; quote = ""
             # 引用の外で最後に見た空白以外の文字と、その後ろに空白があったか（開始位置の判定に使う）
@@ -162,9 +162,10 @@ emit_structural_lines() {
                         # つまりこの守りが無いと、行頭（まだ何も見ていない状態）が
                         # 「フローの区切りの直後」と判定され、上に書いた fail-open が
                         # **条件を消しても消えないまま**残る（実測でここに気付いた）
-                        if (prev != "" && (index(tight_openers, prev) > 0 || \
+                        if ((prev == "" && line_start_ok) || \
+                            (prev != "" && (index(tight_openers, prev) > 0 || \
                             (prev == ":" && (gap || keyq)) || \
-                            (prev == "-" && gap && dashind))) {
+                            (prev == "-" && gap && dashind)))) {
                             quote = ch; raw = ""; continue
                         }
                         # 位置が合わない引用符は、従来どおり落とすだけ（伏せない＝今日と同じ挙動）
@@ -231,7 +232,7 @@ emit_structural_lines() {
             return out
         }
         # ブロックスカラーの本文の中かどうかと、その開始行の字下げ幅を覚える
-        BEGIN { in_scalar = 0; scalar_indent = 0 }
+        BEGIN { in_scalar = 0; scalar_indent = 0; bare_key = 0 }
         {
             # 判定に使う 1 行分の文字列を作業用の変数へ取り出す
             line = $0
@@ -253,7 +254,8 @@ emit_structural_lines() {
             # ここで揃えておけば、消費側それぞれが引用の有無を数え上げずに済む。
             # 併せて、引用の中にあるフロー形式の区切り文字を代役の文字へ伏せる
             # （ただの値に書かれた読点や括弧を構造と読み違えないため。理由は関数側のコメント）
-            emitted = mask_quoted_flow_punctuation(line)
+            # 行頭の引用符を開始と認めてよいかは**前の構造行**で決まる（下の `bare_key` を参照）
+            emitted = mask_quoted_flow_punctuation(line, bare_key)
             # ここまで残った行は構造なので、行番号を付けて書き出す
             print NR ":" emitted
 
@@ -261,6 +263,15 @@ emit_structural_lines() {
             probe = emitted
             sub(/[[:space:]]*#.*$/, "", probe)
             probe = tolower(probe)
+
+            # **次の行の行頭にある引用符を開始と認めてよいか**を、この行の形から決めておく。
+            # 素のスカラーは次の行へ続けられるので、行頭の引用符は「新しい値の始まり」かも
+            # 「続きの文字」かもしれず、行だけ見ても区別できない（だから既定では開始と認めない）。
+            # ただし**この行が値を持たない鍵（`- name:` や `steps:`）で終わっていた**なら、
+            # YAML は次に必ず新しい節点を要求する＝続きの行ではありえないので、そのときだけ認める。
+            # これが無いと、`- name:` の次行に引用した手順名を置く**ブロック形式の書き方**で
+            # issue #93 の 2 件目（幻の参照）がそのまま残る（実測）
+            bare_key = (probe ~ /:[[:space:]]*$/) ? 1 : 0
             # `run: |` や `prompt: >-` のような行なら、次の行から本文として読み飛ばす
             if (probe ~ /^[[:space:]]*(-[[:space:]]+)?[a-z_][a-z0-9_.-]*[[:space:]]*:[[:space:]]*[|>]([0-9]*[+-]?|[+-]?[0-9]*)[[:space:]]*$/) {
                 in_scalar = 1
