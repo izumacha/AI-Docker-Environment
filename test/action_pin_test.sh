@@ -135,8 +135,8 @@ scan_workflow_structure() {
     local path="$1"
 
     # YAML を 1 行ずつたどり、`permissions:` の値（同一行のスカラー／フロー形式／続く字下げブロック）を解釈する。
-    # 引用符の文字集合は awk の変数として渡す（awk のプログラムはシェルの単一引用符で囲まれており、
-    # その中に `'` を直接書けないため）
+    # コメントの開始位置を表す断片は共有定数から awk へ渡す（綴りの持ち主は
+    # `test/lib/ci_workflow.sh` の `CI_WORKFLOW_COMMENT_START` 1 か所だけ）
     emit_structural_lines "$path" | awk -v comment_re="${CI_WORKFLOW_COMMENT_START}" '
         # ブロック形式の `permissions:` を読んでいる最中かどうか、結論を出したかどうか、
         # そして構造行を 1 行でも受け取ったかどうかを表す旗

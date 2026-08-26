@@ -1894,6 +1894,19 @@ jobs:
       - name:
           "a" - '"'"'b, uses: actions/evil@v1'"'"'' 7
 
+# **閉じた**引用スカラーでも、行頭の印の並びはそこで終わっていること。
+# 上のケースは行頭が引用符なので「落とした」経路を通る。こちらは `- ` の後ろで**開いて閉じる**ため
+# 閉じ側の経路を通り、そこで降ろさないと後ろの `- ` を並びの印と読んで次の引用符を開始と認め、
+# 読点を伏せて `actions/evil@v1` を取り逃がす（実測。2 つの経路は別々に押さえる必要がある）
+assert_structural_line "閉じた引用の後ろのハイフンも並びの印ではない" \
+    '      - a - b, uses: actions/evil@v1' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - "a" - '"'"'b, uses: actions/evil@v1'"'"'' 6
+
 # 開始と認めずに**落とした**引用符でも、行頭の印の並びはそこで終わっていること。
 # 降ろさないと、後ろの `- ` を並びの印と読んで次の引用符を開始と認め、区切りを伏せてしまう
 # （実測: 降ろさない実装では読点が伏せられ、`actions/evil@v1` が抽出から消えた）
@@ -1945,6 +1958,38 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - {name: Lint - '"'"'tis time, uses: actions/evil@v1, note: it'"'"'s ok}' 6
+
+# --- ブロックスカラーの見つけ方（本文を構造と読み違えないこと） ---
+#
+# `run: |` の**本文**は YAML の構造ではなくただの文字列なので、そこに書かれた `uses:` を
+# 宣言と読むと、実在しない参照で必須チェックが恒常的に赤くなる（このライブラリを切り出した理由）。
+# 開始行の判定は**行末コメントを落としてから**行うので、その落とし方が壊れると
+# `run: |  # 説明` が開始行として認識されず、本文が丸ごと構造として漏れ出す。
+
+# ブロックスカラーの本文（`uses:` を含む）は構造行として書き出さないこと
+assert_structural_line "行末コメント付きの run: | の本文は漏れない" \
+    '' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |  # 説明
+          uses: actions/evil@v1
+      - uses: ./local' 7
+
+# 同じ入力で**本文の後ろの行はきちんと出る**こと（上の空文字が「何も出ていない」ことの
+# 裏返しにならないよう、走査が生きていることを同時に押さえる）
+assert_structural_line "本文を読み飛ばしても後続の構造行は出る" \
+    '      - uses: ./local' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |  # 説明
+          uses: actions/evil@v1
+      - uses: ./local' 8
 
 # **引用符は 1 つも書き出さない。** 消費側（`scan_workflow_structure`）はこの前提のもとで
 # `"permissions":` と `permissions:` を同じ形として扱っている。ここが崩れると、崩れ方は
