@@ -54,6 +54,15 @@
 # 片方だけが `sudo shellcheck …` のような等価な書き換えを認めなくなる（レビューで実測）
 CI_WORKFLOW_COMMAND_START='^[(]?[[:space:]]*((sudo|env|nice|timeout|command|exec)[[:space:]]+|[0-9]+[smhd]?[[:space:]]+|[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*'
 
+# **YAML のコメントが始まる位置**を表す正規表現の断片（行頭、または空白の直後の `#`）。
+# 値の途中の `#`（`name: a#b`）はコメントではないので、ここで空白を任意にしてはいけない
+# ——特権判定でそれをやると、値の中の `#` で行を切って後ろの本物の `secrets:` を捨て、
+# **特権ワークフローを read-only と誤判定する**（実測。fail-open）。
+# **綴りをこの 1 か所に集約する**のが要点で、以前は同じ規則が 4 か所に書き写されており、
+# そのうち 1 つだけを緩めても全スイートが緑のまま通った（レビューで実測）。
+# 引用の中の `#` は `emit_structural_lines` が伏せてあるので、この断片に当たるのは本物のコメントだけ
+CI_WORKFLOW_COMMENT_START='(^|[[:space:]])#'
+
 # 抽出した「実行されるコマンド」を保持するファイル。1 行が
 # `<ジョブ名>#<ステップ番号><TAB><ゲートに効くか(1/0)><TAB><コマンドの断片>`
 CI_WORKFLOW_COMMANDS=""
@@ -86,6 +95,7 @@ emit_structural_lines() {
     # `flow_re` は**構造としてしか意味を持たない文字**の集合（フロー形式の区切りと、コメントを始める `#`）、
     # `flow_mask` はそれを伏せる代役の文字
     awk -v dq='"' -v sq="'" -v flow_re='[][{},#]' -v flow_mask='~' \
+        -v comment_re="${CI_WORKFLOW_COMMENT_START}" \
         -v tight_openers='{[,' '
         # 引用符に囲まれたスカラー（値）の中にあるフロー形式の区切り文字を、代役の文字へ置き換える。
         #
@@ -163,9 +173,15 @@ emit_structural_lines() {
                     if (ch == dq || ch == sq) {
                         # 値が始まりうる位置に置かれているときだけ、スカラーの開始として扱う。
                         # フローの区切り（`{` `[` `,`）の直後なら空白の有無を問わない。
-                        # 並びの `-` と、素の鍵に続く `:` は**空白を挟んでいることを要求する**:
-                        # 空白が無い `pre-'"'"'release` の `-` は区切りではなくただの文字で、
-                        # ここを緩めると語中のハイフンから始まる fail-open がそのまま戻る。
+                        # 素の鍵に続く `:` は**空白を挟んでいることを要求する**（`{name:"a` は
+                        # `name:"a` までで 1 つの鍵になり、引用スカラーは始まっていない）。
+                        # 並びの `-` は**位置**で見る（下の `dashind`）: 語中の `pre-'"'"'release` を
+                        # 弾いているのはこの位置判定であって、空白の有無ではない。
+                        # `-` 側の `gap` は「`- ` が並びの印になるには空白が要る」という YAML の
+                        # 規則をそのまま書いたもので、**これを外しても現行のテストは全部緑になる**
+                        # （外して困る入力＝`-'"'"'a, uses: x'"'"'` の類は、YAML では行全体が 1 つの
+                        # 素のスカラーになり本物の `uses:` を含みえないため）。規則どおりに書いた
+                        # 保守側の守りとして残している、という位置づけ。
                         # ただし**引用された鍵に続く `:` は空白を要らない**（JSON 形式の
                         # `{"name":"a, uses: policy"}` は正しい YAML で、PyYAML も
                         # `{'"'"'name'"'"': '"'"'a, uses: policy'"'"'}` と読む）。素の鍵の `{name:"a` とは
@@ -289,7 +305,7 @@ emit_structural_lines() {
             # 始まるのはその位置だけ）。引用の中の `#` は上で伏せてあるので、ここに残る `#` は
             # 本物のコメントだけになる
             probe = emitted
-            sub(/(^|[[:space:]])#.*$/, "", probe)
+            sub(comment_re ".*$", "", probe)
             probe = tolower(probe)
 
             # **次の行の行頭にある引用符を開始と認めてよいか**を、この行の形から決めておく。
@@ -335,7 +351,7 @@ ci_workflow_run_with_structure() {
     # 構造行を書き出す。失敗したら以降の解析が成立しない
     emit_structural_lines "${workflow}" > "${structural_file}" || return 1
     # 構造行の表を BEGIN で読み込んでから、呼び出し側のプログラムを続ける
-    awk -v structural_file="${structural_file}" '
+    awk -v structural_file="${structural_file}" -v comment_re="${CI_WORKFLOW_COMMENT_START}" '
         BEGIN {
             while ((getline entry < structural_file) > 0) {
                 colon = index(entry, ":")
@@ -405,7 +421,7 @@ ci_workflow_extract() {
                 # （`if: false  # 理由` を取りこぼさないため）、ここだけ生の行を見ると
                 # `defaults:  # 全ジョブ共通` がフロー形式に、`shell: bash  # 明示` が未知のシェルに見え、
                 # **全ジョブの全ステップが合否の証拠から外れて**すべて「配線されていない」と誤報される
-                sub(/(^|[[:space:]])#.*$/, "", preline)
+                sub(comment_re ".*$", "", preline)
                 # **鍵の引用符も本文の走査と同じ規則で落とす。** ここだけ素の綴りを見ていると
                 # `"defaults":` / `"shell":` の 2 文字で既定シェルの検出をすり抜けられ、
                 # `-e` を落とすワークフロー既定が「無い」ものとして扱われる（レビューで実測）

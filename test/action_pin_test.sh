@@ -137,7 +137,7 @@ scan_workflow_structure() {
     # YAML を 1 行ずつたどり、`permissions:` の値（同一行のスカラー／フロー形式／続く字下げブロック）を解釈する。
     # 引用符の文字集合は awk の変数として渡す（awk のプログラムはシェルの単一引用符で囲まれており、
     # その中に `'` を直接書けないため）
-    emit_structural_lines "$path" | awk -v quote_chars='["'"'"']' '
+    emit_structural_lines "$path" | awk -v quote_chars='["'"'"']' -v comment_re="${CI_WORKFLOW_COMMENT_START}" '
         # ブロック形式の `permissions:` を読んでいる最中かどうか、結論を出したかどうか、
         # そして構造行を 1 行でも受け取ったかどうかを表す旗
         BEGIN { in_block = 0; block_indent = 0; decided = 0; seen = 0 }
@@ -158,7 +158,7 @@ scan_workflow_structure() {
             # **後ろにある本物の `secrets:` / `permissions:` を丸ごと捨ててしまい、特権ワークフローを
             # read-only と誤判定する**（fail-open。実測: `{name: "a#b", secrets: inherit, …}` が
             # read-only になった）。同じ規則は `test/lib/ci_workflow.sh` の `strip_comment` 側にもある
-            sub(/(^|[[:space:]])#.*$/, "", line)
+            sub(comment_re ".*$", "", line)
             # 引用符をすべて取り除き、`"permissions":` と `permissions:`、`"write"` と `write` を同じ形に揃える。
             # YAML は鍵も値も引用できるため、引用の有無を綴りとして数え上げると必ず取りこぼす
             # （`"permissions": write-all` が非特権と誤判定される穴を実測）。
@@ -504,7 +504,7 @@ split_uses_occurrences() {
     local path="$1"
 
     # 構造行（ブロックスカラーの本文を除いた行）を出現ごとにばらす
-    emit_structural_lines "$path" | awk '
+    emit_structural_lines "$path" | awk -v comment_re="${CI_WORKFLOW_COMMENT_START}" '
         # コメント本文の先頭語が「版の注記らしい形」かどうかを調べる関数。
         # 引用符が落ちた値の中の `#`（`release #1}` 等）を注記と取り違えないための歯止めで、
         # タグに現れない構造文字（`}` `)` `,` など）を含む語は注記として認めない
@@ -524,7 +524,7 @@ split_uses_occurrences() {
         # 単一行の参照（値の後ろ）と、値を次行に置いた参照（続きの行）の**両方**がこれを使う（§6 DRY）
         function marker_from(tail,   body, word) {
             # `#` を順に探し、直後の最初の語が版らしければそれを注記として返す
-            while (match(tail, /(^|[[:space:]])#/)) {
+            while (match(tail, comment_re)) {
                 # `#` の直後から後ろをコメント本文の候補として取り出す
                 body = substr(tail, RSTART + RLENGTH)
                 # 候補の先頭にある空白を落として、最初の語の頭に合わせる
@@ -1994,6 +1994,22 @@ jobs:
       - name: "compare pinning
           and, uses: policy"
         uses: actions/checkout@v9'
+
+# **既知の残件（YAML のアンカー／タグを挟んだ引用値）。**
+# `- name: &n "…"` のようにアンカーを挟むと、引用符の直前が `n` になって開始位置の規則に
+# どれも当たらず、伏せられないまま読点が生きて幻の参照が出る（main も同じ挙動）。
+# **GitHub Actions はワークフローでアンカーを解釈しない**ため実害は極めて小さいが、
+# 残件の台帳を実態と合わせるために固定しておく（挙動が変わったとき気付けるように）
+assert_split_output 'KNOWN RESIDUAL: an anchored quoted value still yields a phantom' \
+"7"$'\t'"policy"$'\t'$'\n'"8"$'\t'"./local"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: &n "compare pinning, uses: policy"
+      - uses: ./local'
 
 # **既知の残件（伏せる処理が参照の綴りを変える唯一の形）。**
 # 引用された値そのものが区切り文字を含むと、その値も伏せられる。動的参照を引用符で囲んだ

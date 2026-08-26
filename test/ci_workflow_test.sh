@@ -1833,6 +1833,77 @@ jobs:
     steps:
       - {name: "oops, uses: actions/evil@v1' 6
 
+# --- 引用スカラーの「開始位置」の規則（ここまでの契約と同じく直接押さえる） ---
+#
+# 開始位置の規則はどれも、緩めると**本物の区切りを伏せて `uses:` を見逃す** fail-open か、
+# 厳しくすると**幻の参照で必須チェックが恒常的に赤くなる**かのどちらかに倒れる。
+# 消費側の位置規則越しでしか検査されていないと、トークナイザ側の契約が
+# `action_pin_test.sh` の正規表現に人質を取られたままになるので、ここでも固定する。
+
+# 値を持たない鍵の**次の行**に置いた引用値は、開始として認めて伏せる（ブロック形式の書き方）
+assert_structural_line "値を持たない鍵の次行の引用値は伏せられる" \
+    '          compare pinning~ uses: policy' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name:
+          "compare pinning, uses: policy"' 7
+
+# **鍵の行に値が付いていない判定は、行末コメントの規則に依存している。**
+# `#` の直前に空白を要求しないと `- foo#bar:` の `#` で行が切れて「値を持たない鍵」に見えなくなり、
+# 次の行の引用値が伏せられずに幻の参照が出る（この規則を緩める変異をここで捕まえる）
+assert_structural_line "値の途中の # は鍵の行の終わりを隠さない" \
+    '          compare pinning~ uses: policy' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - foo#bar:
+          "compare pinning, uses: policy"' 7
+
+# 逆に、**素のスカラーの継続行**の先頭にある引用符は開始ではない（伏せると本物の区切りが消える）
+assert_structural_line "継続行の先頭の引用符では伏せない" \
+    '      b, uses: actions/evil@v1, z: 1}, {uses: ./local}]' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps: [{name: a
+      '"'"'b, uses: actions/evil@v1'"'"', z: 1}, {uses: ./local}]' 6
+
+# 引用された鍵に続く `:` は空白が無くても開始（JSON 形式）
+assert_structural_line "JSON 形式の引用された鍵の後は伏せられる" \
+    '      - {name:a~ uses: policy, uses: ./local}' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - {"name":"a, uses: policy", uses: ./local}' 6
+
+# 素の鍵に続く `:` は空白を要求する（`{name:"a` は鍵ごと 1 つのスカラーなので開始ではない）
+assert_structural_line "素の鍵の後ろの空白なしの引用符では伏せない" \
+    '      - {name:a, uses: actions/evil@v1, note: b}' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - {name:"a, uses: actions/evil@v1, note: b"}' 6
+
+# 空白で囲まれていてもスカラー途中の `-` は並びの印ではない（伏せると可変タグが消える）
+assert_structural_line "スカラー途中の空白付きハイフンでは伏せない" \
+    '      - {name: Lint - tis time, uses: actions/evil@v1, note: its ok}' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - {name: Lint - '"'"'tis time, uses: actions/evil@v1, note: it'"'"'s ok}' 6
+
 # **引用符は 1 つも書き出さない。** 消費側（`scan_workflow_structure`）はこの前提のもとで
 # `"permissions":` と `permissions:` を同じ形として扱っている。ここが崩れると、崩れ方は
 # 「特権ワークフローを非特権と誤判定する」向き（fail-open）なので、契約として明示的に固定する
