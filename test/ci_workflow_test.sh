@@ -1878,6 +1878,44 @@ jobs:
     steps: [{name: "a:
       ", uses: actions/evil@v1, note: "x"}]' 6
 
+# 同じ形の **3 行以上**版。引用の中の途中の行は引用符を含まないので、1 行だけ抑止する実装だと
+# そこで抑止が解け、`b:` が「値を持たない鍵」に見えて閉じ側の引用符を開始と誤読する。
+# 抑止は**引用が閉じるまで**保つ必要がある（実測: 保たない実装では `actions/evil@v1` が消えた）
+assert_structural_line "引用の中の途中の行でも鍵と認めない" \
+    '      , uses: actions/evil@v1}]' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps: [{name: "a:
+      b:
+      ", uses: "actions/evil@v1"}]' 7
+
+# 引用スカラーが 1 つ出た時点で、行頭の「字下げと `-` だけ」の並びは終わっていること。
+# ここを降ろさないと、後ろの `-` を並びの印と読んで次の引用符を開始と認め、
+# 本物の区切りごと伏せてしまう（実測: 降ろさない実装では `actions/evil@v1` が消えた）
+assert_structural_line "引用の後ろのハイフンは並びの印ではない" \
+    '          a - b, uses: actions/evil@v1' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name:
+          "a" - '"'"'b, uses: actions/evil@v1'"'"'' 7
+
+# 開始と認めずに**落とした**引用符でも、行頭の印の並びはそこで終わっていること。
+# 降ろさないと、後ろの `- ` を並びの印と読んで次の引用符を開始と認め、区切りを伏せてしまう
+# （実測: 降ろさない実装では読点が伏せられ、`actions/evil@v1` が抽出から消えた）
+assert_structural_line "落とした引用符の後ろのハイフンも並びの印ではない" \
+    '      - - b, uses: actions/evil@v1' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      -" - '"'"'b, uses: actions/evil@v1'"'"'' 6
+
 # 逆に、**素のスカラーの継続行**の先頭にある引用符は開始ではない（伏せると本物の区切りが消える）
 assert_structural_line "継続行の先頭の引用符では伏せない" \
     '      b, uses: actions/evil@v1, z: 1}, {uses: ./local}]' \
