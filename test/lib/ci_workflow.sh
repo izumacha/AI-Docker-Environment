@@ -85,7 +85,7 @@ emit_structural_lines() {
     # 囲まれており、その中に `'` を直接書けないため）。
     # `flow_re` はフロー形式の区切りとして意味を持つ文字の集合、`flow_mask` はそれを伏せる代役の文字
     awk -v dq='"' -v sq="'" -v flow_re='[][{},]' -v flow_mask='~' \
-        -v tight_openers='{[,' -v spaced_openers=':-' '
+        -v tight_openers='{[,' '
         # 引用符に囲まれたスカラー（値）の中にあるフロー形式の区切り文字を、代役の文字へ置き換える。
         #
         # なぜ要るか（issue #93 の 2 件目）: この関数はもともと引用符を無条件に落としていたため、
@@ -126,6 +126,9 @@ emit_structural_lines() {
             prev = ""; gap = 0
             # 直前の非空白が引用スカラーの終わりだったか／いまの `:` がその直後の `:` だったか
             closed = 0; keyq = 0
+            # 行頭からまだ字下げと `-` しか見ていないか（`-` が本物の並びの印かを見分けるのに使う）
+            # と、直前の `-` がその位置にあったか
+            seqzone = 1; dashind = 0
             # 1 文字ずつ見るので、行の長さを先に求めておく
             len = length(src)
             # 行の左端から 1 文字ずつ走査する
@@ -146,7 +149,8 @@ emit_structural_lines() {
                         # `{'"'"'name'"'"': '"'"'a, uses: policy'"'"'}` と読む）。素の鍵の `{name:"a` とは
                         # 区別が付く: あちらは `name:"a` までが 1 つの鍵になるので開始と認めない
                         if (prev == "" || index(tight_openers, prev) > 0 || \
-                            (index(spaced_openers, prev) > 0 && gap) || (prev == ":" && keyq)) {
+                            (prev == ":" && (gap || keyq)) || \
+                            (prev == "-" && gap && dashind)) {
                             quote = ch; raw = ""; continue
                         }
                         # 位置が合わない引用符は、従来どおり落とすだけ（伏せない＝今日と同じ挙動）
@@ -159,6 +163,13 @@ emit_structural_lines() {
                     if (ch ~ /[[:space:]]/) { gap = 1; continue }
                     # `:` を見たら「引用された鍵の直後の `:` か」を控える（上の開始判定で使う）
                     if (ch == ":") keyq = closed
+                    # `-` を見たら「行頭から字下げと `-` しか見ていない位置か」を控える。
+                    # YAML で `- ` が並びの印になるのはこの位置だけで、スカラーの途中の
+                    # `Lint - '"'"'tis time` の `-` はただの文字。ここを見ないと、その `-` の後ろの
+                    # 引用符が開始と認められ、**本物の区切りごと伏せて `uses:` を見逃す**（実測）
+                    if (ch == "-") dashind = seqzone
+                    # 字下げと `-` 以外の文字が出た時点で、行頭の印の並びは終わり
+                    if (ch != "-") seqzone = 0
                     # 直前の文字として覚え、空白と引用終わりの記憶はここで消す
                     prev = ch; gap = 0; closed = 0
                     continue

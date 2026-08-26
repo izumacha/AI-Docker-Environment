@@ -1763,6 +1763,23 @@ jobs:
         run: echo hi
       - uses: ./.github/actions/local'
 
+# 上と同じ fail-open の、**空白で囲んだ `-` を悪用する形**。`- ` が並びの印になるのは
+# **行頭（字下げの直後）だけ**で、スカラーの途中の `Lint - '"'"'tis time` の `-` はただの文字。
+# 位置を見ずに「空白を挟んだ `-` の後ろ」を開始と認めると、そこから `it'"'"'s` までが引用の中になり、
+# 間の**本物の区切り**ごと伏せて可変タグを見逃す
+# （実測: `yaml.safe_load` は `uses: actions/evil@v1` を実在の手順として読むのに、
+# 検出側は 8 行目のローカル action しか返さず、違反 0 件で通っていた）
+assert_split_output 'a hyphen surrounded by spaces mid-scalar is not a sequence indicator' \
+"7"$'\t'"actions/evil@v1"$'\t'$'\n'"8"$'\t'"./.github/actions/local"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - {name: Lint - '"'"'tis time, uses: actions/evil@v1, note: it'"'"'s ok}
+      - uses: ./.github/actions/local'
+
 # **JSON 形式（`:` の直後に空白が無い）でも引用された値を認識すること。** `{"name":"…"}` は
 # 正しい YAML で、`yaml.safe_load` も `{'"'"'name'"'"': '"'"'…'"'"'}` と読む。空白を一律に要求すると
 # この形が引用と認められず、**issue #93 の 2 件目（幻の参照）がそのまま再現する**
