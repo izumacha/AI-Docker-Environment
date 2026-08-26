@@ -1823,6 +1823,24 @@ jobs:
         run: echo hi
       - uses: ./.github/actions/local'
 
+# 上と同じ形で、**鍵と値のあいだにコメント行が挟まる**場合。YAML のコメントはどこにでも置けるので、
+# ここで「値を持たない鍵で終わった」という記憶を消してしまうと、次の行の引用符が開始と認められず
+# 幻の参照が戻る（実測: コメント行を読み飛ばす前の実装では 9 行目に `policy` が出ていた）。
+# 空行が読み飛ばされるのと同じく、コメントだけの行でも記憶を書き換えない
+assert_split_output 'a comment between a bare key and its quoted value keeps the opener' \
+"11"$'\t'"./.github/actions/local"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name:
+          # pinned below
+          "compare pinning, uses: policy"
+        run: echo hi
+      - uses: ./.github/actions/local'
+
 # 上と同じ fail-open の、**行頭の引用符を悪用する形**。素のスカラーは複数行に続けられ、
 # その継続行は引用符から始まってよい（YAML が禁じるのはスカラーの先頭文字だけ）。
 # 1 行ずつしか見ないこの層では「新しいスカラーの開始」か「継続行の中の 1 文字」かを決められず、

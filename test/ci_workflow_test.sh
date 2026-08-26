@@ -1803,7 +1803,15 @@ jobs:
       - {"name":"e, f", "uses": ./local}
       - name: "unclosed, g'
 printf '%s\n' "${quote_free_body}" > "${TMP_DIR}/quote-free.yml"
-if emit_structural_lines "${TMP_DIR}/quote-free.yml" | grep -q "['\"]"; then
+# **まず出力を受け取ってから判定する。** `| grep -q` に直接つなぐと、解析器が壊れて 1 行も
+# 出さなくなった場合も「引用符が見つからない＝合格」になり、**このスイートが守るはずの
+# fail-open をそのまま見逃す**（＝「不在＝合格」。このリポジトリが繰り返し塞いできた形）
+quote_free_out="$(emit_structural_lines "${TMP_DIR}/quote-free.yml")"
+# 何も出てこないのは解析器の異常なので、引用符の有無を見るより先に落とす
+if [ -z "${quote_free_out}" ]; then
+    report_fail "構造行に引用符を 1 つも残さない" \
+        "構造行が 1 行も書き出されなかった（解析器が壊れています。引用符の有無以前の失敗）"
+elif printf '%s\n' "${quote_free_out}" | grep -q "['\"]"; then
     report_fail "構造行に引用符を 1 つも残さない" \
         "書き出された構造行に引用符が残っている（消費側の正規化の前提が崩れ、特権判定が fail-open になる）"
 else
