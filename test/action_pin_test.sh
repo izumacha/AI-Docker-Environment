@@ -1442,6 +1442,26 @@ jobs:
   j: {name: "a:
     ", secrets: inherit, runs-on: ubuntu-latest}'
 
+# **既知の残件（特権判定側。requirements.md の同項に記載）。** 引用の範囲が行内で確定しない場合
+# ——閉じない引用と、開始と認めず落とした引用符——は中身を伏せないため、値の中の `#` が構造行に
+# 残り、そこで行が切れて後ろの本物の `secrets:` が捨てられる。**これは台帳で唯一の見逃し方向**
+# （そのワークフロー内の可変タグが検査から全部外れる）なので、**main と同じ挙動であっても
+# ケースで固定する**: 広がったときに気付けるようにするのが台帳の役目。
+# 筋の対処は「範囲が確定しない引用を含む行ではコメントとして切らない」（issue #97）
+assert_privilege_classification plain 'KNOWN RESIDUAL: a hash inside an unterminated quote hides a later secrets key' \
+'name: X
+permissions: read-all
+jobs:
+  j: {name: "a
+    #b", secrets: inherit, runs-on: ubuntu-latest}'
+
+# 同じ残件の、**開始と認めず落とした引用符**（アンカーを挟んだ形）版
+assert_privilege_classification plain 'KNOWN RESIDUAL: a hash inside an anchored value hides a later secrets key' \
+'name: X
+permissions: read-all
+jobs:
+  j: {name: &n "a #b", secrets: inherit, runs-on: ubuntu-latest}'
+
 # 継続行の先頭に置いた引用符から始まる形でも、後ろの本物の `secrets:` を見落とさないこと
 # （行頭の引用符を開始と誤読すると、間の区切りごと伏せて特権判定が read-only へ化ける）
 assert_privilege_classification privileged 'a real secrets key after a continuation line' \
