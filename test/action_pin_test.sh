@@ -1407,6 +1407,22 @@ permissions: read-all
 jobs:
   j: {name: b##, secrets: inherit, runs-on: ubuntu-latest}'
 
+# **引用された値の中では、空白の後ろの `#` でもコメントではない。** 引用符を落とした行だけを見ると
+# その空白は値の中身なのか構造なのか区別が付かないので、`emit_structural_lines()` の側で
+# 引用の中の `#` を伏せている。伏せないと、ここで行が切れて後ろの `secrets:` が消える（fail-open）
+assert_privilege_classification privileged 'a spaced hash inside a quoted value does not hide a later secrets key' \
+'name: X
+permissions: read-all
+jobs:
+  j: {name: "a: #b", secrets: inherit, runs-on: ubuntu-latest}'
+
+# 単一引用でも、値が `#` だけでも同じこと
+assert_privilege_classification privileged 'a single-quoted spaced hash does not hide a later secrets key' \
+'name: X
+permissions: read-all
+jobs:
+  j: {name: '"'"'a: #b'"'"', secrets: inherit, runs-on: ubuntu-latest}'
+
 # 逆に、**空白の後ろの `#` は本物のコメント**なので、その後ろは構造として読まないこと
 # （ここを厳しくしすぎると、コメントに書いた語で特権へ倒れて CI が恒常的に赤くなる）
 assert_privilege_classification plain 'a real trailing comment is still stripped' \

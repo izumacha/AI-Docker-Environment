@@ -1781,6 +1781,28 @@ jobs:
     steps:
       - name: "a[uses: policy]"' 6
 
+# 引用の中の `#` も伏せる。YAML でコメントを始めるのは引用の外の `#` だけなのに、
+# 引用符を落とした後の行を見る消費側にはその区別が付かないため、ここで決める
+# （伏せないと特権判定が値の中の `#` で行を切り、後ろの `secrets:` を捨てて fail-open になる）
+assert_structural_line "引用された値の中の # も伏せられる" \
+    '      - name: a: ~b' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: "a: #b"' 6
+
+# 逆に、**引用の外の `#` はコメントの印なので伏せない**（版注記の取り出しがここに依存している）
+assert_structural_line "引用の外の # はそのまま残る" \
+    '      - uses: a/b@v1  # v1' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: a/b@v1  # v1' 6
+
 # 伏せるのは区切り文字だけで、引用された値の綴りには触れない（参照を読めなくしないため）
 assert_structural_line "引用された uses: の値はそのまま残る" \
     '      - uses: actions/checkout@v7' \
