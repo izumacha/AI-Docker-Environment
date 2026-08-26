@@ -83,8 +83,8 @@ emit_structural_lines() {
 
     # 引用符の 2 種類は awk の変数として 1 文字ずつ渡す（awk のプログラムはシェルの単一引用符で
     # 囲まれており、その中に `'` を直接書けないため）。
-    # `flow_punct` はフロー形式の区切りとして意味を持つ文字、`flow_mask` はそれを伏せる代役の文字
-    awk -v dq='"' -v sq="'" -v flow_punct='[]{},' -v flow_mask='~' \
+    # `flow_re` はフロー形式の区切りとして意味を持つ文字の集合、`flow_mask` はそれを伏せる代役の文字
+    awk -v dq='"' -v sq="'" -v flow_re='[][{},]' -v flow_mask='~' \
         -v tight_openers='{[,' -v spaced_openers=':-' '
         # 引用符に囲まれたスカラー（値）の中にあるフロー形式の区切り文字を、代役の文字へ置き換える。
         #
@@ -119,11 +119,13 @@ emit_structural_lines() {
         #
         # 引用符そのものは今までどおり落とす（`"permissions":` と `permissions:` を同じ形に
         # 揃える FR-8.1 の前提。脱出表記や入れ子で現れた引用符も同じく落とす）。
-        function mask_quoted_flow_punctuation(src,   out, held, raw, quote, prev, gap, i, ch, nxt, len) {
-            # 確定した出力・引用の中で伏せた写し・伏せる前の写し・開いている引用符の種類を初期化する
-            out = ""; held = ""; raw = ""; quote = ""
+        function mask_quoted_flow_punctuation(src,   out, raw, masked, quote, prev, gap, closed, keyq, i, ch, nxt, len) {
+            # 確定した出力・引用の中身の写し・開いている引用符の種類を初期化する
+            out = ""; raw = ""; quote = ""
             # 引用の外で最後に見た空白以外の文字と、その後ろに空白があったか（開始位置の判定に使う）
             prev = ""; gap = 0
+            # 直前の非空白が引用スカラーの終わりだったか／いまの `:` がその直後の `:` だったか
+            closed = 0; keyq = 0
             # 1 文字ずつ見るので、行の長さを先に求めておく
             len = length(src)
             # 行の左端から 1 文字ずつ走査する
@@ -136,57 +138,65 @@ emit_structural_lines() {
                     if (ch == dq || ch == sq) {
                         # 値が始まりうる位置に置かれているときだけ、スカラーの開始として扱う。
                         # 行頭か、フローの区切り（`{` `[` `,`）の直後なら空白の有無を問わない。
-                        # 鍵の `:` と並びの `-` は**空白を挟んでいることを要求する**: 空白が無い
-                        # `pre-'"'"'release` の `-` は区切りではなくただの文字で、ここを緩めると
-                        # 上記の fail-open がそのまま戻る
+                        # 並びの `-` と、素の鍵に続く `:` は**空白を挟んでいることを要求する**:
+                        # 空白が無い `pre-'"'"'release` の `-` は区切りではなくただの文字で、
+                        # ここを緩めると語中のハイフンから始まる fail-open がそのまま戻る。
+                        # ただし**引用された鍵に続く `:` は空白を要らない**（JSON 形式の
+                        # `{"name":"a, uses: policy"}` は正しい YAML で、PyYAML も
+                        # `{'"'"'name'"'"': '"'"'a, uses: policy'"'"'}` と読む）。素の鍵の `{name:"a` とは
+                        # 区別が付く: あちらは `name:"a` までが 1 つの鍵になるので開始と認めない
                         if (prev == "" || index(tight_openers, prev) > 0 || \
-                            (index(spaced_openers, prev) > 0 && gap)) {
-                            quote = ch; held = ""; raw = ""; continue
+                            (index(spaced_openers, prev) > 0 && gap) || (prev == ":" && keyq)) {
+                            quote = ch; raw = ""; continue
                         }
                         # 位置が合わない引用符は、従来どおり落とすだけ（伏せない＝今日と同じ挙動）
                         continue
                     }
                     # 引用の外の文字は構造かもしれないので、一切手を加えず出力へ送る
                     out = out ch
-                    # 空白なら「区切りとの間が空いた」印を立て、それ以外は直前の文字として覚える
-                    if (ch ~ /[[:space:]]/) { gap = 1 } else { prev = ch; gap = 0 }
+                    # 空白は位置判定に影響させない（`{"a" : "b"}` のように間が空く書き方があるため、
+                    # 「直前が引用の終わりだったか」の記憶もここでは消さない）
+                    if (ch ~ /[[:space:]]/) { gap = 1; continue }
+                    # `:` を見たら「引用された鍵の直後の `:` か」を控える（上の開始判定で使う）
+                    if (ch == ":") keyq = closed
+                    # 直前の文字として覚え、空白と引用終わりの記憶はここで消す
+                    prev = ch; gap = 0; closed = 0
                     continue
                 }
                 # 単一引用の中では `'"'"''"'"'` が「文字としてのアポストロフィ」を表し、ここでは閉じない。
-                # 従来の一律削除に合わせて、どちらの写しにも足さずに 2 文字ぶん読み飛ばす
+                # 従来の一律削除に合わせて、写しに足さずに 2 文字ぶん読み飛ばす
                 if (quote == sq && ch == sq && substr(src, i + 1, 1) == sq) { i++; continue }
                 # 二重引用の中の `\` は次の 1 文字を脱出させる。`\"` で閉じたと誤らないよう 2 文字で扱う
                 if (quote == dq && ch == "\\") {
                     # 脱出される側の 1 文字を先に覗く
                     nxt = substr(src, i + 1, 1)
                     # バックスラッシュ自体は従来どおり素の文字として残す
-                    raw = raw ch; held = held ch
+                    raw = raw ch
                     # 脱出された文字が引用符なら従来の一律削除に合わせて落とし、それ以外は控える
-                    if (nxt != "" && nxt != dq && nxt != sq) {
-                        raw = raw nxt
-                        held = held ((index(flow_punct, nxt) > 0) ? flow_mask : nxt)
-                    }
+                    if (nxt != "" && nxt != dq && nxt != sq) raw = raw nxt
                     # 脱出された 1 文字はいま処理したので、次の文字まで読み進める
                     i++
                     continue
                 }
                 # 同じ種類の引用符が来たらスカラーの終わり（脱出表記は上で処理済み）
                 if (ch == quote) {
+                    # 中身の写しから、フロー形式の区切り文字だけを代役へ一括で置き換える
+                    masked = raw
+                    gsub(flow_re, flow_mask, masked)
                     # 伏せた写しを出力へ確定させ、引用の外へ戻る
-                    out = out held
+                    out = out masked
                     # 閉じた直後に続く引用符を「開始」と誤読しないよう、開始位置になりえない文字を
-                    # 直前の文字として置く（`"` は開始位置の文字集合のどちらにも含まれない）
-                    prev = dq; gap = 0
+                    # 直前の文字として置く（`"` は開始位置の文字集合のどれにも含まれない）。
+                    # 併せて「直前は引用の終わりだった」ことを控える（JSON 形式の鍵の判定に使う）
+                    prev = dq; gap = 0; closed = 1
                     # 引用の状態を片付けて次の文字へ進む
-                    quote = ""; held = ""; raw = ""
+                    quote = ""; raw = ""
                     continue
                 }
-                # 入れ子の別種の引用符は、従来の一律削除と同じく落とす（どちらの写しにも入れない）
+                # 入れ子の別種の引用符は、従来の一律削除と同じく落とす（写しにも入れない）
                 if (ch == dq || ch == sq) continue
-                # 伏せる前の姿を控える（引用が閉じなかったときに元へ戻すため）
+                # それ以外は中身としてそのまま控える（伏せるのは閉じるときにまとめて行う）
                 raw = raw ch
-                # フロー形式の区切り文字なら代役へ、それ以外はそのまま控える
-                if (index(flow_punct, ch) > 0) { held = held flow_mask } else { held = held ch }
             }
             # 行末まで来ても引用が閉じていなければ、伏せずに元の姿で出力する。
             # 複数行にまたがる引用スカラーなど、この行だけでは対応が取れない場合に

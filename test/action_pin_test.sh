@@ -1763,6 +1763,33 @@ jobs:
         run: echo hi
       - uses: ./.github/actions/local'
 
+# **JSON 形式（`:` の直後に空白が無い）でも引用された値を認識すること。** `{"name":"…"}` は
+# 正しい YAML で、`yaml.safe_load` も `{'"'"'name'"'"': '"'"'…'"'"'}` と読む。空白を一律に要求すると
+# この形が引用と認められず、**issue #93 の 2 件目（幻の参照）がそのまま再現する**
+# （実測: 空白を要求していた実装では `policy` が報告された）
+assert_split_output 'a JSON-style quoted key opens the following quoted value' \
+"7"$'\t'"./.github/actions/local"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - {"name":"compare pinning, uses: policy", "uses": ./.github/actions/local}'
+
+# 逆に、**引用されていない鍵**に続く `:` では空白を要求し続けること。`{name:"a` は YAML では
+# `name:"a` までで 1 つの鍵になり、引用スカラーは始まっていない。ここを緩めると
+# 語中のハイフンと同じ形の fail-open（本物の区切りを伏せて `uses:` を見逃す）を新たに開ける
+assert_split_output 'a plain key with no space before the quote does not open a span' \
+"7"$'\t'"actions/evil@v1"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - {name:"a, uses: actions/evil@v1, note: b"}'
+
 # **二重引用の脱出表記 `\"` でも早く閉じないこと。** 理由と結末は上の単一引用と同じ
 assert_split_output 'an escaped double quote does not close a double-quoted scalar' \
 "9"$'\t'"./.github/actions/local"$'\t' \
