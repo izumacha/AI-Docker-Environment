@@ -137,7 +137,7 @@ scan_workflow_structure() {
     # YAML を 1 行ずつたどり、`permissions:` の値（同一行のスカラー／フロー形式／続く字下げブロック）を解釈する。
     # 引用符の文字集合は awk の変数として渡す（awk のプログラムはシェルの単一引用符で囲まれており、
     # その中に `'` を直接書けないため）
-    emit_structural_lines "$path" | awk -v quote_chars='["'"'"']' -v comment_re="${CI_WORKFLOW_COMMENT_START}" '
+    emit_structural_lines "$path" | awk -v comment_re="${CI_WORKFLOW_COMMENT_START}" '
         # ブロック形式の `permissions:` を読んでいる最中かどうか、結論を出したかどうか、
         # そして構造行を 1 行でも受け取ったかどうかを表す旗
         BEGIN { in_block = 0; block_indent = 0; decided = 0; seen = 0 }
@@ -159,15 +159,11 @@ scan_workflow_structure() {
             # read-only と誤判定する**（fail-open。実測: `{name: "a#b", secrets: inherit, …}` が
             # read-only になった）。同じ規則は `test/lib/ci_workflow.sh` の `strip_comment` 側にもある
             sub(comment_re ".*$", "", line)
-            # 引用符をすべて取り除き、`"permissions":` と `permissions:`、`"write"` と `write` を同じ形に揃える。
-            # YAML は鍵も値も引用できるため、引用の有無を綴りとして数え上げると必ず取りこぼす
-            # （`"permissions": write-all` が非特権と誤判定される穴を実測）。
-            # **正規化の持ち主は `emit_structural_lines()` 側**で、いまはそこが引用符を 1 つも
-            # 出力しないため、この行は実際には何にも当たらない。**それでも残す**: ここが空振りに
-            # なる前提が崩れるのは「上流が引用符を出すようになったとき」で、そのとき静かに壊れるのは
-            # **特権ワークフローを非特権と誤判定する向き（fail-open）**だから。引用の扱いを直すときは
-            # 必ず上流を直すこと（この行は最後の受け皿であって、規則の置き場所ではない）
-            gsub(quote_chars, "", line)
+            # **引用符の正規化はここでは行わない。** `"permissions":` と `permissions:` を同じ形に
+            # 揃えるのは `emit_structural_lines()` の役目で、そこが引用符を 1 つも出力しないことは
+            # `ci_workflow_test.sh` の「構造行に引用符を 1 つも残さない」が機械的に固定している。
+            # ここに写しを置いても、前提が崩れたときには先にあちらが赤くなるので受け皿にならず、
+            # 「正規化の持ち主が 2 つある」という読み違いだけが残る（§6 デッドコードを残さない）
             # 大文字小文字の揺れも同様に潰しておく（`WRITE` と `write`、`Secrets:` と `secrets:` を同じ形にする）
             line = tolower(line)
             # コメントだけの行はここで読み飛ばす
@@ -1436,10 +1432,9 @@ jobs:
   j: {name: b, runs-on: ubuntu-latest}  # secrets: inherit'
 
 # 引用を開いたまま終わった行の次の行でも、後ろの本物の `secrets:` を見落とさないこと。
-# **この形はもともと「複数行にまたがるフロー形式は解釈できないので特権に倒す」歯止めにも
-# 掛かる**ので、伏せる側の守り（`MASK_LEFT_OPEN`）だけを外してもここは緑のまま通る。
-# 守りそのものを駆動しているのは `ci_workflow_test.sh` の構造行のケースで、
-# こちらは「最終的な判定が privileged であること」を端から端まで固定する役目
+# ここが privileged になるのは、閉じない引用を含む行を**伏せずにそのまま出す**ためで、
+# 結果として `, secrets: inherit` の読点が構造として残るから。伏せる範囲を広げて
+# この読点まで覆うと read-only へ化ける（＝ワークフロー内の可変タグが検査から全部外れる）
 assert_privilege_classification privileged 'a secrets key after an unterminated quote is still seen' \
 'name: X
 permissions: read-all
