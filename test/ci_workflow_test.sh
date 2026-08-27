@@ -733,6 +733,139 @@ jobs:
           fi
           bash ${SUITE_PATH} | tee log"
 
+# --- 1 行で書いた `set`（意味が変わらない書き換えで穴が開かないこと） ----------------
+#
+# `split_commands` が `;` で切るため、断片の本文は `then set +e` / `do set +e` になる。
+# `^set` だけで探すと当たらず、**同じ意味を 1 行に畳むだけ**で握り潰しが見えなくなる
+
+assert_not_wired "1 行の if …; then set +e; fi も握り潰しとして数える" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          if [ -n \"${DOLLAR}CI\" ]; then set +e; fi
+          bash ${SUITE_PATH}"
+
+assert_not_wired "1 行の for …; do set +e; done も握り潰しとして数える" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          for i in 1; do set +e; done
+          bash ${SUITE_PATH}"
+
+# ブレースグループは条件を持たず**無条件に走る**ので、これを見落とすと
+# 1 行足すだけで確実にゲートを外せる（分岐より短い最悪の綴り）
+assert_not_wired "ブレースグループの中の set +e は無条件に効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          { set +e; }
+          bash ${SUITE_PATH}"
+
+# `if false` の**else 側は必ず走る**。偽の印を持ち越すと 1 行で握り潰しを隠せる
+assert_not_wired "偽と分かる条件の else 側の set +e は効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          if false; then :; else set +e; fi
+          bash ${SUITE_PATH}"
+
+# 締めすぎの側: `then` を剥がすのは `set` を探すときだけで、
+# **実行の照会には持ち込まない**（条件部の中身が走るかは条件次第のため）
+assert_not_wired "1 行の then の後ろの呼び出しは実行の証拠にしない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          if [ -n \"${DOLLAR}CI\" ]; then bash ${SUITE_PATH}; fi"
+
+# --- 関数定義の本文（その場では走らない） ------------------------------------------
+
+# 定義しただけでは本文は 1 度も走らないので、弱める向きでも反映しない。
+# 反映すると `cleanup() { set +e; … }` という定型句だけで CI が赤いままになる
+assert_wired "関数定義の中の set +e は定義した時点では効かない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          cleanup() {
+            set +e
+            rm -rf tmp
+          }
+          bash ${SUITE_PATH}"
+
+# --- 1 語の中のオプションの並び順（bash は左から右へ適用する） ----------------------
+
+# `set +e -e` は最後の `-e` が勝つ＝ゲートする。並び順を落とすと
+# 実際にはゲートしているステップを「未配線」と誤報して赤くする
+assert_wired "set +e -e は後ろの -e が勝つ" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          set +e -e
+          bash ${SUITE_PATH}"
+
+assert_not_wired "set -e +e は後ろの +e が勝つ" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          set -e +e
+          bash ${SUITE_PATH}"
+
+# 短い綴りの並びの**末尾が `o`** なら、次の語が長い綴りの名前になる（`-euo pipefail`）
+assert_wired "set -euo pipefail は pipefail まで立てる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          set -euo pipefail
+          bash ${SUITE_PATH} | tee log"
+
+assert_not_wired "set +euo pipefail は pipefail まで落とす" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          set -o pipefail
+          set +euo pipefail
+          bash ${SUITE_PATH} | tee log"
+
+# `--` から後ろは位置パラメータであってオプションではない
+assert_wired "set -- +e は位置パラメータであってオプションではない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          set -- +e
+          bash ${SUITE_PATH}"
+
 assert_wired "コマンド置換は括弧の釣り合いを崩さない" "name: ci
 jobs:
   type-check:

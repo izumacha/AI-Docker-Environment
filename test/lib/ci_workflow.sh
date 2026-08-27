@@ -963,6 +963,9 @@ ci_workflow_extract() {
             chain_status = ""
             # 部分シェル（`( … )`）の入れ子の数。**`set` はここでは外へ漏れない**
             subshell = 0
+            # 関数定義（`f() { … }`）の入れ子の数。**定義しただけでは本文は走らない**ので、
+            # 中の `set` は弱める向きでも反映しない（`uncertain` とは別に数える）
+            fndef = 0
             if (!step_disabled) {
                 # **行末の `\` は次の行へ続く 1 つの論理行。** 物理行のまま切ると、
                 # 次の行に置かれた `|| true` やパイプが呼び出しと結び付かず、
@@ -1004,7 +1007,22 @@ ci_workflow_extract() {
                         # **部分シェル（`( … )`）の中の `set` は外へ漏れない。** 子シェルの
                         # オプション変更なので、`set +e` のステップの中に `( set -e )` を置いても
                         # 親は握り潰したままである（ブレースグループ `{ … }` は同じシェルなので漏れる）
-                        if (text ~ /^set([[:space:]]|$)/ && dead_depth < 0 && subshell == 0) {
+                        # **`else` / `elif` はその階層の「偽と分かる」印を解除する。**
+                        # `if false; then :; else set +e; fi` の else 側は**必ず走る**ので、
+                        # 偽の印を持ち越すと 1 行で握り潰しを隠せる（実 bash と差分照合して実測）。
+                        # ただし走ることを証明したわけではないので `uncertain` は立てたままにし、
+                        # 中の呼び出しは実行の証拠にしない（`elif` は条件が別物なので同じ扱い）
+                        if (text ~ /^(else|elif)([[:space:]]|;|$)/ && dead_depth >= 0 && depth == dead_depth + 1) { dead_depth = -1 }
+                        # **ブロックを開く語に続けて 1 行で書いた `set` も同じ `set`。**
+                        # `split_commands` が `;` で切るので、`if …; then set +e; fi` の断片は
+                        # `then set +e` になる。`^set` だけで探すと当たらず、**同じ意味を 1 行で
+                        # 書き直すだけで**握り潰しが見えなくなる（`{ set +e; }` に至っては
+                        # 無条件に走るのに丸ごと見落とす。実 bash と差分照合して実測）。
+                        # 本文の先頭に立ちうる語だけを剥がす（`ci_workflow_runs_script` 側は
+                        # これを許してはいけない——`do` の中身が走るかは回数次第のため）
+                        set_probe = text
+                        sub(/^(then|else|do|\{)[[:space:]]+/, "", set_probe)
+                        if (set_probe ~ /^set([[:space:]]|$)/ && dead_depth < 0 && subshell == 0) {
                             # **`set` の反映は「どちらへ倒すか」で非対称にする（issue #113）。**
                             # 制御構造の中（`uncertain > 0`）は走るか分からないが、`+` と `-` では
                             # 分からないときに倒すべき先が逆になる:
@@ -1019,23 +1037,47 @@ ci_workflow_extract() {
                             # スイートの失敗を握り潰したまま全表明を緑のまま通せた（実 bash と差分照合して実測）。
                             # 代償として「通らないかもしれない分岐の `set +e`」は未配線と誤報しうるが、
                             # そちらは CI が赤くなって人が見る**fail-closed** 側なので許容する。
-                            # 強める向きを先に見て、弱める向きに上書きさせる。`set -e +e` のように
-                            # 1 語で両向きが書かれたときは、bash の左から右（＝最後の `+e` が勝つ）とも
-                            # 安全側とも一致する
-                            if (uncertain == 0) {
-                                if (text ~ /(^|[[:space:]])-[a-z]*e[a-z]*([[:space:]]|$)/) { errexit = 1 }
-                                # **長い綴りも同じ意味。** `set -o errexit` は POSIX の書き方
-                                if (text ~ /(^|[[:space:]])-[a-z]*o[[:space:]]+errexit([[:space:]]|$)/) { errexit = 1 }
-                                # `pipefail` が立っていればパイプ越しでも失敗が伝わる
-                                if (text ~ /(^|[[:space:]])-[a-z]*o[[:space:]]+pipefail([[:space:]]|$)/) { pipefail = 1 }
+                            strengthen_ok = (uncertain == 0)
+                            # **関数定義の本文は「その場では走らない」ので弱める向きも反映しない。**
+                            # `cleanup() { set +e; … }` は定義しただけでは何も起きず、反映すると
+                            # 実際にはゲートしている後続を「未配線」と誤報して CI を赤いままにする
+                            # （呼ばれた場合の握り潰しは、そもそも呼び出しの追跡をしていないので
+                            #   このライブラリの範囲外。main と同じ扱いに揃えてある）
+                            weaken_ok = (fndef == 0)
+                            # **語を左から右へ順に適用する。** bash はそう解釈するので
+                            # `set +e -e` は最後の `-e` が勝つ。1 本の正規表現で全体を見ると
+                            # この順序が落ち、ゲートしているステップを「未配線」と誤報する
+                            nsetw = split(set_probe, setw, /[[:space:]]+/)
+                            for (sw = 2; sw <= nsetw; sw++) {
+                                setopt = setw[sw]
+                                # `--` から後ろは位置パラメータであってオプションではない
+                                if (setopt == "--") { break }
+                                # `-` / `+` で始まる短い綴りの並び（`-e` / `+ex` / `-euo`）だけを見る
+                                if (setopt !~ /^[-+][a-z]*$/) { continue }
+                                # 先頭の記号が向きを決める（`-` で有効化、`+` で無効化）
+                                seton = (substr(setopt, 1, 1) == "-")
+                                setbody = substr(setopt, 2)
+                                # 並びのどこかに `e` があれば errexit の指定
+                                if (setbody ~ /e/) {
+                                    if (seton) { if (strengthen_ok) { errexit = 1 } }
+                                    else if (weaken_ok) { errexit = 0 }
+                                }
+                                # **末尾が `o` なら次の語が長い綴りの名前**（`-o errexit` / `-euo pipefail`）。
+                                # 短い綴りだけを見ると 1 行でゲートを外したまま「ゲートしている」と読む
+                                if (setbody ~ /o$/ && sw < nsetw) {
+                                    sw++
+                                    setname = setw[sw]
+                                    if (setname == "errexit") {
+                                        if (seton) { if (strengthen_ok) { errexit = 1 } }
+                                        else if (weaken_ok) { errexit = 0 }
+                                    }
+                                    # `pipefail` が立っていればパイプ越しでも失敗が伝わる
+                                    else if (setname == "pipefail") {
+                                        if (seton) { if (strengthen_ok) { pipefail = 1 } }
+                                        else if (weaken_ok) { pipefail = 0 }
+                                    }
+                                }
                             }
-                            # ここから下が弱める向き。走るか分からなくても反映する
-                            if (text ~ /(^|[[:space:]])\+[a-z]*e[a-z]*([[:space:]]|$)/) { errexit = 0 }
-                            # **長い綴りも同じ意味。** 短い綴りだけを見ると、
-                            # 1 行でゲートを外したまま「ゲートしている」と読む
-                            if (text ~ /(^|[[:space:]])\+[a-z]*o[[:space:]]+errexit([[:space:]]|$)/) { errexit = 0 }
-                            # `pipefail` を落とすとパイプ越しの失敗はもう伝わらない
-                            if (text ~ /(^|[[:space:]])\+[a-z]*o[[:space:]]+pipefail([[:space:]]|$)/) { pipefail = 0 }
                         }
                         # 空の断片（`;;` や行頭の区切り）は記録しない
                         if (text == "") { continue }
@@ -1050,6 +1092,7 @@ ci_workflow_extract() {
                         if (text ~ /^(fi|done|esac|\})([[:space:]]|;|$)/ && depth > 0) {
                             if (uncertain_at[depth]) { uncertain--; uncertain_at[depth] = 0 }
                             else if (group_start[depth] >= 1) { closed_group_start = group_start[depth] }
+                            if (fndef_at[depth]) { fndef--; fndef_at[depth] = 0 }
                             if (subshell_at[depth]) { subshell--; subshell_at[depth] = 0 }
                             group_start[depth] = -1
                             depth--
@@ -1072,6 +1115,7 @@ ci_workflow_extract() {
                             for (closing = 0; closing < -paren && depth > 0; closing++) {
                                 if (uncertain_at[depth]) { uncertain--; uncertain_at[depth] = 0 }
                                 else if (group_start[depth] >= 1) { closed_group_start = group_start[depth] }
+                                if (fndef_at[depth]) { fndef--; fndef_at[depth] = 0 }
                                 if (subshell_at[depth]) { subshell--; subshell_at[depth] = 0 }
                                 group_start[depth] = -1
                                 depth--
@@ -1139,11 +1183,13 @@ ci_workflow_extract() {
                         # bash の `function name { … }` 形式（`()` を伴わない綴り）も 1 階層開く
                         else if (text ~ /^function[[:space:]]+[A-Za-z_][A-Za-z0-9_]*([[:space:]]*\{)?$/) {
                             depth++; uncertain++; uncertain_at[depth] = 1
+                            fndef++; fndef_at[depth] = 1
                         }
                         # 関数定義は `{` を伴う形だけを開き側に数える。`f()` と次行の `{` を
                         # どちらも数えると 2 つ開いて 1 つしか閉じず、以降ずっと「入れ子の中」に見える
                         else if (text ~ /^[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\(\)[[:space:]]*\{$/) {
                             depth++; uncertain++; uncertain_at[depth] = 1
+                            fndef++; fndef_at[depth] = 1
                         }
                         # **ブレースグループ（`cmd || { echo bad; exit 1; }`）も 1 階層開く。**
                         # 閉じ側の `}` だけを数えると深さが 1 つ足りなくなり、以降の断片が
