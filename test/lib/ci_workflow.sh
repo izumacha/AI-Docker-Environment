@@ -906,6 +906,111 @@ ci_workflow_extract() {
             return n
         }
 
+        # その断片が関数定義かどうかを返す。**0 = 定義ではない / 1 = 見出しだけ（`{` は次の行）/
+        # 2 = 本体を開く（`{` が同じ行）**。
+        # bash の綴りは `function f` / `function f()` / `f()` の 3 通りあり、
+        # **綴りの一覧を 2 か所に分けて持つと必ず片方が漏れる**（実際 `function f()` の綴りが
+        # どちらからも抜けており、定義が階層を開かないのに閉じ `}` だけが深さを減らして
+        # 外側のブロックを潰していた ＝ 条件付きでしか走らない呼び出しが実行の証拠に化ける fail-open）。
+        # 見出しと本体を別々に数えるのは、**どちらも開き側に数えると 2 つ開いて 1 つしか閉じず**、
+        # 以降ずっと「入れ子の中」に見えるため（深さも `fndef` も戻らない）
+        function function_form(t,   head) {
+            # 見出しの綴り（`function` の有無と `()` の有無の組み合わせ）
+            head = "^(function[[:space:]]+[A-Za-z_][A-Za-z0-9_]*([[:space:]]*\\(\\))?|[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\\(\\))"
+            # `{` が同じ行にあるなら、この断片が本体を開く
+            if (t ~ head "[[:space:]]*\\{([[:space:]]|$)") { return 2 }
+            # `{` が無ければ見出しだけ。次に来る `{` が本体の開き
+            if (t ~ head "[[:space:]]*$") { return 1 }
+            # それ以外は関数定義ではない
+            return 0
+        }
+
+        # `errexit` を 1 つ分更新し、**落とした階層の記録**（`weak_depth` / `weak_prev`。どちらも大域）も
+        # 併せて維持する。短い綴りと長い綴りで記録の有無がずれると、片方の括りだけが
+        # 打ち消せずゲートしているステップが「未配線」と誤報されるため、ここ 1 か所に寄せてある。
+        # **打ち消しは「1 に戻す」ではなく「落とす前の値へ戻す」**のが要点で、
+        # 1 に固定すると内側の括りが**外側でまだ効いている** `set +e` まで消してしまう（fail-open）
+        # `cancel` を**引数で受け取らない**のが要点。ループの外で 1 度だけ計算すると、
+        # `set +e -e` のように 1 つの語で自分を打ち消す綴りで判定が古いままになり、
+        # 2 コマンドに分けた同じ意味（`set +e` 改行 `set -e`）と答えが食い違う
+        function apply_errexit(on, strengthen_base, at_uncertain, weaken_ok, current, at,   cancel, ok, updated) {
+            # 同じ階層で自分が落とした分か（毎回この場で測る）
+            cancel = (current == 0 && weak_depth == at)
+            # 強める向きを反映してよいか（確実に走るか、自分で落とした分の打ち消しか）
+            ok = (strengthen_base && (at_uncertain == 0 || cancel))
+            # 打ち消し（同じ階層で自分が落とした分を戻す）なら、**落とす前の値**へ返す。
+            # **1 に固定してはいけない。** 落とす前が -1（＝明示なし）だったとき、1 を返すと
+            # 「`set -e` が明示された」と読まれ、`shell: bash {0}` のように `-e` を持たない
+            # シェルでも errexit が有効と扱われる。走らないループの中の括りが、
+            # 握り潰されたスイートを「ゲートしている」と読ませる（fail-open。実 bash と差分照合して実測）
+            # 記録を残すのは「まだ握り潰されていない状態から落とした」ときだけなので
+            # （下の `current != 0`）、外側で `set +e` がまだ効いている入れ子はここへ来ない
+            # 確実に走ると分かるなら `set -e` は「明示された」ので 1。
+            # 分からないときだけ落とす前の値へ戻す（`shell: bash {0}` のように
+            # `-e` を持たないシェルで、明示された `set -e` を捨てないため）
+            if (on && cancel && ok) { weak_depth = -1; return (at_uncertain == 0) ? 1 : weak_prev }
+            # それ以外は通常の適用（`next` は awk の予約語なので使わない）
+            updated = set_flag(on, ok, weaken_ok, current)
+            # 新しく落としたなら、その階層と落とす前の値を控える
+            if (!on && updated == 0 && current != 0) { weak_depth = at; weak_prev = current }
+            return updated
+        }
+
+        # その断片が `case` のアーム見出しで始まるか（`y)` / `(y)` / `y|z)`）。
+        # **伏せた本文で測る**——引用の中の `) `（`echo "a) b"`）をアームと読むと、
+        # 深さの勘定と括りの記録の両方が狂う。同じ規則が 3 か所にあったので 1 つへ寄せた
+        # （うち 1 か所は生の本文で測っており、引用の扱いが食い違っていた）
+        function starts_case_arm(t) {
+            # 先頭の `(` は POSIX のアーム綴り（`(a)`）。`[^()]*` は `(` を跨げないので、
+            # 任意扱いで明示しないと丸括弧付きのアームだけ当たらない
+            # （当たらないとアーム同士の排他が効かず、別アームの `set -e` が
+            #   前のアームの `set +e` を打ち消す。実 bash と差分照合して実測）
+            return (mask_quoted(t) ~ /^\(?[^()]*\)([[:space:]]|;|$)/)
+        }
+
+        # 先頭の飾りを落として `set …` そのものを返す。該当しなければ空文字。
+        # **落としてよいのは「現在のシェルのまま `set` を呼ぶ」書き方だけ**——
+        # ブレースグループ / 変数代入の前置き / `builtin` / `command` / `eval`。
+        # `CI_WORKFLOW_COMMAND_START` の実行ラッパ一覧（`sudo` / `env` / `timeout` 等）は
+        # **意図的に共有しない**。あちらは「スクリプトを走らせるか」を問う側の一覧で、
+        # どれも別プロセスを起こすため `set` を渡しても親のオプションは変わらない
+        # （`sudo set +e` は握り潰しではない）。同じ一覧にすると fail-closed 側に化ける
+        function set_command(t,   probe) {
+            probe = t
+            # 剥がせるものが無くなるまで繰り返す（入れ子で重なることがある）
+            while (1) {
+                # ブレースグループは同じシェルで走る
+                if (sub(/^\{[[:space:]]+/, "", probe)) { continue }
+                # `VAR=x set +e` の前置き（特殊組み込みなので代入も残るが、要点は `set` が走ること）
+                if (sub(/^[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+/, "", probe)) { continue }
+                # 同じ組み込みをそのまま呼ぶ書き方
+                if (sub(/^(builtin|command)[[:space:]]+/, "", probe)) { continue }
+                # `eval` は現在のシェルで走るので、引用を外して中身を見る
+                if (sub(/^eval[[:space:]]+/, "", probe)) { gsub(/["\047]/, "", probe); continue }
+                # `\set` はエイリアス展開を止めるだけで、呼ぶ組み込みは同じ
+                if (sub(/^\\[[:space:]]*/, "", probe)) { continue }
+                # `! set +e` は終了状態を反転するだけ。オプションの変更はそのまま効く
+                if (sub(/^![[:space:]]+/, "", probe)) { continue }
+                # `time` は計測するだけで、組み込みは現在のシェルで走る
+                if (sub(/^time[[:space:]]+(-p[[:space:]]+)?/, "", probe)) { continue }
+                # 先頭に置いたリダイレクトも前置きであって別プロセスではない
+                if (sub(/^[0-9]*[<>]&?[[:space:]]*[^[:space:]]+[[:space:]]+/, "", probe)) { continue }
+                break
+            }
+            # 飾りを落とした先が `set` でなければ、この断片に `set` は無い
+            return (probe ~ /^set([[:space:]]|$)/) ? probe : ""
+        }
+
+        # `set` のオプション 1 つ分の新しい値を返す。**向きごとに反映してよい条件が違う**（issue #113）。
+        # `on` が真なら `-`（ゲートを強める）、偽なら `+`（弱める）。反映してよくなければ現在値を返す。
+        # 短い綴りと長い綴りで同じ判断を書き写さないよう、ここ 1 か所に寄せてある
+        function set_flag(on, strengthen_ok, weaken_ok, current) {
+            # 強める向きは、確実に走ると分かるときだけ立てる
+            if (on) { return strengthen_ok ? 1 : current }
+            # 弱める向きは、走るかもしれない時点で落とす
+            return weaken_ok ? 0 : current
+        }
+
         # その構造行がステップの中の鍵かどうかを返す。**ジョブ直下の鍵は `steps:` と同じ桁**に並ぶ
         # （どちらもジョブというマップの鍵なので）。ダッシュで始まる行はステップの先頭鍵なので中側。
         # その構造行が「ジョブ直下の鍵」「ステップ自身の鍵」「それより内側（入れ子の中身）」の
@@ -936,7 +1041,7 @@ ci_workflow_extract() {
         # **ここでは出力しない**のが要点で、ジョブ単位の無効化キー（`if: false` 等）は
         # YAML のキー順が自由である以上 `steps:` の**後ろ**にも書ける。書いた時点で
         # 出力済みのステップは取り消せないため、ジョブ 1 つ分を溜めてから出す
-        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k) {
+        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, closed_any, fn_form, depth_before, case_before, pipe_in, set_in_fndef, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok) {
             # **シェルのオプションはステップごとにリセットする。** ステップは 1 つずつ
             # 別のシェルで走るので、前のステップの `set +e` / `pipefail` は引き継がれない。
             # **控えるのは `set` で明示された分だけ（-1 = 明示なし）。** シェルの既定と突き合わせるのは
@@ -963,6 +1068,17 @@ ci_workflow_extract() {
             chain_status = ""
             # 部分シェル（`( … )`）の入れ子の数。**`set` はここでは外へ漏れない**
             subshell = 0
+            # 直近で errexit を落とした階層（-1 = 無し）。同じ階層の `set -e` で戻せる。
+            # **この 2 つだけは局所変数にしない**——記録は `apply_errexit()` が行うので、
+            # 局所にすると関数側からは同名の大域を触ることになり、記録が一切残らない
+            # （awk の局所変数は仮引数だけなので、関数をまたぐ状態は大域で持つほかない）。
+            # ステップごとに別のシェルで走るため、ここで毎回リセットする
+            weak_depth = -1
+            # その階層で落とす直前の errexit（記録を残してよい状態だったかの判定に使う）
+            weak_prev = -1
+            # 関数定義（`f() { … }`）の入れ子の数。**定義しただけでは本文は走らない**ので、
+            # 中の `set` は弱める向きでも反映しない（`uncertain` とは別に数える）
+            fndef = 0
             if (!step_disabled) {
                 # **行末の `\` は次の行へ続く 1 つの論理行。** 物理行のまま切ると、
                 # 次の行に置かれた `|| true` やパイプが呼び出しと結び付かず、
@@ -994,28 +1110,275 @@ ci_workflow_extract() {
                         # 後ろにある呼び出しが記録から消える（YAML のブロックスカラーにタブは書ける）
                         text = trim(seg[j])
                         gsub(/\t/, " ", text)
+                        # **構造の判定に使う本文。** `split_commands` は `;` で切るので
+                        # `if …; then if false; then …` の断片は `then if false` になる。
+                        # `^` で錨を打つ判定（深さ・関数定義・偽と分かる条件）が継続語を
+                        # 剥がさないままだと、内側の `if false` が丸ごと見えず、**走らない
+                        # ブロックの中の `set -e` が最上位で走ったように扱われる**（fail-open。
+                        # 実 bash と差分照合して実測）。剥がすのは**それ自身は階層を開かない**
+                        # 継続語だけで、`{` は残す（`{` は 1 階層開くので、剥がすと勘定が合わない）
+                        struct_text = text
+                        while (sub(/^(then|else|do)[[:space:]]+/, "", struct_text)) { }
                         # `set +e` 以降はエラーが伝わらない。`set -e` で元に戻る
                         # （`set +e … set -e` で囲った検査を「ゲートしない」と決め付けると、
                         #   実際には落ちるステップが「配線されていない」と逆の診断で赤くなる）
                         # **オプションは語をまたいで書ける**（`set -e -o pipefail` / `set -o pipefail -e`）。
                         # 1 語目だけを見ると、実際には落ちる書き方を「落ちない」と読んで誤報する
-                        # **制御構造の中や、偽と分かるブロックの中の `set` は反映しない。**
-                        # 走ったかどうかが分からないものをステップ全体の状態にすると、
-                        # 通らない分岐の `set -e` で握り潰しが隠れ、通るとは限らない分岐の
-                        # `set +e` で実際にはゲートするステップが「未配線」と誤報される（レビューで実測）
+                        # **偽と分かるブロックの中の `set` は反映しない。** `if false; then set +e; fi`
+                        # は 1 度も走らないので、反映するとゲートしているステップを「未配線」と誤報する
                         # **部分シェル（`( … )`）の中の `set` は外へ漏れない。** 子シェルの
                         # オプション変更なので、`set +e` のステップの中に `( set -e )` を置いても
                         # 親は握り潰したままである（ブレースグループ `{ … }` は同じシェルなので漏れる）
-                        if (text ~ /^set([[:space:]]|$)/ && uncertain == 0 && dead_depth < 0 && subshell == 0) {
-                            if (text ~ /(^|[[:space:]])\+[a-z]*e[a-z]*([[:space:]]|$)/) { errexit = 0 }
-                            else if (text ~ /(^|[[:space:]])-[a-z]*e[a-z]*([[:space:]]|$)/) { errexit = 1 }
-                            # **長い綴りも同じ意味。** `set +o errexit` は POSIX の書き方で、
-                            # 短い綴りだけを見ると 1 行でゲートを外したまま「ゲートしている」と読む
-                            if (text ~ /(^|[[:space:]])\+[a-z]*o[[:space:]]+errexit([[:space:]]|$)/) { errexit = 0 }
-                            else if (text ~ /(^|[[:space:]])-[a-z]*o[[:space:]]+errexit([[:space:]]|$)/) { errexit = 1 }
-                            # `pipefail` が立っていればパイプ越しでも失敗が伝わる
-                            if (text ~ /(^|[[:space:]])-[a-z]*o[[:space:]]+pipefail([[:space:]]|$)/) { pipefail = 1 }
-                            else if (text ~ /(^|[[:space:]])\+[a-z]*o[[:space:]]+pipefail([[:space:]]|$)/) { pipefail = 0 }
+                        # **`else` / `elif` はその階層の「偽と分かる」印を解除する。**
+                        # `if false; then :; else set +e; fi` の else 側は**必ず走る**ので、
+                        # 偽の印を持ち越すと 1 行で握り潰しを隠せる（実 bash と差分照合して実測）。
+                        # ただし走ることを証明したわけではないので `uncertain` は立てたままにし、
+                        # 中の呼び出しは実行の証拠にしない（`elif` は条件が別物なので同じ扱い）
+                        if (text ~ /^(else|elif)([[:space:]]|;|$)/ && depth > 0) {
+                            # **別のアームへ移ったら、この階層の括りの記録は捨てる。**
+                            # `if …; then set +e; else set -e; fi` の 2 つは**排他**なので、
+                            # else 側の `set -e` は then 側の `set +e` を打ち消さない。
+                            # 階層だけで見ると同じ深さなので打ち消しが成立してしまい、
+                            # 握り潰されたスイートが「ゲートしている」と読まれる（fail-open。実測）
+                            if (weak_depth == depth) { weak_depth = -1 }
+                            # **真と分かる条件の残りのアームは、どれも必ず走らない。** `if true` は
+                            # `uncertain` を立てない（本体は確実に走る）ので、印を付けないと
+                            # else 側の中身が「最上位で確実に走る」ように見え、1 度も走らない
+                            # 呼び出しが実行の証拠に化ける（実 bash と差分照合して実測）。
+                            # **偽の解除より先に見る**のが要点で、順序を逆にすると
+                            # `elif` を 1 つ挟むだけで直前に付けた印が解除される
+                            if (true_at[depth]) { if (dead_depth < 0) { dead_depth = depth - 1 } }
+                            # 偽と分かる条件の else 側は逆に**必ず走る**ので、偽の印を解除する
+                            else if (dead_depth >= 0 && depth == dead_depth + 1) { dead_depth = -1 }
+                        }
+                        # **連鎖の届かない断片は 1 度も走らない**（`true || set +e` / `false && set +e`）。
+                        # ここで判定しておかないと、走らない `set +e` を握り潰しとして数え、
+                        # 実際にはゲートしているステップを「未配線」と誤報して赤くする。
+                        # 空の断片では触らない（下の `continue` で弾かれる側なので状態を動かさない）
+                        if (text != "") {
+                            if (prev_op != "||" && prev_op != "&&") { unreachable = 0; chain_status = "" }
+                            else if (prev_op == "&&") { unreachable = (chain_status == "f") }
+                            else { unreachable = (chain_status == "t") }
+                        }
+                        # この断片が `case` のアーム見出しか。**使う前にここで求める**——
+                        # 下の `set` の判定側で求めると 1 周ずれ、アーム見出しの**次**の断片で
+                        # 生きている記録を誤って捨てる（`a) set +e` の次の `echo m` で消え、
+                        # 同じアームの `set -e` が打ち消せなくなる。実 bash と差分照合して実測）
+                        # **伏せた本文で測る。** 引用の中の `) `（`echo "a) b"`）をアームの移動と
+                        # 読むと、生きている括りの記録を捨てて正しくゲートしているステップを赤くする
+                        # この断片で実際に階層を閉じたか（下の記録の捨て方に使う）
+                        closed_any = 0
+                        # 関数定義かどうかは同じ断片の中で変わらないので 1 度だけ求める
+                        # （`function_form()` は正規表現を組み立てるので呼び直すと無駄が大きい）
+                        fn_form = function_form(struct_text)
+                        # **部分シェルの中ではアーム見出しと読まない。** `split_commands` は
+                        # 括弧に関係なく `;` で切るので、`( cd /tmp; echo prep )` の後半は
+                        # `echo prep )` という断片になる。これをアーム見出しとして剥がすと
+                        # 閉じ括弧が釣り合いから消え、`subshell` が 0 に戻らないまま
+                        # 以降の `set +e` がすべて「子シェルの中」として無視される
+                        # （握り潰されたコマンドが「ゲートしている」と読まれる。main も同じ挙動）
+                        # **この断片自身が `case` を開く場合も含める。** 深さも `case_depth` も
+                        # 増えるのは断片の末尾なので、1 行書き（`case $X in a) … ;; esac`）を
+                        # 処理している最中はまだ 0。含めないとアームの `)` が部分シェルの閉じとして
+                        # 数えられ、囲っているブロックの階層・`uncertain`・偽の印まで巻き戻る
+                        # （走らないはずの本体が「最上位で確実に走る」に化ける。実測）
+                        set_arm_here = ((case_depth > 0 || struct_text ~ /^case([[:space:]]|$)/) \
+                                        && subshell == 0 && starts_case_arm(struct_text))
+                        # **別の `case` アームへ移ったら、この階層の括りの記録は捨てる。**
+                        # アーム同士は排他なので、`*)` の `set -e` は `linux*)` の `set +e` を
+                        # 打ち消さない（`else` / `elif` と同じ理屈。複数行で書いたときは
+                        # それぞれの `set` が断片の先頭になるので、深さだけでは区別できない）
+                        if (set_arm_here && weak_depth == depth) { weak_depth = -1 }
+                        # **ループを途中で抜ける綴りがあると、括りの後半は走るとは限らない。**
+                        # `set +e … continue … set -e` は、最後の周回が `continue` を通ると
+                        # errexit を落としたまま終わる。記録を捨てて打ち消しを成立させない。
+                        # **走らないと分かっている綴りは数えない**（`true || continue` や
+                        # `if false; then exit 1; fi`）——数えると、2 トークン足すだけで
+                        # 正しくゲートしているステップを恒常的に赤くできる（実測）
+                        if (struct_text ~ /^(break|continue|return|exit)([[:space:]]|;|$)/ \
+                            && dead_depth < 0 && !unreachable && weak_depth >= 0) { weak_depth = -1 }
+                        # **ブロックを開く語に続けて 1 行で書いた `set` も同じ `set`。**
+                        # `split_commands` が `;` で切るので、`if …; then set +e; fi` の断片は
+                        # `then set +e` になる。`^set` だけで探すと当たらず、**同じ意味を 1 行で
+                        # 書き直すだけで**握り潰しが見えなくなる（`{ set +e; }` に至っては
+                        # 無条件に走るのに丸ごと見落とす。実 bash と差分照合して実測）。
+                        # 見出しの予約は**次の 1 断片だけ**有効（`{` 以外が来たら消える）。
+                        # **`set` の判定より前に**確定させるのが要点で、後ろに置くと
+                        # `f()` と次行の `{ set -e; }` で、まだ `fndef` が立っていない状態のまま
+                        # 定義の本文を最上位のコードとして読む（fail-open。実 bash と差分照合して実測）
+                        was_pending_fndef = pending_fndef
+                        if (struct_text != "") { pending_fndef = 0 }
+                        # 本文の先頭に立ちうる語を**繰り返し**剥がす（`then { set +e; }` のように
+                        # 入れ子になるため 1 つでは足りない）。`ci_workflow_runs_script` 側は
+                        # これを許してはいけない——`do` の中身が走るかは回数次第のため
+                        set_probe = set_command(struct_text)
+                        # **命令の位置に置けたか**で、その後の credit の仕方を変える。
+                        # 置けたなら向きの判断に `uncertain` を使えるが、置けなかったとき
+                        # （`case "$X" in Linux) set +e` のようなアームの中など）は
+                        # 「どこで走るか分からない `set`」なので、**強める向きは決して信用しない**。
+                        # 一方その場合でも弱める向きは反映する——綴りを網羅しきれない以上、
+                        # 見えた `set +e` を無視する側が fail-open になるため（実測で 2 綴り漏れていた）
+                        set_placed = (set_probe != "")
+                        # **パイプの構成要素とバックグラウンドは子シェルで走る。** `true | set -e` も
+                        # `set -e &` も親のオプションは変えないので、どちらの向きも反映しない
+                        # （`prev_op` は手前の区切り、`ops[j]` は直後の区切り。実 bash と差分照合して実測）
+                        # `case` のアーム模様（`a|linux*)`）の `|` は選択肢の区切りであってパイプではない。
+                        # `split_commands` はそこで切るので、素直に見ると本文が「パイプの構成要素」に化け、
+                        # アームの中の `set +e` が丸ごと落ちる（実 bash と差分照合して実測）
+                        # **入ってきた区切りをここで控える。** `prev_op` はこの断片の処理中に
+                        # 自分の区切りへ更新されるので、開き側の判定まで持たない
+                        pipe_in = (prev_op == "|")
+                        set_forked = ((prev_op == "|" && !set_arm_here) || ops[j] == "|" || ops[j] == "&")
+                        if (!set_placed) {
+                            # **`case` のアームの後ろは命令の位置。** `case "$X" in Linux) set +e` は
+                            # `;` で切れないので 1 つの断片に載り、`^set` では当たらない。
+                            # **アームの綴りは 2 通り**あり、POSIX では先頭に `(` を書ける
+                            # （`(Linux) set +e`）。1 文字足すだけで握り潰しが見えなくなるのを防ぐ
+                            # **断片のどこにある `set` でも拾ってはいけない。** 以前は語の切れ目なら
+                            # どこでも拾っていたが、それだと `echo Hint: run set +e first` のような
+                            # ただの言及まで握り潰しとして数え、ゲートしているステップを
+                            # 「未配線」と誤報して赤くする（実 bash と差分照合して実測）。
+                            # 判定は伏せた本文で行い（引用の中の `)` をアームと読まないため）、
+                            # 解析は生の本文で行う（伏せた本文では `set "+e"` の綴りを読めない。
+                            # 長さは保たれるので位置はそのまま使える）
+                            # **`case` の中でだけ探す。** 絞らないと、コマンド置換の `)` を
+                            # アームと読んで `echo $(date) set +e` の言及まで拾い、
+                            # ゲートしているステップを「未配線」と誤報する（実測）。
+                            # **この断片自身が `case` を開く場合も含める**——深さが増えるのは
+                            # 断片の末尾なので、1 行書き（`case $X in a) set +e`）はまだ 0 のまま
+                            set_masked = (case_depth > 0 || struct_text ~ /^case([[:space:]]|$)/) \
+                                         ? mask_quoted(struct_text) : ""
+                            # **`)` を 1 つずつ越えながら `set` を探す。** 1 つの正規表現で
+                            # 先頭から当てると、`case $(echo linux) in linux) set +e` のように
+                            # 主語にコマンド置換がある綴りで `$( … )` を食べて本物のアームを
+                            # 取り逃がす（実 bash と差分照合して実測）。丸括弧の組はまとめて越える
+                            # ので、`( set +e )` のような部分シェルは中身を跨いで終端の外へ出る
+                            # ＝ `set` に着地せず、これまでどおり反映しない
+                            set_arm = 0
+                            # `case` の外（`set_masked` が空）では走査するものが無い。
+                            # 回すと `set_command()` の剥がしを同じ本文に対して 2 度走らせるだけ
+                            # **初回は呼び出し側（`set_placed`）が既に空と判定済み**なので飛ばし、
+                            # 最初の `)` の先から見る。飛ばさないと同じ本文に対して
+                            # `set_command()` の剥がしをもう一度走らせるだけになる
+                            set_probe = ""
+                            while (set_masked != "" && set_arm <= length(set_masked)) {
+                                set_rest = substr(set_masked, set_arm + 1)
+                                # 次の `)` まで進める（丸括弧の組があれば組ごと）
+                                if (!match(set_rest, /^[^()]*\([^()]*\)[[:space:]]*/) \
+                                    && !match(set_rest, /^[^()]*\)[[:space:]]*/)) { set_arm = -1; break }
+                                # 1 文字も進まないなら打ち切る（無限ループ避け）
+                                if (RLENGTH < 1) { set_arm = -1; break }
+                                set_arm += RLENGTH
+                                # 進んだ先が命令の位置なら確定
+                                set_probe = set_command(substr(struct_text, set_arm + 1))
+                                if (set_probe != "") { break }
+                            }
+                            # ここへ来た時点で `set_probe` は、着地した `set …` か空のどちらか
+                            # （ループは着地したときだけ `break` し、それ以外は空のまま抜ける）
+                        }
+                        if (set_probe != "" && dead_depth < 0 && subshell == 0 && !set_forked && !unreachable) {
+                            # **`set` の反映は「どちらへ倒すか」で非対称にする（issue #113）。**
+                            # 制御構造の中（`uncertain > 0`）は走るか分からないが、`+` と `-` では
+                            # 分からないときに倒すべき先が逆になる:
+                            #   - ゲートを**強める**向き（`-e` / `-o errexit` / `-o pipefail`）を
+                            #     当て推量で反映すると、通らない分岐の `set -e` が握り潰しを隠す
+                            #     ＝**fail-open**。だから確実に走ると分かるときだけ反映する。
+                            #   - ゲートを**弱める**向き（`+e` / `+o errexit` / `+o pipefail`）を
+                            #     無視すると、実際には握り潰されているステップが「合否に効く」と
+                            #     読まれる＝これも**fail-open**。だから走るか分からなくても反映する。
+                            # 以前は両向きとも `uncertain == 0` を要求していたため後者が空いており、
+                            # `if [ -n "$CI" ]; then set +e; fi` の 3 行（`$CI` は Actions で常に真）で
+                            # スイートの失敗を握り潰したまま全表明を緑のまま通せた（実 bash と差分照合して実測）。
+                            # 代償として「通らないかもしれない分岐の `set +e`」は未配線と誤報しうるが、
+                            # そちらは CI が赤くなって人が見る**fail-closed** 側なので許容する。
+                            # **関数定義の本文は「その場では走らない」ので弱める向きも反映しない。**
+                            # `cleanup() { set +e; … }` は定義しただけでは何も起きず、反映すると
+                            # 実際にはゲートしている後続を「未配線」と誤報して CI を赤いままにする
+                            # （呼ばれた場合の握り潰しは、そもそも呼び出しの追跡をしていないので
+                            #   このライブラリの範囲外。main と同じ扱いに揃えてある）
+                            # 反映してよい条件は向きで違う。強める向きは、命令の位置に置けて・
+                            # 制御構造の外で・**連鎖に守られていない**ときだけ信用する。
+                            # `set +e` の後ろに `[ -z "$FORCE" ] && set -e` と書かれた場合、
+                            # この `set -e` は条件次第でしか走らないのに `uncertain` は 0 のままで、
+                            # 握り潰しを打ち消したように見えていた（実 bash と差分照合して実測）
+                            # **関数定義の本文は、その場では走らない。** 見出しの次に来る `{`
+                            # （`f()` → `{ set -e; }`）も本文の中なので、どちらの向きも反映しない。
+                            # 定義を開く断片そのもの（`function f { set +e; }`）はここへ来ない——
+                            # `set_command()` は関数見出しを剥がさないので `set_probe` が空になり、
+                            # このブロックに入らない（入る形が増えたら `set_command()` 側を直す）
+                            set_in_fndef = (fndef > 0 || was_pending_fndef)
+                            # **強める向きを信用するのは `set` が断片の先頭そのもののときだけ。**
+                            # 継続語や `{` を剥がして見つけた `set` は、剥がした側に
+                            # `{ if false` のような開き語が混ざっていることがあり、そのときの
+                            # `uncertain` は内側の入れ子をまだ数えていない（走らないブロックの
+                            # `set -e` を最上位の指定として credit してしまう。実 bash と差分照合して実測）。
+                            # 弱める向きは剥がした先でも反映する——見えた `set +e` を無視する側が
+                            # fail-open になるため。ここも「分からないときは弱い方」で揃える
+                            # **同じ階層で括った `set +e … set -e` は打ち消し合う。** 非対称の扱いは
+                            # 「通らない分岐の `set -e` が**外側**の握り潰しを隠す」ことへの備えなので、
+                            # 落としたのが同じ階層の `set +e` なら、戻す側も同じだけ条件付きであって
+                            # 隠すものが無い。ここを見ないと `for f in …; do set +e; check; set -e; done`
+                            # のような括りが「以降ずっと握り潰し」と読まれ、ゲートしているステップを
+                            # 「未配線」と誤報して CI を恒常的に赤くする（実 bash と差分照合して実測）
+                            # 同じ階層の括りを打ち消せるのは、その階層で自分が落としたときだけ
+                            # 強める向きに共通の前提（命令の位置・定義の外・連鎖に守られていない）
+                            strengthen_base = (set_probe == text && !set_in_fndef && prev_op != "&&" && prev_op != "||")
+                            # **括りの記録は errexit のものなので、errexit の判断にしか使わない**
+                            # （`apply_errexit()` の中で測る）。pipefail まで巻き込むと、無関係な
+                            # `set +e` が同じ階層で開いているだけで走らないループの中の
+                            # `set -o pipefail` が credit され、パイプ越しの失敗が伝わらない
+                            # ステップを「伝わる」と読む（fail-open。実測）。
+                            # pipefail には自前の括り記録が無いので、確実に走ると分かるときだけ
+                            strengthen_pipe_ok = (strengthen_base && uncertain == 0)
+                            # **`case` を開く断片に載ったアームの `set` は、本体の階層に属する。**
+                            # 深さが増えるのはこの断片の**末尾**なので、素直に `depth` で記録すると
+                            # 同じアームの後続（1 つ深い）の `set -e` が打ち消せず、
+                            # 正しくゲートしているステップを赤くする（複数行で書いた同じアームとも
+                            # 答えが食い違う。実 bash と差分照合して実測）
+                            set_depth = depth + ((struct_text ~ /^case([[:space:]]|$)/) ? 1 : 0)
+                            # 弱める向きは、定義の本文でなければ（＝走るかもしれない時点で）反映する
+                            weaken_ok = (!set_in_fndef)
+                            # **語を左から右へ順に適用する。** bash はそう解釈するので
+                            # `set +e -e` は後ろの `-e` が勝つ。1 本の正規表現で断片全体を見ると
+                            # この順序が落ち、ゲートしているステップを「未配線」と誤報して赤くする
+                            # **引用符は外してから語に切る。** `set "+e"` も `set '+e'` も
+                            # bash には `set +e` と同じで、外さないと綴りを読めず握り潰しを見落とす
+                            gsub(/["\047]/, "", set_probe)
+                            nsetw = split(set_probe, setw, /[[:space:]]+/)
+                            for (sw = 2; sw <= nsetw; sw++) {
+                                setopt = setw[sw]
+                                # **最初の非オプション語でそこから後ろは位置パラメータになる。**
+                                # `--` もここで落ちる（2 文字目が `[a-zA-Z]` ではないため）
+                                # 読み飛ばして続けると、`set +e foo -e` の `-e` を効いたものとして数え、
+                                # 実際には握り潰されているステップが「合否に効く」と読まれる（fail-open）
+                                # `-` / `+` で始まる短い綴りの並び（`-e` / `+ex` / `-euo`）だけを読む
+                                # **大文字も混ざる**（`-Eeuo pipefail` は定型句）。小文字だけを
+                                # 許すと語ごと捨ててしまい、`+eE` の握り潰しを見落とし、
+                                # `-Eeuo pipefail` ではゲートを「効いていない」と誤報する。
+                                # 拾うのは小文字の `e` / `o` だけなので、`E`（errtrace）とは混ざらない
+                                if (setopt !~ /^[-+][a-zA-Z]*$/) { break }
+                                # 先頭の記号が向きを決める（`-` で有効化、`+` で無効化）
+                                seton = (substr(setopt, 1, 1) == "-")
+                                # 記号を除いた残りが、まとめて書かれたオプション文字の並び
+                                setbody = substr(setopt, 2)
+                                # 並びのどこかに `e` があれば errexit の指定
+                                if (setbody ~ /e/) { errexit = apply_errexit(seton, strengthen_base, uncertain, weaken_ok, errexit, set_depth) }
+                                # **末尾が `o` なら次の語が長い綴りの名前**（`-o errexit` / `-euo pipefail`）。
+                                # 短い綴りだけを見ると、1 行でゲートを外したまま「ゲートしている」と読む
+                                # **`o` は並びのどこにあってもよい。** bash は `-oe pipefail` を
+                                # `-eo pipefail` と同じに扱う（末尾だけを見ると pipefail を取りこぼす）
+                                if (setbody ~ /o/ && sw < nsetw) {
+                                    # 名前の語を消費する（次の周回では読まない）
+                                    sw++
+                                    setname = setw[sw]
+                                    # `errexit` は失敗でその場で止まるかどうか
+                                    # **長い綴りでも同じ記録を残す。** 残さないと、`set +o errexit … set -o errexit` の
+                                    # 括りだけが打ち消せず、ゲートしているステップが「未配線」と誤報される
+                                    if (setname == "errexit") { errexit = apply_errexit(seton, strengthen_base, uncertain, weaken_ok, errexit, set_depth) }
+                                    # `pipefail` が立っていればパイプ越しでも失敗が伝わる
+                                    else if (setname == "pipefail") { pipefail = set_flag(seton, strengthen_pipe_ok, weaken_ok, pipefail) }
+                                }
+                            }
                         }
                         # 空の断片（`;;` や行頭の区切り）は記録しない
                         if (text == "") { continue }
@@ -1029,10 +1392,12 @@ ci_workflow_extract() {
                         closed_group_start = -1
                         if (text ~ /^(fi|done|esac|\})([[:space:]]|;|$)/ && depth > 0) {
                             if (uncertain_at[depth]) { uncertain--; uncertain_at[depth] = 0 }
-                            else if (group_start[depth] >= 1) { closed_group_start = group_start[depth] }
+                            if (group_start[depth] >= 1) { closed_group_start = group_start[depth] }
+                            if (fndef_at[depth]) { fndef--; fndef_at[depth] = 0 }
+                            true_at[depth] = 0
                             if (subshell_at[depth]) { subshell--; subshell_at[depth] = 0 }
                             group_start[depth] = -1
-                            depth--
+                            depth--; closed_any = 1
                         }
                         # **括弧は釣り合いで測る。** 閉じ側が断片の**先頭**に来るとは限らず、
                         # `( cd /tmp; echo hi )` のように末尾で閉じる書き方だと深さが戻らない
@@ -1043,20 +1408,37 @@ ci_workflow_extract() {
                         # 数えてしまうと `case` が開いた深さがその場で打ち消され、
                         # 一致しないアームの中身が「最上位で実行される」と読まれる（レビューで実測）
                         paren_probe = text
-                        if (case_depth > 0 && paren_probe ~ /^[^()]*\)([[:space:]]|;|$)/) {
-                            sub(/^[^()]*\)/, "", paren_probe)
+                        # 上で求めた判定を使い回す（`starts_case_arm()` は伏せ処理を伴うので、
+                        # 同じ断片で 2 度呼ばない。剥がす綴りも `starts_case_arm()` と揃える）
+                        if (set_arm_here) {
+                            sub(/^\(?[^()]*\)/, "", paren_probe)
+                        }
+                        # **アーム模様が `|` で切られた前半の `(` は部分シェルの開きではない。**
+                        # `split_commands` は `(a|q)` を `(a` と `q)` に切るので、素直に数えると
+                        # 釣り合いが崩れて幻の階層が開き、以降その断片の `set` がすべて
+                        # 「部分シェルの中」として無視され、`esac` は本物の階層ではなく
+                        # 幻の方を閉じる（以降の呼び出しが「未配線」に化ける。実測）
+                        else if (case_depth > 0 && ops[j] == "|" && paren_probe ~ /^\([^()]*$/) {
+                            sub(/^\(/, "", paren_probe)
                         }
                         paren = paren_delta(paren_probe)
                         if (paren < 0) {
                             # 括弧で閉じる分も、階層ごとの印を見て戻す
                             for (closing = 0; closing < -paren && depth > 0; closing++) {
                                 if (uncertain_at[depth]) { uncertain--; uncertain_at[depth] = 0 }
-                                else if (group_start[depth] >= 1) { closed_group_start = group_start[depth] }
+                                if (group_start[depth] >= 1) { closed_group_start = group_start[depth] }
+                                if (fndef_at[depth]) { fndef--; fndef_at[depth] = 0 }
+                                true_at[depth] = 0
                                 if (subshell_at[depth]) { subshell--; subshell_at[depth] = 0 }
                                 group_start[depth] = -1
-                                depth--
+                                depth--; closed_any = 1
                             }
                         }
+                        # 閉じたブロックの中で落とした記録は、外へ持ち出さない。
+                        # **実際に閉じた断片でだけ見る**のが要点で、無条件に比べると
+                        # `case … in y) set +e` のように「これから増える階層」へ記録した分を
+                        # 同じ断片の中で消してしまう（深さが増えるのは断片の末尾のため）
+                        if (closed_any && weak_depth > depth) { weak_depth = -1 }
                         # **条件がその場で偽と分かるブロックの中身は、どの照会からも証拠にしない。**
                         # 深さで除くのは実行の照会だけなので、`if false; then shellcheck $LIST; fi` は
                         # リンタの照合（ステップの形を見る側）を素通りしてしまう——2 行で lint を止められる
@@ -1073,9 +1455,6 @@ ci_workflow_extract() {
                         # 「直前が `||`／`&&` なら伝播を続ける」とだけ書くと、走る呼び出しを
                         # 「未配線」と事実と逆に診断して赤くする（レビューで実測）。
                         # 走らなかった断片は連鎖の状態を変えない（判定は最後に走った結果で決まる）
-                        if (prev_op != "||" && prev_op != "&&") { unreachable = 0; chain_status = "" }
-                        else if (prev_op == "&&") { unreachable = (chain_status == "f") }
-                        else { unreachable = (chain_status == "t") }
                         if (!unreachable && dead_depth < 0) {
                             if (text == "true" || text == ":") { chain_status = "t" }
                             else if (text == "false") { chain_status = "f" }
@@ -1086,8 +1465,21 @@ ci_workflow_extract() {
                         nbuf++
                         buf[nbuf] = step_id "\t" ops[j] "\t" ((dead_depth >= 0 || unreachable) ? 0 : errexit) "\t" pipefail "\t" uncertain "\t" text
                         # 偽と分かる条件のブロックに入るところを覚える（この深さより深い間は無効）
-                        if (dead_depth < 0 && text ~ /^(if|while)[[:space:]]+false([[:space:]]|;|$)/) { dead_depth = depth }
-                        else if (dead_depth < 0 && text ~ /^until[[:space:]]+true([[:space:]]|;|$)/) { dead_depth = depth }
+                        # **連鎖が続くなら条件は 1 語だけではない。** `split_commands` は `&&` / `||` で
+                        # 切るので、`if false || true; then` の断片は `if false` になる。素直に
+                        # 「必ず走らない」と印を付けると、実際には走る本体の `set +e` が捨てられ、
+                        # 握り潰されたスイートが「ゲートしている」と読まれる（fail-open。実測）。
+                        # **除くのは短絡で結論が変わりうる向きだけ**にする（無条件に除くと、
+                        # 本当に走らない `if false && true` の本体まで生きていると読んで
+                        # 正しくゲートしているステップを赤くする。実測で両向きを確認）:
+                        #   - 条件が偽（`if false` / `while false`）… `&&` はそのまま偽なので印を維持、
+                        #     `||` は右側で真になりうるので除く
+                        #   - 条件が真（`until true`）… `||` はそのまま真なので印を維持、
+                        #     `&&` は右側で偽になりうるので除く
+                        if (dead_depth < 0 && ops[j] != "||" \
+                            && struct_text ~ /^(if|while)[[:space:]]+false([[:space:]]|;|$)/) { dead_depth = depth }
+                        else if (dead_depth < 0 && ops[j] != "&&" \
+                                 && struct_text ~ /^until[[:space:]]+true([[:space:]]|;|$)/) { dead_depth = depth }
                         # **grouping を閉じた断片に付いた区切りは、その中身すべてに掛かる。**
                         # `( bash x ) || true` は中の `bash x` も「失敗が伝わらない」——
                         # 中身だけを見ると区切りが無いので「ゲートしている」と読まれる（レビューで実測）
@@ -1102,9 +1494,12 @@ ci_workflow_extract() {
                         }
                         # 次の断片から見た「直前」を控える
                         prev_op = ops[j]
+                        # 開く前の深さと `case` の入れ子を控える（下でパイプの中かどうかを印すのに使う）
+                        depth_before = depth
+                        case_before = case_depth
                         # 開き側はこの断片の後ろから効く（`if` 自身は外側の階層にある）
                         # `case` の入れ子を数えておく（上のパターン判定に使う）
-                        if (text ~ /^case([[:space:]]|$)/) { case_depth++ }
+                        if (struct_text ~ /^case([[:space:]]|$)/) { case_depth++ }
                         else if (text ~ /^esac([[:space:]]|;|$)/ && case_depth > 0) { case_depth-- }
                         # **「必ず走る入れ子」と「走るか分からない入れ子」を分ける。**
                         # `( … )` / `{ … }` の grouping と `if true` / `while true` の本体は必ず走るので、
@@ -1112,25 +1507,60 @@ ci_workflow_extract() {
                         # 一方 `if <条件>` / ループ / 関数定義の中身は、条件や呼び出し元を読まないと決まらない
                         # （両者を深さ 1 本で扱うと、grouping の中の呼び出しが「未配線」と誤報され、
                         #   通る分岐の `set +e` が握り潰しを隠す。どちらもレビューで実測）
-                        if (text ~ /^(if|while)[[:space:]]+(true|:)([[:space:]]|;|$)/) { depth++ }
-                        else if (text ~ /^(if|while|until|for|case|select)([[:space:]]|$)/) {
+                        # **連鎖が続くなら条件は `true` だけではない。** `split_commands` は `&&` で
+                        # 切るので `if true && [ -z "$SKIP" ]; then` の断片は `if true` になる。
+                        # 素直に「必ず走る」と読むと、2 トークン足すだけで走るとは限らない本体が
+                        # 「最上位で確実に走る」に化ける（実 bash と差分照合して実測。fail-open）
+                        if (struct_text ~ /^(if|while)[[:space:]]+(true|:)([[:space:]]|;|$)/ \
+                            && ops[j] != "&&" && ops[j] != "||") {
+                            depth++; true_at[depth] = 1
+                            # **必ず走る入れ子なので grouping と同じ扱い。** 開始位置を控えないと、
+                            # 閉じた `fi` / `done` に付いた `|| true` が中身へ伝わらず、
+                            # 握り潰された実行が「ゲートしている」と読まれる
+                            group_start[depth] = nbuf
+                        }
+                        else if (struct_text ~ /^(if|while|until|for|case|select)([[:space:]]|$)/) {
                             depth++; uncertain++; uncertain_at[depth] = 1
+                            # **閉じた `fi` / `done` に付いた区切りは中身すべてに掛かる。**
+                            # grouping と同じで、控えないと `fi || true` が本体へ伝わらず、
+                            # 握り潰された実行が「ゲートしている」と読まれる（実測）
+                            group_start[depth] = nbuf
                         }
                         # bash の `function name { … }` 形式（`()` を伴わない綴り）も 1 階層開く
-                        else if (text ~ /^function[[:space:]]+[A-Za-z_][A-Za-z0-9_]*([[:space:]]*\{)?$/) {
+                        else if (fn_form == 2) {
                             depth++; uncertain++; uncertain_at[depth] = 1
+                            fndef++; fndef_at[depth] = 1
                         }
-                        # 関数定義は `{` を伴う形だけを開き側に数える。`f()` と次行の `{` を
-                        # どちらも数えると 2 つ開いて 1 つしか閉じず、以降ずっと「入れ子の中」に見える
-                        else if (text ~ /^[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\(\)[[:space:]]*\{$/) {
-                            depth++; uncertain++; uncertain_at[depth] = 1
-                        }
+                        # 見出しだけの行は深さを動かさず、次の `{` を関数本体として予約する
+                        else if (fn_form == 1) { pending_fndef = 1 }
                         # **ブレースグループ（`cmd || { echo bad; exit 1; }`）も 1 階層開く。**
                         # 閉じ側の `}` だけを数えると深さが 1 つ足りなくなり、以降の断片が
                         # 「最上位」に見える——条件の中でしか走らない呼び出しが実行の証拠に化ける（レビューで実測）
                         # grouping（`{ … }` / `( … )`）は必ず走るので uncertain は増やさない。
                         # ただし**閉じたところに付く区切りは中身にも掛かる**ので、開始位置を控える
-                        else if (text ~ /^\{([[:space:]]|$)/) { depth++; group_start[depth] = nbuf }
+                        else if (struct_text ~ /^\{([[:space:]]|$)/) {
+                            depth++
+                            # 直前が関数の見出しなら、この `{` が本体の開き（走るとは限らない）
+                            if (was_pending_fndef) {
+                                uncertain++; uncertain_at[depth] = 1
+                                fndef++; fndef_at[depth] = 1
+                            }
+                            # そうでなければ素の grouping（必ず走るので uncertain は増やさない）
+                            else { group_start[depth] = nbuf }
+                        }
+                        # **パイプの構成要素として開いた複合コマンドは子シェルで走る。**
+                        # `echo x | while read -r l; do set +e; done` の `set +e` は親へ漏れないので、
+                        # 印を付けないと「走るかもしれない握り潰し」として反映し、
+                        # 実際にはゲートしているステップを「未配線」と誤報して赤くする
+                        # （`( … )` は釣り合いで拾えるが、パイプはこの経路でしか分からない）
+                        # **`case` の中と `case` を開く断片では見送る。** アーム模様の `|`
+                        # （`a|b)`）は選択肢の区切りであってパイプではなく、`split_commands` は
+                        # そこでも切るため、区別が付かない（見送る側は従来どおりの扱いに戻るだけ）
+                        if (depth > depth_before && (pipe_in || ops[j] == "|") \
+                            && case_before == 0 && struct_text !~ /^case([[:space:]]|$)/ \
+                            && !subshell_at[depth]) {
+                            subshell_at[depth] = 1; subshell++
+                        }
                         # 部分シェルの開き分（釣り合いの正側）を足す。
                         # **部分シェルであることを階層ごとに覚える**（中の `set` を外へ持ち出さない）
                         else if (paren > 0) {
@@ -1708,6 +2138,9 @@ ci_workflow_step_matches() {
 # `pipefail` の無いパイプ / `set +e` の下は、いずれもスイートを走らせはするが
 # **落ちても job を止めない**。効果は `continue-on-error: true` と同じで、しかも 1 トークン足すだけで済む
 # （このライブラリのヘッダが「削除より足す方が見落としやすい」と言っている当の形。レビューで実測）。
+# **`set +e` は制御構造の中に書かれていても数えない**（issue #113）。走るか分からない `set +e` を
+# 無視すると `if [ -n "$CI" ]; then set +e; fi` の 3 行で握り潰しを隠せるため、
+# 弱める向きだけは「走るかもしれない」時点で反映する（詳細は上の `set` の判定にあるコメント）。
 # 判定そのものは `ci_workflow_gating_commands` が持ち、ここは「コマンドの位置に現れるか」だけを見る。
 #
 # 第 1 引数がスクリプトのパス、第 2 引数（省略可）が絞り込むジョブ名。
