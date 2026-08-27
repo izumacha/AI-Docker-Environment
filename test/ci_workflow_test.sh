@@ -970,6 +970,99 @@ jobs:
           if true; then :; else set +e; fi
           bash ${SUITE_PATH}"
 
+# `elif` を挟んでも印は残る。**偽の解除を先に見ると**、直前に付けた
+# 「真と分かる条件だから走らない」印が 2 語足すだけで解除される
+assert_not_wired "真と分かる条件は elif を挟んでも残りのアームが走らない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          set +e
+          if true; then :; elif [ -n \"${DOLLAR}X\" ]; then :; else set -e; fi
+          bash ${SUITE_PATH}"
+
+# --- 子シェルで走る `set`（親のオプションは変わらない） ------------------------------
+
+# パイプの構成要素は子シェルなので、親の握り潰しは打ち消されない
+assert_not_wired "パイプの中の set -e は親の握り潰しを打ち消さない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          set +e
+          true | set -e
+          bash ${SUITE_PATH}"
+
+# バックグラウンドも同じく子シェル
+assert_not_wired "バックグラウンドの set -e は親の握り潰しを打ち消さない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          set +e
+          set -e &
+          wait
+          bash ${SUITE_PATH}"
+
+# --- 部分シェルの判定は「釣り合い」で行う ------------------------------------------
+
+# `case` のアームは POSIX で先頭に `(` を書ける。単に `(` の有無で部分シェルと
+# 見なすと、1 文字足すだけで握り潰しが見えなくなる
+assert_not_wired "先頭に ( を書いた case アームの set +e" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          set -e
+          case \"${DOLLAR}RUNNER_OS\" in
+          (Linux) set +e ;;
+          esac
+          bash ${SUITE_PATH}"
+
+# --- 引用符付きのオプション（bash には同じ意味） ------------------------------------
+
+assert_not_wired "set \"+e\" は set +e と同じ" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          set \"+e\"
+          bash ${SUITE_PATH}"
+
+# --- 1 行で書いた関数定義（本文はその場では走らない） -------------------------------
+
+# `{` の後ろに本文が続く綴りも定義として数える。数えないと、定義しただけの
+# `set +e` が外で走ったように扱われ、ゲートしているステップが赤くなる
+assert_wired "1 行の function f { set +e; } は定義しただけ" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          function f { set +e; }
+          bash ${SUITE_PATH}"
+
+assert_wired "1 行の f() { set +e; } も定義しただけ" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          bash ${SUITE_PATH}"
+
 assert_wired "コマンド置換は括弧の釣り合いを崩さない" "name: ci
 jobs:
   type-check:

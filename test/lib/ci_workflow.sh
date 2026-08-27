@@ -906,6 +906,19 @@ ci_workflow_extract() {
             return n
         }
 
+        # その断片が**関数定義を開く**かどうかを返す。`function f { … }` と `f() { … }` の
+        # 2 綴りを見る。**`{` の後ろに本文が続く 1 行書きも数える**のが要点で、
+        # 数えないと `function f { set +e; }` の `set +e` が定義の外で走ったように扱われ、
+        # 実際にはゲートしているステップを「未配線」と誤報して CI を赤いままにする。
+        # 開き側の深さ勘定と `set` の判定が**同じ答えを使う**ように、ここへ寄せてある
+        function opens_function(t) {
+            # `function` を伴う綴り（`{` は同じ行でも次の行でもよい）
+            if (t ~ /^function[[:space:]]+[A-Za-z_][A-Za-z0-9_]*([[:space:]]*\{)?([[:space:]]|$)/) { return 1 }
+            # `name() {` の綴り。**`{` を伴う形だけ**を開き側に数える（`f()` と次行の `{` を
+            # どちらも数えると 2 つ開いて 1 つしか閉じず、以降ずっと「入れ子の中」に見える）
+            return (t ~ /^[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\(\)[[:space:]]*\{([[:space:]]|$)/)
+        }
+
         # `set` のオプション 1 つ分の新しい値を返す。**向きごとに反映してよい条件が違う**（issue #113）。
         # `on` が真なら `-`（ゲートを強める）、偽なら `+`（弱める）。反映してよくなければ現在値を返す。
         # 短い綴りと長い綴りで同じ判断を書き写さないよう、ここ 1 か所に寄せてある
@@ -946,7 +959,7 @@ ci_workflow_extract() {
         # **ここでは出力しない**のが要点で、ジョブ単位の無効化キー（`if: false` 等）は
         # YAML のキー順が自由である以上 `steps:` の**後ろ**にも書ける。書いた時点で
         # 出力済みのステップは取り消せないため、ジョブ 1 つ分を溜めてから出す
-        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, set_probe, set_placed, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, strengthen_ok, weaken_ok) {
+        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, set_probe, set_placed, set_forked, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, strengthen_ok, weaken_ok) {
             # **シェルのオプションはステップごとにリセットする。** ステップは 1 つずつ
             # 別のシェルで走るので、前のステップの `set +e` / `pipefail` は引き継がれない。
             # **控えるのは `set` で明示された分だけ（-1 = 明示なし）。** シェルの既定と突き合わせるのは
@@ -1023,13 +1036,15 @@ ci_workflow_extract() {
                         # ただし走ることを証明したわけではないので `uncertain` は立てたままにし、
                         # 中の呼び出しは実行の証拠にしない（`elif` は条件が別物なので同じ扱い）
                         if (text ~ /^(else|elif)([[:space:]]|;|$)/ && depth > 0) {
-                            # 偽と分かる条件の else 側は**必ず走る**ので、偽の印を解除する
-                            if (dead_depth >= 0 && depth == dead_depth + 1) { dead_depth = -1 }
-                            # **真と分かる条件の else 側は逆に必ず走らない。** `if true` は
+                            # **真と分かる条件の残りのアームは、どれも必ず走らない。** `if true` は
                             # `uncertain` を立てない（本体は確実に走る）ので、印を付けないと
                             # else 側の中身が「最上位で確実に走る」ように見え、1 度も走らない
-                            # 呼び出しが実行の証拠に化ける（実 bash と差分照合して実測）
-                            else if (true_at[depth] && dead_depth < 0) { dead_depth = depth - 1 }
+                            # 呼び出しが実行の証拠に化ける（実 bash と差分照合して実測）。
+                            # **偽の解除より先に見る**のが要点で、順序を逆にすると
+                            # `elif` を 1 つ挟むだけで直前に付けた印が解除される
+                            if (true_at[depth]) { if (dead_depth < 0) { dead_depth = depth - 1 } }
+                            # 偽と分かる条件の else 側は逆に**必ず走る**ので、偽の印を解除する
+                            else if (dead_depth >= 0 && depth == dead_depth + 1) { dead_depth = -1 }
                         }
                         # **ブロックを開く語に続けて 1 行で書いた `set` も同じ `set`。**
                         # `split_commands` が `;` で切るので、`if …; then set +e; fi` の断片は
@@ -1048,6 +1063,10 @@ ci_workflow_extract() {
                         # 一方その場合でも弱める向きは反映する——綴りを網羅しきれない以上、
                         # 見えた `set +e` を無視する側が fail-open になるため（実測で 2 綴り漏れていた）
                         set_placed = (set_probe ~ /^set([[:space:]]|$)/)
+                        # **パイプの構成要素とバックグラウンドは子シェルで走る。** `true | set -e` も
+                        # `set -e &` も親のオプションは変えないので、どちらの向きも反映しない
+                        # （`prev_op` は手前の区切り、`ops[j]` は直後の区切り。実 bash と差分照合して実測）
+                        set_forked = (prev_op == "|" || ops[j] == "|" || ops[j] == "&")
                         if (!set_placed) {
                             # **引用符の中の言及は `set` ではない。** `echo "set +e"` を
                             # 反映すると、ゲートしているステップを「未配線」と誤報して赤くする
@@ -1056,15 +1075,20 @@ ci_workflow_extract() {
                                 # **手前に `(` があるなら部分シェルの中。** 子シェルのオプション変更は
                                 # 親へ漏れないので反映してはいけない。1 行で開いて閉じる `( set +e )` は
                                 # この時点でまだ `subshell` が増えていないため、下のガードでは間に合わない
-                                if (substr(set_probe, 1, RSTART) ~ /\(/) { set_probe = "" }
+                                # **釣り合いで測る。** 単に `(` の有無を見ると、`case` のアームを
+                                # POSIX の綴り（`(Linux) set +e`）で書いただけで部分シェルと誤判定し、
+                                # 1 文字足すだけで握り潰しが見えなくなる
+                                if (paren_delta(substr(set_probe, 1, RSTART)) > 0) { set_probe = "" }
                                 else {
-                                    # 見つけた位置から後ろだけを残す（区切り 1 文字分を落とす）
-                                    set_probe = substr(set_probe, RSTART)
+                                    # **解析は生の本文で行う。** 伏せた本文は引用符の中身が空白なので、
+                                    # 見つけるのには使えても `set "+e"` の綴りを読めない
+                                    # （長さは保たれるので位置はそのまま使える）
+                                    set_probe = substr(text, RSTART)
                                     if (set_probe !~ /^set[[:space:]]/) { set_probe = substr(set_probe, 2) }
                                 }
                             } else { set_probe = "" }
                         }
-                        if (set_probe ~ /^set([[:space:]]|$)/ && dead_depth < 0 && subshell == 0) {
+                        if (set_probe ~ /^set([[:space:]]|$)/ && dead_depth < 0 && subshell == 0 && !set_forked) {
                             # **`set` の反映は「どちらへ倒すか」で非対称にする（issue #113）。**
                             # 制御構造の中（`uncertain > 0`）は走るか分からないが、`+` と `-` では
                             # 分からないときに倒すべき先が逆になる:
@@ -1090,11 +1114,16 @@ ci_workflow_extract() {
                             # この `set -e` は条件次第でしか走らないのに `uncertain` は 0 のままで、
                             # 握り潰しを打ち消したように見えていた（実 bash と差分照合して実測）
                             strengthen_ok = (set_placed && uncertain == 0 && prev_op != "&&" && prev_op != "||")
-                            # 弱める向きは関数定義の本文でなければ（＝走るかもしれない時点で）反映する
-                            weaken_ok = (fndef == 0)
+                            # 弱める向きは関数定義の本文でなければ（＝走るかもしれない時点で）反映する。
+                            # **同じ断片が定義を開いている場合も本文の中**（`function f { set +e; }` は
+                            # 1 つの断片なので、`fndef` はまだ次の断片からしか立っていない）
+                            weaken_ok = (fndef == 0 && !opens_function(text))
                             # **語を左から右へ順に適用する。** bash はそう解釈するので
                             # `set +e -e` は後ろの `-e` が勝つ。1 本の正規表現で断片全体を見ると
                             # この順序が落ち、ゲートしているステップを「未配線」と誤報して赤くする
+                            # **引用符は外してから語に切る。** `set "+e"` も `set '+e'` も
+                            # bash には `set +e` と同じで、外さないと綴りを読めず握り潰しを見落とす
+                            gsub(/["\047]/, "", set_probe)
                             nsetw = split(set_probe, setw, /[[:space:]]+/)
                             for (sw = 2; sw <= nsetw; sw++) {
                                 setopt = setw[sw]
@@ -1162,7 +1191,6 @@ ci_workflow_extract() {
                                 else if (group_start[depth] >= 1) { closed_group_start = group_start[depth] }
                                 if (fndef_at[depth]) { fndef--; fndef_at[depth] = 0 }
                                 true_at[depth] = 0
-                            true_at[depth] = 0
                                 if (subshell_at[depth]) { subshell--; subshell_at[depth] = 0 }
                                 group_start[depth] = -1
                                 depth--
@@ -1228,13 +1256,7 @@ ci_workflow_extract() {
                             depth++; uncertain++; uncertain_at[depth] = 1
                         }
                         # bash の `function name { … }` 形式（`()` を伴わない綴り）も 1 階層開く
-                        else if (text ~ /^function[[:space:]]+[A-Za-z_][A-Za-z0-9_]*([[:space:]]*\{)?$/) {
-                            depth++; uncertain++; uncertain_at[depth] = 1
-                            fndef++; fndef_at[depth] = 1
-                        }
-                        # 関数定義は `{` を伴う形だけを開き側に数える。`f()` と次行の `{` を
-                        # どちらも数えると 2 つ開いて 1 つしか閉じず、以降ずっと「入れ子の中」に見える
-                        else if (text ~ /^[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\(\)[[:space:]]*\{$/) {
+                        else if (opens_function(text)) {
                             depth++; uncertain++; uncertain_at[depth] = 1
                             fndef++; fndef_at[depth] = 1
                         }
