@@ -971,7 +971,7 @@ ci_workflow_extract() {
         # **ここでは出力しない**のが要点で、ジョブ単位の無効化キー（`if: false` 等）は
         # YAML のキー順が自由である以上 `steps:` の**後ろ**にも書ける。書いた時点で
         # 出力済みのステップは取り消せないため、ジョブ 1 つ分を溜めてから出す
-        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_placed, set_forked, set_in_fndef, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, strengthen_ok, weaken_ok) {
+        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_placed, set_forked, set_masked, set_arm, set_in_fndef, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, strengthen_ok, weaken_ok) {
             # **シェルのオプションはステップごとにリセットする。** ステップは 1 つずつ
             # 別のシェルで走るので、前のステップの `set +e` / `pipefail` は引き継がれない。
             # **控えるのは `set` で明示された分だけ（-1 = 明示なし）。** シェルの既定と突き合わせるのは
@@ -1083,6 +1083,9 @@ ci_workflow_extract() {
                         # これを許してはいけない——`do` の中身が走るかは回数次第のため
                         set_probe = struct_text
                         while (sub(/^\{[[:space:]]+/, "", set_probe)) { }
+                        # **`builtin set` / `command set` は同じ組み込みをそのまま呼ぶ。**
+                        # 剥がさないと `^set` に当たらず、握り潰しを丸ごと見落とす
+                        while (sub(/^(builtin|command)[[:space:]]+/, "", set_probe)) { }
                         # **命令の位置に置けたか**で、その後の credit の仕方を変える。
                         # 置けたなら向きの判断に `uncertain` を使えるが、置けなかったとき
                         # （`case "$X" in Linux) set +e` のようなアームの中など）は
@@ -1104,25 +1107,33 @@ ci_workflow_extract() {
                             else { unreachable = (chain_status == "t") }
                         }
                         if (!set_placed) {
-                            # **引用符の中の言及は `set` ではない。** `echo "set +e"` を
-                            # 反映すると、ゲートしているステップを「未配線」と誤報して赤くする
-                            set_probe = mask_quoted(text)
-                            if (match(set_probe, /(^|[^[:alnum:]_])set[[:space:]]/)) {
-                                # **手前に `(` があるなら部分シェルの中。** 子シェルのオプション変更は
-                                # 親へ漏れないので反映してはいけない。1 行で開いて閉じる `( set +e )` は
-                                # この時点でまだ `subshell` が増えていないため、下のガードでは間に合わない
-                                # **釣り合いで測る。** 単に `(` の有無を見ると、`case` のアームを
-                                # POSIX の綴り（`(Linux) set +e`）で書いただけで部分シェルと誤判定し、
-                                # 1 文字足すだけで握り潰しが見えなくなる
-                                if (paren_delta(substr(set_probe, 1, RSTART)) > 0) { set_probe = "" }
-                                else {
-                                    # **解析は生の本文で行う。** 伏せた本文は引用符の中身が空白なので、
-                                    # 見つけるのには使えても `set "+e"` の綴りを読めない
-                                    # （長さは保たれるので位置はそのまま使える）
-                                    set_probe = substr(text, RSTART)
-                                    if (set_probe !~ /^set[[:space:]]/) { set_probe = substr(set_probe, 2) }
-                                }
-                            } else { set_probe = "" }
+                            # **`case` のアームの後ろは命令の位置。** `case "$X" in Linux) set +e` は
+                            # `;` で切れないので 1 つの断片に載り、`^set` では当たらない。
+                            # **アームの綴りは 2 通り**あり、POSIX では先頭に `(` を書ける
+                            # （`(Linux) set +e`）。1 文字足すだけで握り潰しが見えなくなるのを防ぐ
+                            # **断片のどこにある `set` でも拾ってはいけない。** 以前は語の切れ目なら
+                            # どこでも拾っていたが、それだと `echo Hint: run set +e first` のような
+                            # ただの言及まで握り潰しとして数え、ゲートしているステップを
+                            # 「未配線」と誤報して赤くする（実 bash と差分照合して実測）。
+                            # 判定は伏せた本文で行い（引用の中の `)` をアームと読まないため）、
+                            # 解析は生の本文で行う（伏せた本文では `set "+e"` の綴りを読めない。
+                            # 長さは保たれるので位置はそのまま使える）
+                            set_masked = mask_quoted(struct_text)
+                            set_arm = 0
+                            if (match(set_masked, /^\([^()]*\)[[:space:]]*/)) { set_arm = RLENGTH }
+                            else if (match(set_masked, /^[^()]*\)[[:space:]]*/)) { set_arm = RLENGTH }
+                            if (set_arm > 0 && substr(set_masked, set_arm + 1) ~ /^set([[:space:]]|$)/) {
+                                set_probe = substr(struct_text, set_arm + 1)
+                            }
+                            # **`eval` は現在のシェルで走る**ので、引数の `set` はそのまま効く。
+                            # 引用を外して中身を見ないと `eval "set +e"` の握り潰しを見落とす（fail-open）
+                            else if (struct_text ~ /^eval[[:space:]]/) {
+                                set_probe = struct_text
+                                sub(/^eval[[:space:]]+/, "", set_probe)
+                                gsub(/["\047]/, "", set_probe)
+                                if (set_probe !~ /^set([[:space:]]|$)/) { set_probe = "" }
+                            }
+                            else { set_probe = "" }
                         }
                         if (set_probe ~ /^set([[:space:]]|$)/ && dead_depth < 0 && subshell == 0 && !set_forked && !unreachable) {
                             # **`set` の反映は「どちらへ倒すか」で非対称にする（issue #113）。**

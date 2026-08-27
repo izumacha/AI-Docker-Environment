@@ -1216,6 +1216,63 @@ jobs:
           set +eE
           bash ${SUITE_PATH}"
 
+# --- 言及と実行の区別（`set` を断片のどこでも拾わない） ----------------------------
+
+# 引用符が無くてもただの言及は言及。語の切れ目ならどこでも拾う実装にすると、
+# ゲートしているステップを「未配線」と誤報して赤くする
+assert_wired "引用符の無い set +e の言及は実行ではない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          echo Hint: run set +e first
+          bash ${SUITE_PATH}"
+
+assert_wired "引数の --set +e は set の呼び出しではない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          printf '%s\\n' --set +e
+          bash ${SUITE_PATH}"
+
+# --- 同じ組み込みを呼ぶ書き方（現在のシェルで効く） --------------------------------
+
+# `eval` は現在のシェルで走るので、引用の中身も本物の `set`
+assert_not_wired "eval \"set +e\" は現在のシェルで効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          eval \"set +e\"
+          bash ${SUITE_PATH}"
+
+assert_not_wired "builtin set +e も同じ組み込み" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          builtin set +e
+          bash ${SUITE_PATH}"
+
+assert_not_wired "command set +e も同じ組み込み" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          command set +e
+          bash ${SUITE_PATH}"
+
 assert_wired "コマンド置換は括弧の釣り合いを崩さない" "name: ci
 jobs:
   type-check:
