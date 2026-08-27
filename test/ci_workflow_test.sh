@@ -1116,6 +1116,106 @@ jobs:
           false && set +e
           bash ${SUITE_PATH}"
 
+# --- 継続語と同じ断片に載った開き語（`;` で切ると本文の頭に来る） -------------------
+#
+# `split_commands` は `;` で切るので、`if …; then if false; …` の断片は `then if false`。
+# `^` で錨を打つ判定が継続語を剥がさないと、内側の `if false` が丸ごと見えず、
+# **走らないブロックの中の `set -e` が最上位で走ったように扱われる**（fail-open）
+
+assert_not_wired "1 行で入れ子にした if false の中の set -e は効かない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          set +e
+          if true; then if false; then set -e; fi; fi
+          bash ${SUITE_PATH}"
+
+assert_not_wired "1 行で入れ子にした while false の中の set -e は効かない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          set +e
+          if true; then while false; do set -e; done; fi
+          bash ${SUITE_PATH}"
+
+# ブレースグループと開き語が同じ断片に載る綴り。剥がした側に開き語が混ざるので、
+# **強める向きは断片の先頭そのもののときだけ**信用する
+assert_not_wired "ブレースグループの中に 1 行で入れ子にした if false" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          set +e
+          { if false; then set -e; fi; }
+          bash ${SUITE_PATH}"
+
+# `else` は**内側の if** に結び付く。外側の `if true` の印に吸われると、
+# 実際には走る set +e が握り潰しとして数えられない
+assert_not_wired "入れ子の else は内側の if に結び付く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          if true; then if false; then :; else set +e; fi; fi
+          bash ${SUITE_PATH}"
+
+# 継続語の後ろに書いた関数定義も定義（`opens_function` を剥がす前の本文で見ると外れる）
+assert_wired "then の後ろに書いた関数定義の中の set +e" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          if true; then f() { set +e; }; fi
+          bash ${SUITE_PATH}"
+
+# 見出しの次の行が `{ set -e; }` の綴り。予約の消費を set の判定より後に置くと、
+# まだ fndef が立っていない状態で定義の本文を最上位のコードとして読む
+assert_not_wired "見出しの次の行の { set -e; } は定義の本文" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          set +e
+          f()
+          { set -e; }
+          bash ${SUITE_PATH}"
+
+# --- 大文字を含むオプション（`-Eeuo pipefail` は定型句） ---------------------------
+
+assert_wired "set -Eeuo pipefail は errexit も pipefail も立てる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          set -Eeuo pipefail
+          bash ${SUITE_PATH} | tee log"
+
+assert_not_wired "set +eE は errexit を落とす" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          set +eE
+          bash ${SUITE_PATH}"
+
 assert_wired "コマンド置換は括弧の釣り合いを崩さない" "name: ci
 jobs:
   type-check:

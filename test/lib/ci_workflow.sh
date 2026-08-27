@@ -906,11 +906,6 @@ ci_workflow_extract() {
             return n
         }
 
-        # その断片が**関数定義を開く**かどうかを返す。`function f { … }` と `f() { … }` の
-        # 2 綴りを見る。**`{` の後ろに本文が続く 1 行書きも数える**のが要点で、
-        # 数えないと `function f { set +e; }` の `set +e` が定義の外で走ったように扱われ、
-        # 実際にはゲートしているステップを「未配線」と誤報して CI を赤いままにする。
-        # 開き側の深さ勘定と `set` の判定が**同じ答えを使う**ように、ここへ寄せてある
         # その断片が**関数定義の見出しだけ**（`{` は次の行）かどうかを返す。
         # 見出しと次の行の `{` を**どちらも開き側に数えると 2 つ開いて 1 つしか閉じず**、
         # 以降ずっと「入れ子の中」に見える（深さも `fndef` も戻らないので、後続の呼び出しが
@@ -923,6 +918,11 @@ ci_workflow_extract() {
             return (t ~ /^[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\(\)[[:space:]]*$/)
         }
 
+        # その断片が**関数定義を開く**かどうかを返す。`function f { … }` と `f() { … }` の
+        # 2 綴りを見る。**`{` の後ろに本文が続く 1 行書きも数える**のが要点で、
+        # 数えないと `function f { set +e; }` の `set +e` が定義の外で走ったように扱われ、
+        # 実際にはゲートしているステップを「未配線」と誤報して CI を赤いままにする。
+        # 開き側の深さ勘定と `set` の判定が**同じ答えを使う**ように、ここへ寄せてある
         function opens_function(t) {
             # `function` を伴う綴り（`{` は同じ行でも次の行でもよい）
             if (t ~ /^function[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\{([[:space:]]|$)/) { return 1 }
@@ -971,7 +971,7 @@ ci_workflow_extract() {
         # **ここでは出力しない**のが要点で、ジョブ単位の無効化キー（`if: false` 等）は
         # YAML のキー順が自由である以上 `steps:` の**後ろ**にも書ける。書いた時点で
         # 出力済みのステップは取り消せないため、ジョブ 1 つ分を溜めてから出す
-        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, set_probe, set_placed, set_forked, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, strengthen_ok, weaken_ok) {
+        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_placed, set_forked, set_in_fndef, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, strengthen_ok, weaken_ok) {
             # **シェルのオプションはステップごとにリセットする。** ステップは 1 つずつ
             # 別のシェルで走るので、前のステップの `set +e` / `pipefail` は引き継がれない。
             # **控えるのは `set` で明示された分だけ（-1 = 明示なし）。** シェルの既定と突き合わせるのは
@@ -1063,11 +1063,26 @@ ci_workflow_extract() {
                         # `then set +e` になる。`^set` だけで探すと当たらず、**同じ意味を 1 行で
                         # 書き直すだけで**握り潰しが見えなくなる（`{ set +e; }` に至っては
                         # 無条件に走るのに丸ごと見落とす。実 bash と差分照合して実測）。
+                        # **構造の判定に使う本文。** `split_commands` は `;` で切るので
+                        # `if …; then if false; then …` の断片は `then if false` になる。
+                        # `^` で錨を打つ判定（深さ・関数定義・偽と分かる条件）が継続語を
+                        # 剥がさないままだと、内側の `if false` が丸ごと見えず、**走らない
+                        # ブロックの中の `set -e` が最上位で走ったように扱われる**（fail-open。
+                        # 実 bash と差分照合して実測）。剥がすのは**それ自身は階層を開かない**
+                        # 継続語だけで、`{` は残す（`{` は 1 階層開くので、剥がすと勘定が合わない）
+                        struct_text = text
+                        while (sub(/^(then|else|do)[[:space:]]+/, "", struct_text)) { }
+                        # 見出しの予約は**次の 1 断片だけ**有効（`{` 以外が来たら消える）。
+                        # **`set` の判定より前に**確定させるのが要点で、後ろに置くと
+                        # `f()` と次行の `{ set -e; }` で、まだ `fndef` が立っていない状態のまま
+                        # 定義の本文を最上位のコードとして読む（fail-open。実 bash と差分照合して実測）
+                        was_pending_fndef = pending_fndef
+                        if (struct_text != "") { pending_fndef = 0 }
                         # 本文の先頭に立ちうる語を**繰り返し**剥がす（`then { set +e; }` のように
                         # 入れ子になるため 1 つでは足りない）。`ci_workflow_runs_script` 側は
                         # これを許してはいけない——`do` の中身が走るかは回数次第のため
-                        set_probe = text
-                        while (sub(/^(then|else|do|\{)[[:space:]]+/, "", set_probe)) { }
+                        set_probe = struct_text
+                        while (sub(/^\{[[:space:]]+/, "", set_probe)) { }
                         # **命令の位置に置けたか**で、その後の credit の仕方を変える。
                         # 置けたなら向きの判断に `uncertain` を使えるが、置けなかったとき
                         # （`case "$X" in Linux) set +e` のようなアームの中など）は
@@ -1134,11 +1149,20 @@ ci_workflow_extract() {
                             # `set +e` の後ろに `[ -z "$FORCE" ] && set -e` と書かれた場合、
                             # この `set -e` は条件次第でしか走らないのに `uncertain` は 0 のままで、
                             # 握り潰しを打ち消したように見えていた（実 bash と差分照合して実測）
-                            strengthen_ok = (set_placed && uncertain == 0 && prev_op != "&&" && prev_op != "||")
-                            # 弱める向きは関数定義の本文でなければ（＝走るかもしれない時点で）反映する。
-                            # **同じ断片が定義を開いている場合も本文の中**（`function f { set +e; }` は
-                            # 1 つの断片なので、`fndef` はまだ次の断片からしか立っていない）
-                            weaken_ok = (fndef == 0 && !opens_function(text))
+                            # **関数定義の本文は、その場では走らない。** 定義を開く断片そのもの
+                            # （`function f { set +e; }`）と、見出しの次に来る `{`（`f()` → `{ set -e; }`）も
+                            # 本文の中なので、どちらの向きも反映しない
+                            set_in_fndef = (fndef > 0 || was_pending_fndef || opens_function(struct_text))
+                            # **強める向きを信用するのは `set` が断片の先頭そのもののときだけ。**
+                            # 継続語や `{` を剥がして見つけた `set` は、剥がした側に
+                            # `{ if false` のような開き語が混ざっていることがあり、そのときの
+                            # `uncertain` は内側の入れ子をまだ数えていない（走らないブロックの
+                            # `set -e` を最上位の指定として credit してしまう。実 bash と差分照合して実測）。
+                            # 弱める向きは剥がした先でも反映する——見えた `set +e` を無視する側が
+                            # fail-open になるため。ここも「分からないときは弱い方」で揃える
+                            strengthen_ok = (set_probe == text && uncertain == 0 && !set_in_fndef && prev_op != "&&" && prev_op != "||")
+                            # 弱める向きは、定義の本文でなければ（＝走るかもしれない時点で）反映する
+                            weaken_ok = (!set_in_fndef)
                             # **語を左から右へ順に適用する。** bash はそう解釈するので
                             # `set +e -e` は後ろの `-e` が勝つ。1 本の正規表現で断片全体を見ると
                             # この順序が落ち、ゲートしているステップを「未配線」と誤報して赤くする
@@ -1151,7 +1175,11 @@ ci_workflow_extract() {
                                 # `--` から後ろは位置パラメータであってオプションではない
                                 if (setopt == "--") { break }
                                 # `-` / `+` で始まる短い綴りの並び（`-e` / `+ex` / `-euo`）だけを読む
-                                if (setopt !~ /^[-+][a-z]*$/) { continue }
+                                # **大文字も混ざる**（`-Eeuo pipefail` は定型句）。小文字だけを
+                                # 許すと語ごと捨ててしまい、`+eE` の握り潰しを見落とし、
+                                # `-Eeuo pipefail` ではゲートを「効いていない」と誤報する。
+                                # 拾うのは小文字の `e` / `o` だけなので、`E`（errtrace）とは混ざらない
+                                if (setopt !~ /^[-+][a-zA-Z]*$/) { continue }
                                 # 先頭の記号が向きを決める（`-` で有効化、`+` で無効化）
                                 seton = (substr(setopt, 1, 1) == "-")
                                 # 記号を除いた残りが、まとめて書かれたオプション文字の並び
@@ -1175,9 +1203,6 @@ ci_workflow_extract() {
                         }
                         # 空の断片（`;;` や行頭の区切り）は記録しない
                         if (text == "") { continue }
-                        # 見出しの予約は**次の 1 断片だけ**有効（`{` 以外が来たら消える）
-                        was_pending_fndef = pending_fndef
-                        pending_fndef = 0
                         # **制御構造の深さを追う。** `if` / `while` / `for` / `case` / 関数定義の中身は
                         # 条件や呼び出し元を読まないと実行されるか分からない。1 行で書かれた
                         # `if false; then bash x; fi` は `then` を実行ラッパに入れないことで弾けていたが、
@@ -1246,8 +1271,8 @@ ci_workflow_extract() {
                         nbuf++
                         buf[nbuf] = step_id "\t" ops[j] "\t" ((dead_depth >= 0 || unreachable) ? 0 : errexit) "\t" pipefail "\t" uncertain "\t" text
                         # 偽と分かる条件のブロックに入るところを覚える（この深さより深い間は無効）
-                        if (dead_depth < 0 && text ~ /^(if|while)[[:space:]]+false([[:space:]]|;|$)/) { dead_depth = depth }
-                        else if (dead_depth < 0 && text ~ /^until[[:space:]]+true([[:space:]]|;|$)/) { dead_depth = depth }
+                        if (dead_depth < 0 && struct_text ~ /^(if|while)[[:space:]]+false([[:space:]]|;|$)/) { dead_depth = depth }
+                        else if (dead_depth < 0 && struct_text ~ /^until[[:space:]]+true([[:space:]]|;|$)/) { dead_depth = depth }
                         # **grouping を閉じた断片に付いた区切りは、その中身すべてに掛かる。**
                         # `( bash x ) || true` は中の `bash x` も「失敗が伝わらない」——
                         # 中身だけを見ると区切りが無いので「ゲートしている」と読まれる（レビューで実測）
@@ -1264,7 +1289,7 @@ ci_workflow_extract() {
                         prev_op = ops[j]
                         # 開き側はこの断片の後ろから効く（`if` 自身は外側の階層にある）
                         # `case` の入れ子を数えておく（上のパターン判定に使う）
-                        if (text ~ /^case([[:space:]]|$)/) { case_depth++ }
+                        if (struct_text ~ /^case([[:space:]]|$)/) { case_depth++ }
                         else if (text ~ /^esac([[:space:]]|;|$)/ && case_depth > 0) { case_depth-- }
                         # **「必ず走る入れ子」と「走るか分からない入れ子」を分ける。**
                         # `( … )` / `{ … }` の grouping と `if true` / `while true` の本体は必ず走るので、
@@ -1272,23 +1297,23 @@ ci_workflow_extract() {
                         # 一方 `if <条件>` / ループ / 関数定義の中身は、条件や呼び出し元を読まないと決まらない
                         # （両者を深さ 1 本で扱うと、grouping の中の呼び出しが「未配線」と誤報され、
                         #   通る分岐の `set +e` が握り潰しを隠す。どちらもレビューで実測）
-                        if (text ~ /^(if|while)[[:space:]]+(true|:)([[:space:]]|;|$)/) { depth++; true_at[depth] = 1 }
-                        else if (text ~ /^(if|while|until|for|case|select)([[:space:]]|$)/) {
+                        if (struct_text ~ /^(if|while)[[:space:]]+(true|:)([[:space:]]|;|$)/) { depth++; true_at[depth] = 1 }
+                        else if (struct_text ~ /^(if|while|until|for|case|select)([[:space:]]|$)/) {
                             depth++; uncertain++; uncertain_at[depth] = 1
                         }
                         # bash の `function name { … }` 形式（`()` を伴わない綴り）も 1 階層開く
-                        else if (opens_function(text)) {
+                        else if (opens_function(struct_text)) {
                             depth++; uncertain++; uncertain_at[depth] = 1
                             fndef++; fndef_at[depth] = 1
                         }
                         # 見出しだけの行は深さを動かさず、次の `{` を関数本体として予約する
-                        else if (function_header(text)) { pending_fndef = 1 }
+                        else if (function_header(struct_text)) { pending_fndef = 1 }
                         # **ブレースグループ（`cmd || { echo bad; exit 1; }`）も 1 階層開く。**
                         # 閉じ側の `}` だけを数えると深さが 1 つ足りなくなり、以降の断片が
                         # 「最上位」に見える——条件の中でしか走らない呼び出しが実行の証拠に化ける（レビューで実測）
                         # grouping（`{ … }` / `( … )`）は必ず走るので uncertain は増やさない。
                         # ただし**閉じたところに付く区切りは中身にも掛かる**ので、開始位置を控える
-                        else if (text ~ /^\{([[:space:]]|$)/) {
+                        else if (struct_text ~ /^\{([[:space:]]|$)/) {
                             depth++
                             # 直前が関数の見出しなら、この `{` が本体の開き（走るとは限らない）
                             if (was_pending_fndef) {
