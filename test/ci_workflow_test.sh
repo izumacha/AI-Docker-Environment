@@ -1715,6 +1715,23 @@ jobs:
           bash ${SUITE_PATH}
           MARK"
 
+# **前の手順の名前に書かれた区切り文字が、後ろの手順の実行を消してはいけない。**
+# 上の構造行の契約が守る規則を、消費側（配線の検査）から見た形でも押さえる。
+# ブロック形式の平文にある `,` の直後のアポストロフィを引用スカラーの開始と読むと、
+# 閉じない引用が次の行以降へ引き継がれて `run: |` が本文として扱われなくなり、
+# **本文に書かれた検証コマンドが抽出から丸ごと消える**（実測で `not-wired` に化けた）。
+# 手順名は PyYAML が 1 つの平文として読む、なんの変哲もない文字列
+assert_wired "前の手順名の読点とアポストロフィは後ろの手順の実行を消さない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Build image, 'tis the slow step
+        run: echo build
+      - name: subject
+        run: |
+          bash ${SUITE_PATH}"
+
 # --- 構造行の書き出し（`emit_structural_lines`）の契約 -----------------------------
 #
 # **この共有トークナイザの規則を、消費側の正規表現越しでなく直接固定する。**
@@ -2145,6 +2162,56 @@ jobs:
             uses: actions/checkout@v7
             more string
           d'"'"'' 9
+
+# **ブロック形式では `{` `[` `,` は構造ではなく、ただの平文。** これらを無条件に
+# 「値が始まりうる位置」と読むと、素のスカラーの中の引用符（`Build image, '"'"'tis the slow step` の
+# アポストロフィ）が引用スカラーの開始に化ける。その引用は行内で閉じないので
+# **複数行スカラーとして次の行以降へ引き継がれ**、以降の行がすべて「続き」扱いになる。
+# すると `run: |` がブロックスカラーとして認識されなくなり、本文が構造として漏れ出す
+# （実測: 本文の `uses: …@v1` が幻の参照として報告され、同時に本文の検証コマンドが
+# 抽出から消えて「配線されていない」と判定された。**両方向に壊れる**）。
+# PyYAML はこの手順名を 1 つの平文 `Build image, 'tis the slow step` として読む。
+#
+# 3 つの区切り文字それぞれで押さえる（1 つだけ直しても他の 2 つで同じ穴が開くため）
+for tight_case in "読点" "Build image, 'tis the slow step" \
+                  "波括弧" 'Compare {a, "b} against c' \
+                  "角括弧" "Compare [a, 'b] against c"; do
+    # 2 語で 1 組なので、名前を控えたら次の回で本文を受け取る
+    if [ -z "${tight_label-}" ]; then tight_label="${tight_case}"; continue; fi
+    # ブロック形式の平文を手順名に持つワークフローを組み立てる
+    tight_body="name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: ${tight_case}
+      - run: |
+          uses: actions/evil@v1
+      - uses: ./other"
+    # ブロックスカラーの本文（8 行目）は構造ではないので、1 行も書き出されてはいけない
+    assert_structural_line "ブロック形式の${tight_label}の直後の引用符は開始と認めない" \
+        '' "${tight_body}" 8
+    # 同じ入力で後続の構造行が出ること（上の空文字が「解析器が止まった」の裏返しにならないように）
+    assert_structural_line "ブロック形式の${tight_label}に足を取られても後続の構造行は出る" \
+        '      - uses: ./other' "${tight_body}" 9
+    # 次の組のために名前を空へ戻す
+    tight_label=""
+done
+# ループで使った作業変数は後続のケースへ持ち越さない
+unset tight_case tight_label tight_body
+
+# **逆に、フロー形式の中の区切りの直後は今までどおり開始と認める。** 上の修正を
+# 「`{` `[` `,` を開始位置から外す」で済ませると、`{name: a, "b, uses: policy": c}` の
+# 引用の中の読点が伏せられなくなり、**幻の参照 `policy`**（issue #93 の 2 件目）が戻る。
+# PyYAML はこの入力を `{'name': 'a', 'b, uses: policy': 'c'}` と読む＝読点は値の一部
+assert_structural_line "フロー形式の中の読点の直後は引用スカラーの開始と認める" \
+    '      - {name: a, b~ uses: policy: c}' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - {name: a, "b, uses: policy": c}' 6
 
 # **引用符は 1 つも書き出さない。** 消費側（`scan_workflow_structure`）はこの前提のもとで
 # `"permissions":` と `permissions:` を同じ形として扱っている。ここが崩れると、崩れ方は
