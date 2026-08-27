@@ -1168,7 +1168,13 @@ ci_workflow_extract() {
                         # 読むと、生きている括りの記録を捨てて正しくゲートしているステップを赤くする
                         # この断片で実際に階層を閉じたか（下の記録の捨て方に使う）
                         closed_any = 0
-                        set_arm_here = (case_depth > 0 && starts_case_arm(struct_text))
+                        # **部分シェルの中ではアーム見出しと読まない。** `split_commands` は
+                        # 括弧に関係なく `;` で切るので、`( cd /tmp; echo prep )` の後半は
+                        # `echo prep )` という断片になる。これをアーム見出しとして剥がすと
+                        # 閉じ括弧が釣り合いから消え、`subshell` が 0 に戻らないまま
+                        # 以降の `set +e` がすべて「子シェルの中」として無視される
+                        # （握り潰されたコマンドが「ゲートしている」と読まれる。main も同じ挙動）
+                        set_arm_here = (case_depth > 0 && subshell == 0 && starts_case_arm(struct_text))
                         # **別の `case` アームへ移ったら、この階層の括りの記録は捨てる。**
                         # アーム同士は排他なので、`*)` の `set -e` は `linux*)` の `set +e` を
                         # 打ち消さない（`else` / `elif` と同じ理屈。複数行で書いたときは
@@ -1239,7 +1245,8 @@ ci_workflow_extract() {
                             set_arm = 0
                             while (set_arm <= length(set_masked)) {
                                 # ここが命令の位置なら確定
-                                if (set_command(substr(struct_text, set_arm + 1)) != "") { break }
+                                set_probe = set_command(substr(struct_text, set_arm + 1))
+                                if (set_probe != "") { break }
                                 set_rest = substr(set_masked, set_arm + 1)
                                 # 次の `)` まで進める（丸括弧の組があれば組ごと）
                                 if (!match(set_rest, /^[^()]*\([^()]*\)[[:space:]]*/) \
@@ -1248,10 +1255,8 @@ ci_workflow_extract() {
                                 if (RLENGTH < 1) { set_arm = -1; break }
                                 set_arm += RLENGTH
                             }
-                            if (set_arm > 0 && set_arm <= length(set_masked)) {
-                                set_probe = set_command(substr(struct_text, set_arm + 1))
-                            }
-                            else { set_probe = "" }
+                            # 走査が `set` に着地していなければ、この断片に `set` は無い
+                            if (set_arm < 1 || set_arm > length(set_masked)) { set_probe = "" }
                         }
                         if (set_probe != "" && dead_depth < 0 && subshell == 0 && !set_forked && !unreachable) {
                             # **`set` の反映は「どちらへ倒すか」で非対称にする（issue #113）。**

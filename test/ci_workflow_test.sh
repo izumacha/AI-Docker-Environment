@@ -1924,6 +1924,24 @@ jobs:
           echo ${DOLLAR}(date) set +e
           bash ${SUITE_PATH}"
 
+# 部分シェルの中の `)` はアーム見出しではなく閉じ括弧。アームとして剥がすと
+# 釣り合いから消え、`subshell` が 0 に戻らないまま以降の `set +e` が
+# すべて「子シェルの中」として無視される（握り潰しが「ゲート」に化ける）
+assert_not_wired "case アームの中の部分シェルを閉じた後の set +e" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case \"${DOLLAR}RUNNER_OS\" in
+            Linux)
+              ( cd /tmp; echo prep )
+              set +e
+              ;;
+          esac
+          bash ${SUITE_PATH}"
+
 assert_wired "コマンド置換は括弧の釣り合いを崩さない" "name: ci
 jobs:
   type-check:
