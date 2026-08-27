@@ -993,7 +993,7 @@ ci_workflow_extract() {
         # **ここでは出力しない**のが要点で、ジョブ単位の無効化キー（`if: false` 等）は
         # YAML のキー順が自由である以上 `steps:` の**後ろ**にも書ける。書いた時点で
         # 出力済みのステップは取り消せないため、ジョブ 1 つ分を溜めてから出す
-        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_placed, set_forked, set_masked, set_arm, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, set_in_fndef, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, strengthen_ok, weaken_ok) {
+        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_placed, set_forked, set_masked, set_arm, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, set_in_fndef, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok) {
             # **シェルのオプションはステップごとにリセットする。** ステップは 1 つずつ
             # 別のシェルで走るので、前のステップの `set +e` / `pipefail` は引き継がれない。
             # **控えるのは `set` で明示された分だけ（-1 = 明示なし）。** シェルの既定と突き合わせるのは
@@ -1168,9 +1168,6 @@ ci_workflow_extract() {
                             # 解析は生の本文で行う（伏せた本文では `set "+e"` の綴りを読めない。
                             # 長さは保たれるので位置はそのまま使える）
                             set_masked = mask_quoted(struct_text)
-                            set_arm = 0
-                            # 丸括弧付きのアームは `case … in` と同じ行にも書ける（`case $X in (a) set +e`）。
-                            # 先頭固定で探すと 1 行書きのときだけ外れる
                             # **`)` を 1 つずつ越えながら `set` を探す。** 1 つの正規表現で
                             # 先頭から当てると、`case $(echo linux) in linux) set +e` のように
                             # 主語にコマンド置換がある綴りで `$( … )` を食べて本物のアームを

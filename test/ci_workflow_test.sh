@@ -1593,6 +1593,46 @@ jobs:
           done
           bash ${SUITE_PATH}"
 
+# 括りの記録は**閉じた階層の外へ持ち出さない**。持ち出すと、別のブロックの
+# `set -e` が深さの数字だけで一致して打ち消しを成立させる（複数行で書くと
+# `set_probe == text` の条件も満たしてしまうので、これが最後の砦になる）
+assert_not_wired "閉じたブロックの括り記録は次のブロックへ持ち越さない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          if [ -n \"${DOLLAR}A\" ]; then
+            set +e
+          fi
+          if [ -n \"${DOLLAR}B\" ]; then
+            set -e
+          fi
+          bash ${SUITE_PATH}"
+
+# `case` の入れ子数も**継続語を剥がした本文**で数える。`then case … in` の断片で
+# 数え損ねると、アーム模様の `|` がパイプと読まれてアームの中の `set +e` が丸ごと落ちる
+assert_not_wired "継続語の後ろに書いた case のアーム模様も選択肢と読む" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          if true; then case \"${DOLLAR}X\" in a|b) set +e ;; esac; fi
+          bash ${SUITE_PATH}"
+
+assert_not_wired "ループの中に書いた case でも同じ" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          for f in x; do case \"${DOLLAR}X\" in a|b) set +e ;; esac; done
+          bash ${SUITE_PATH}"
+
 assert_wired "コマンド置換は括弧の釣り合いを崩さない" "name: ci
 jobs:
   type-check:
