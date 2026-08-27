@@ -1063,6 +1063,59 @@ jobs:
           f() { set +e; }
           bash ${SUITE_PATH}"
 
+# 見出しと `{` が別の行に分かれた綴りも定義。**どちらも開き側に数えると**
+# 2 つ開いて 1 つしか閉じず、以降ずっと入れ子の中に見える（深さも fndef も戻らないので、
+# 後続の呼び出しが「未配線」と誤報され、後続の set +e も黙って無視される）
+assert_wired "function 見出しの次の行の { も 1 階層だけ開く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          function f
+          {
+            :
+          }
+          bash ${SUITE_PATH}"
+
+assert_wired "見出しが別行の関数の中の set +e は定義しただけ" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f()
+          {
+            set +e
+          }
+          bash ${SUITE_PATH}"
+
+# --- 連鎖の届かない `set`（1 度も走らない） ----------------------------------------
+
+# `true || set +e` の右は走らないので、握り潰しとして数えてはいけない。
+# 数えると、実際にはゲートしているステップを「未配線」と誤報して赤くする
+assert_wired "true || set +e は 1 度も走らない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          true || set +e
+          bash ${SUITE_PATH}"
+
+assert_wired "false && set +e も 1 度も走らない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          false && set +e
+          bash ${SUITE_PATH}"
+
 assert_wired "コマンド置換は括弧の釣り合いを崩さない" "name: ci
 jobs:
   type-check:
