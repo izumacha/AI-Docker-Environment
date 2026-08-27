@@ -628,7 +628,32 @@ jobs:
           fi
           bash ${SUITE_PATH}"
 
-assert_wired "通るとは限らない分岐の set +e で誤報しない" "name: ci
+# --- 制御構造の中の `set`（issue #113。`+` と `-` を非対称に扱う） -------------------
+#
+# 穴の側と締めすぎの側を対で置く。期待値は実 bash との差分照合で確かめてある
+# （`bash -e` で走らせ、スイート呼び出しの**後ろに置いた成功コマンドまで届くか**という
+#  副作用で判定する。`set +e` は「落ちても続行」であって最後の終了コードを捨てはしないので、
+#  呼び出しが最終行のままだと握り潰されていても script は 1 で終わり、両者を区別できない）。
+
+# 穴の側: `$CI` は GitHub Actions で**常に設定されている**ので、この `set +e` は必ず走る。
+# 以前はこれを「走るか分からない」として無視しており、3 行足すだけでスイートの失敗を
+# 握り潰しながら全表明を緑のまま通せた（`continue-on-error: true` と同じ効果）
+assert_not_wired "通るか分からない分岐の set +e も握り潰しとして数える" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          if [ -n \"${DOLLAR}CI\" ]; then
+            set +e
+          fi
+          bash ${SUITE_PATH}"
+
+# 締めすぎの側（許容している代償）: この分岐は通らないかもしれないので、実際には
+# ゲートしている可能性がある。それでも「未配線」と読むのは、外したときに CI が赤くなって
+# 人が見る fail-closed 側だから。**この期待値が緑のまま裏返ったら穴が開いている**
+assert_not_wired "通らないかもしれない分岐の set +e は安全側に倒して数える" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -639,6 +664,74 @@ jobs:
             set +e
           fi
           bash ${SUITE_PATH}"
+
+# 強める向きは非対称に扱う: 制御構造の中の `set -e` は今までどおり反映しない。
+# 反映すると、通らない分岐の `set -e` が外側の握り潰しを隠す（fail-open）
+assert_not_wired "通るか分からない分岐の set -e は握り潰しを打ち消さない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          set +e
+          if [ -n \"${DOLLAR}CI\" ]; then
+            set -e
+          fi
+          bash ${SUITE_PATH}"
+
+# 長い綴り（POSIX 形式）でも同じ非対称性が効くことを固定する
+assert_not_wired "制御構造の中の set +o errexit も握り潰しとして数える" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          if [ -n \"${DOLLAR}CI\" ]; then
+            set +o errexit
+          fi
+          bash ${SUITE_PATH}"
+
+# 偽と分かるブロックの中は、弱める向きでも反映しない（1 度も走らないため）。
+# ここを一緒に緩めると、ゲートしているステップを「未配線」と誤報して赤くする
+assert_wired "一度も走らない分岐の set +e は反映しない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          if false; then
+            set +e
+          fi
+          bash ${SUITE_PATH}"
+
+# 部分シェルの中は、弱める向きでも外へ漏らさない（子シェルのオプション変更のため）
+assert_wired "部分シェルの中の set +e は外へ漏れない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ( set +e )
+          bash ${SUITE_PATH}"
+
+# pipefail も弱める向きは制御構造の中から反映する。
+# 反映しないと、パイプ越しの失敗が伝わらないステップを「伝わる」と読む
+assert_not_wired "制御構造の中の set +o pipefail はパイプの伝播を止める" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          set -o pipefail
+          if [ -n \"${DOLLAR}CI\" ]; then
+            set +o pipefail
+          fi
+          bash ${SUITE_PATH} | tee log"
 
 assert_wired "コマンド置換は括弧の釣り合いを崩さない" "name: ci
 jobs:
