@@ -946,7 +946,7 @@ ci_workflow_extract() {
         # **ここでは出力しない**のが要点で、ジョブ単位の無効化キー（`if: false` 等）は
         # YAML のキー順が自由である以上 `steps:` の**後ろ**にも書ける。書いた時点で
         # 出力済みのステップは取り消せないため、ジョブ 1 つ分を溜めてから出す
-        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, set_probe, setw, nsetw, sw, setopt, seton, setbody, setname, strengthen_ok, weaken_ok) {
+        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, set_probe, set_placed, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, strengthen_ok, weaken_ok) {
             # **シェルのオプションはステップごとにリセットする。** ステップは 1 つずつ
             # 別のシェルで走るので、前のステップの `set +e` / `pipefail` は引き継がれない。
             # **控えるのは `set` で明示された分だけ（-1 = 明示なし）。** シェルの既定と突き合わせるのは
@@ -1022,16 +1022,48 @@ ci_workflow_extract() {
                         # 偽の印を持ち越すと 1 行で握り潰しを隠せる（実 bash と差分照合して実測）。
                         # ただし走ることを証明したわけではないので `uncertain` は立てたままにし、
                         # 中の呼び出しは実行の証拠にしない（`elif` は条件が別物なので同じ扱い）
-                        if (text ~ /^(else|elif)([[:space:]]|;|$)/ && dead_depth >= 0 && depth == dead_depth + 1) { dead_depth = -1 }
+                        if (text ~ /^(else|elif)([[:space:]]|;|$)/ && depth > 0) {
+                            # 偽と分かる条件の else 側は**必ず走る**ので、偽の印を解除する
+                            if (dead_depth >= 0 && depth == dead_depth + 1) { dead_depth = -1 }
+                            # **真と分かる条件の else 側は逆に必ず走らない。** `if true` は
+                            # `uncertain` を立てない（本体は確実に走る）ので、印を付けないと
+                            # else 側の中身が「最上位で確実に走る」ように見え、1 度も走らない
+                            # 呼び出しが実行の証拠に化ける（実 bash と差分照合して実測）
+                            else if (true_at[depth] && dead_depth < 0) { dead_depth = depth - 1 }
+                        }
                         # **ブロックを開く語に続けて 1 行で書いた `set` も同じ `set`。**
                         # `split_commands` が `;` で切るので、`if …; then set +e; fi` の断片は
                         # `then set +e` になる。`^set` だけで探すと当たらず、**同じ意味を 1 行で
                         # 書き直すだけで**握り潰しが見えなくなる（`{ set +e; }` に至っては
                         # 無条件に走るのに丸ごと見落とす。実 bash と差分照合して実測）。
-                        # 本文の先頭に立ちうる語だけを剥がす（`ci_workflow_runs_script` 側は
-                        # これを許してはいけない——`do` の中身が走るかは回数次第のため）
+                        # 本文の先頭に立ちうる語を**繰り返し**剥がす（`then { set +e; }` のように
+                        # 入れ子になるため 1 つでは足りない）。`ci_workflow_runs_script` 側は
+                        # これを許してはいけない——`do` の中身が走るかは回数次第のため
                         set_probe = text
-                        sub(/^(then|else|do|\{)[[:space:]]+/, "", set_probe)
+                        while (sub(/^(then|else|do|\{)[[:space:]]+/, "", set_probe)) { }
+                        # **命令の位置に置けたか**で、その後の credit の仕方を変える。
+                        # 置けたなら向きの判断に `uncertain` を使えるが、置けなかったとき
+                        # （`case "$X" in Linux) set +e` のようなアームの中など）は
+                        # 「どこで走るか分からない `set`」なので、**強める向きは決して信用しない**。
+                        # 一方その場合でも弱める向きは反映する——綴りを網羅しきれない以上、
+                        # 見えた `set +e` を無視する側が fail-open になるため（実測で 2 綴り漏れていた）
+                        set_placed = (set_probe ~ /^set([[:space:]]|$)/)
+                        if (!set_placed) {
+                            # **引用符の中の言及は `set` ではない。** `echo "set +e"` を
+                            # 反映すると、ゲートしているステップを「未配線」と誤報して赤くする
+                            set_probe = mask_quoted(text)
+                            if (match(set_probe, /(^|[^[:alnum:]_])set[[:space:]]/)) {
+                                # **手前に `(` があるなら部分シェルの中。** 子シェルのオプション変更は
+                                # 親へ漏れないので反映してはいけない。1 行で開いて閉じる `( set +e )` は
+                                # この時点でまだ `subshell` が増えていないため、下のガードでは間に合わない
+                                if (substr(set_probe, 1, RSTART) ~ /\(/) { set_probe = "" }
+                                else {
+                                    # 見つけた位置から後ろだけを残す（区切り 1 文字分を落とす）
+                                    set_probe = substr(set_probe, RSTART)
+                                    if (set_probe !~ /^set[[:space:]]/) { set_probe = substr(set_probe, 2) }
+                                }
+                            } else { set_probe = "" }
+                        }
                         if (set_probe ~ /^set([[:space:]]|$)/ && dead_depth < 0 && subshell == 0) {
                             # **`set` の反映は「どちらへ倒すか」で非対称にする（issue #113）。**
                             # 制御構造の中（`uncertain > 0`）は走るか分からないが、`+` と `-` では
@@ -1052,9 +1084,13 @@ ci_workflow_extract() {
                             # 実際にはゲートしている後続を「未配線」と誤報して CI を赤いままにする
                             # （呼ばれた場合の握り潰しは、そもそも呼び出しの追跡をしていないので
                             #   このライブラリの範囲外。main と同じ扱いに揃えてある）
-                            # 反映してよい条件は向きで違う。強める向きは走ると分かるときだけ、
-                            # 弱める向きは関数定義の本文でなければ（＝走るかもしれない時点で）
-                            strengthen_ok = (uncertain == 0)
+                            # 反映してよい条件は向きで違う。強める向きは、命令の位置に置けて・
+                            # 制御構造の外で・**連鎖に守られていない**ときだけ信用する。
+                            # `set +e` の後ろに `[ -z "$FORCE" ] && set -e` と書かれた場合、
+                            # この `set -e` は条件次第でしか走らないのに `uncertain` は 0 のままで、
+                            # 握り潰しを打ち消したように見えていた（実 bash と差分照合して実測）
+                            strengthen_ok = (set_placed && uncertain == 0 && prev_op != "&&" && prev_op != "||")
+                            # 弱める向きは関数定義の本文でなければ（＝走るかもしれない時点で）反映する
                             weaken_ok = (fndef == 0)
                             # **語を左から右へ順に適用する。** bash はそう解釈するので
                             # `set +e -e` は後ろの `-e` が勝つ。1 本の正規表現で断片全体を見ると
@@ -1074,7 +1110,9 @@ ci_workflow_extract() {
                                 if (setbody ~ /e/) { errexit = set_flag(seton, strengthen_ok, weaken_ok, errexit) }
                                 # **末尾が `o` なら次の語が長い綴りの名前**（`-o errexit` / `-euo pipefail`）。
                                 # 短い綴りだけを見ると、1 行でゲートを外したまま「ゲートしている」と読む
-                                if (setbody ~ /o$/ && sw < nsetw) {
+                                # **`o` は並びのどこにあってもよい。** bash は `-oe pipefail` を
+                                # `-eo pipefail` と同じに扱う（末尾だけを見ると pipefail を取りこぼす）
+                                if (setbody ~ /o/ && sw < nsetw) {
                                     # 名前の語を消費する（次の周回では読まない）
                                     sw++
                                     setname = setw[sw]
@@ -1099,6 +1137,7 @@ ci_workflow_extract() {
                             if (uncertain_at[depth]) { uncertain--; uncertain_at[depth] = 0 }
                             else if (group_start[depth] >= 1) { closed_group_start = group_start[depth] }
                             if (fndef_at[depth]) { fndef--; fndef_at[depth] = 0 }
+                            true_at[depth] = 0
                             if (subshell_at[depth]) { subshell--; subshell_at[depth] = 0 }
                             group_start[depth] = -1
                             depth--
@@ -1122,6 +1161,8 @@ ci_workflow_extract() {
                                 if (uncertain_at[depth]) { uncertain--; uncertain_at[depth] = 0 }
                                 else if (group_start[depth] >= 1) { closed_group_start = group_start[depth] }
                                 if (fndef_at[depth]) { fndef--; fndef_at[depth] = 0 }
+                                true_at[depth] = 0
+                            true_at[depth] = 0
                                 if (subshell_at[depth]) { subshell--; subshell_at[depth] = 0 }
                                 group_start[depth] = -1
                                 depth--
@@ -1182,7 +1223,7 @@ ci_workflow_extract() {
                         # 一方 `if <条件>` / ループ / 関数定義の中身は、条件や呼び出し元を読まないと決まらない
                         # （両者を深さ 1 本で扱うと、grouping の中の呼び出しが「未配線」と誤報され、
                         #   通る分岐の `set +e` が握り潰しを隠す。どちらもレビューで実測）
-                        if (text ~ /^(if|while)[[:space:]]+(true|:)([[:space:]]|;|$)/) { depth++ }
+                        if (text ~ /^(if|while)[[:space:]]+(true|:)([[:space:]]|;|$)/) { depth++; true_at[depth] = 1 }
                         else if (text ~ /^(if|while|until|for|case|select)([[:space:]]|$)/) {
                             depth++; uncertain++; uncertain_at[depth] = 1
                         }

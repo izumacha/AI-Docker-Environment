@@ -866,6 +866,110 @@ jobs:
           set -- +e
           bash ${SUITE_PATH}"
 
+# 短い綴りの並びの **`o` はどこにあってもよい**。bash は `-oe pipefail` を
+# `-eo pipefail` と同じに扱うので、末尾だけを見ると pipefail を取りこぼす
+assert_wired "set -oe pipefail も pipefail まで立てる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          set -oe pipefail
+          bash ${SUITE_PATH} | tee log"
+
+# --- 命令の位置に置けない `set`（綴りを網羅しきれない側の受け皿） ------------------
+#
+# ブロックを開く語は入れ子になるし、`case` のアームは語ですらない。
+# 綴りを 1 つずつ足す限り必ず漏れるので、**置けなかった `set` は
+# 「弱める向きだけ反映する」** に倒す（強める向きは決して信用しない）
+
+assert_not_wired "1 行の then の中のブレースグループの set +e" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          if [ -n \"${DOLLAR}CI\" ]; then { set +e; }; fi
+          bash ${SUITE_PATH}"
+
+assert_not_wired "1 行の case アームの中の set +e" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case \"${DOLLAR}RUNNER_OS\" in Linux) set +e ;; esac
+          bash ${SUITE_PATH}"
+
+# 締めすぎの側: 引用符の中の言及は `set` ではない。
+# 反映すると、ゲートしているステップを「未配線」と誤報して赤くする
+assert_wired "引用符の中の set +e は言及であって実行ではない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          echo \"remember to set +e here\"
+          bash ${SUITE_PATH}"
+
+# 部分シェルは 1 行で開いて閉じても外へ漏れない（この時点ではまだ深さが増えていない）
+assert_wired "1 行の ( set +e ) も外へ漏れない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ( set +e )
+          bash ${SUITE_PATH}"
+
+# --- 連鎖に守られた `set -e`（強める向きを信用してよい条件） ------------------------
+
+# `&&` の右は条件次第でしか走らないのに `uncertain` は 0 のまま。
+# ここで強める向きを信用すると、握り潰しを打ち消したように見える（fail-open）
+assert_not_wired "&& で守られた set -e は握り潰しを打ち消さない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          set +e
+          [ -z \"${DOLLAR}FORCE\" ] && set -e
+          bash ${SUITE_PATH}"
+
+# --- 真と分かる条件の else 側（必ず走らない） --------------------------------------
+
+# `if true` は本体が確実に走るので `uncertain` を立てない。印を付けないと
+# else 側の中身が「最上位で確実に走る」ように見え、1 度も走らない呼び出しが
+# 実行の証拠に化ける（`set +e` 側は逆に握り潰しを誤って数える）
+assert_not_wired "真と分かる条件の else 側の呼び出しは実行の証拠にしない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          if true; then
+            :
+          else
+            bash ${SUITE_PATH}
+          fi"
+
+assert_wired "真と分かる条件の else 側の set +e は効かない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          if true; then :; else set +e; fi
+          bash ${SUITE_PATH}"
+
 assert_wired "コマンド置換は括弧の釣り合いを崩さない" "name: ci
 jobs:
   type-check:
