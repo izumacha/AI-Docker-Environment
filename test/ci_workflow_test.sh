@@ -1871,6 +1871,59 @@ jobs:
           case \"${DOLLAR}X\" in y) set +e; true; set -e ;; esac
           bash ${SUITE_PATH}"
 
+# --- POSIX の丸括弧付きアーム（`(a)`）------------------------------------------
+#
+# `[^()]*` は `(` を跨げないので、先頭の `(` を任意扱いで明示しないと
+# 丸括弧付きのアームだけ判定から外れ、アーム同士の排他が効かなくなる
+
+assert_not_wired "丸括弧付きの別アームの set -e は打ち消さない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case \"${DOLLAR}X\" in
+          (a)
+            set +e
+            ;;
+          (b)
+            set -e
+            ;;
+          esac
+          bash ${SUITE_PATH}"
+
+# アーム模様が `|` で切られた前半（`(a`）の `(` は部分シェルの開きではない。
+# 数えると幻の階層が開き、`esac` が本物ではなくそちらを閉じて
+# 以降の呼び出しが「未配線」に化ける
+assert_wired "丸括弧付きの選択肢アームの後ろでも深さが戻る" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case \"${DOLLAR}X\" in
+          (a|q)
+            echo hi
+            ;;
+          esac
+          bash ${SUITE_PATH}"
+
+# --- アームの走査は `case` の中だけ ------------------------------------------------
+
+# 絞らないと、コマンド置換の `)` をアームと読んで言及まで拾い、
+# ゲートしているステップを「未配線」と誤報する
+assert_wired "コマンド置換の ) はアームではない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          echo ${DOLLAR}(date) set +e
+          bash ${SUITE_PATH}"
+
 assert_wired "コマンド置換は括弧の釣り合いを崩さない" "name: ci
 jobs:
   type-check:

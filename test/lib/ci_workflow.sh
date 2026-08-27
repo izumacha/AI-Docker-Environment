@@ -961,7 +961,11 @@ ci_workflow_extract() {
         # 深さの勘定と括りの記録の両方が狂う。同じ規則が 3 か所にあったので 1 つへ寄せた
         # （うち 1 か所は生の本文で測っており、引用の扱いが食い違っていた）
         function starts_case_arm(t) {
-            return (mask_quoted(t) ~ /^[^()]*\)([[:space:]]|;|$)/)
+            # 先頭の `(` は POSIX のアーム綴り（`(a)`）。`[^()]*` は `(` を跨げないので、
+            # 任意扱いで明示しないと丸括弧付きのアームだけ当たらない
+            # （当たらないとアーム同士の排他が効かず、別アームの `set -e` が
+            #   前のアームの `set +e` を打ち消す。実 bash と差分照合して実測）
+            return (mask_quoted(t) ~ /^\(?[^()]*\)([[:space:]]|;|$)/)
         }
 
         # 先頭の飾りを落として `set …` そのものを返す。該当しなければ空文字。
@@ -1219,7 +1223,13 @@ ci_workflow_extract() {
                             # 判定は伏せた本文で行い（引用の中の `)` をアームと読まないため）、
                             # 解析は生の本文で行う（伏せた本文では `set "+e"` の綴りを読めない。
                             # 長さは保たれるので位置はそのまま使える）
-                            set_masked = mask_quoted(struct_text)
+                            # **`case` の中でだけ探す。** 絞らないと、コマンド置換の `)` を
+                            # アームと読んで `echo $(date) set +e` の言及まで拾い、
+                            # ゲートしているステップを「未配線」と誤報する（実測）。
+                            # **この断片自身が `case` を開く場合も含める**——深さが増えるのは
+                            # 断片の末尾なので、1 行書き（`case $X in a) set +e`）はまだ 0 のまま
+                            set_masked = (case_depth > 0 || struct_text ~ /^case([[:space:]]|$)/) \
+                                         ? mask_quoted(struct_text) : ""
                             # **`)` を 1 つずつ越えながら `set` を探す。** 1 つの正規表現で
                             # 先頭から当てると、`case $(echo linux) in linux) set +e` のように
                             # 主語にコマンド置換がある綴りで `$( … )` を食べて本物のアームを
@@ -1374,8 +1384,18 @@ ci_workflow_extract() {
                         # 数えてしまうと `case` が開いた深さがその場で打ち消され、
                         # 一致しないアームの中身が「最上位で実行される」と読まれる（レビューで実測）
                         paren_probe = text
-                        if (case_depth > 0 && starts_case_arm(paren_probe)) {
-                            sub(/^[^()]*\)/, "", paren_probe)
+                        # 上で求めた判定を使い回す（`starts_case_arm()` は伏せ処理を伴うので、
+                        # 同じ断片で 2 度呼ばない。剥がす綴りも `starts_case_arm()` と揃える）
+                        if (set_arm_here) {
+                            sub(/^\(?[^()]*\)/, "", paren_probe)
+                        }
+                        # **アーム模様が `|` で切られた前半の `(` は部分シェルの開きではない。**
+                        # `split_commands` は `(a|q)` を `(a` と `q)` に切るので、素直に数えると
+                        # 釣り合いが崩れて幻の階層が開き、以降その断片の `set` がすべて
+                        # 「部分シェルの中」として無視され、`esac` は本物の階層ではなく
+                        # 幻の方を閉じる（以降の呼び出しが「未配線」に化ける。実測）
+                        else if (case_depth > 0 && ops[j] == "|" && paren_probe ~ /^\([^()]*$/) {
+                            sub(/^\(/, "", paren_probe)
                         }
                         paren = paren_delta(paren_probe)
                         if (paren < 0) {
