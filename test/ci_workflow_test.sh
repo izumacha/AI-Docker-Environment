@@ -1428,6 +1428,38 @@ jobs:
           { set -e; }
           bash ${SUITE_PATH}"
 
+# 打ち消しは**落とす前の値**へ戻す。1 に固定すると「`set -e` が明示された」と読まれ、
+# `-e` を持たないシェルでも errexit が有効と扱われる（走らないループの括りで fail-open）
+assert_not_wired "自前テンプレートでは走らないループの括りが errexit を立てない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        shell: bash {0}
+        run: |
+          EMPTY=\"\"
+          for f in ${DOLLAR}EMPTY; do set +e; :; set -e; done
+          bash ${SUITE_PATH}"
+
+# 括りの記録は errexit のものなので、pipefail の判断には使わない。
+# 巻き込むと、無関係な set +e が同じ階層で開いているだけで
+# 走らないループの中の set -o pipefail が credit される
+assert_not_wired "errexit の括り記録は pipefail に流用しない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          EMPTY=\"\"
+          for f in ${DOLLAR}EMPTY; do
+            set +e
+            set -o pipefail
+          done
+          set -e
+          bash ${SUITE_PATH} | cat"
+
 assert_wired "コマンド置換は括弧の釣り合いを崩さない" "name: ci
 jobs:
   type-check:
