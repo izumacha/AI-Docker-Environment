@@ -1243,7 +1243,9 @@ ci_workflow_extract() {
                             # ので、`( set +e )` のような部分シェルは中身を跨いで終端の外へ出る
                             # ＝ `set` に着地せず、これまでどおり反映しない
                             set_arm = 0
-                            while (set_arm <= length(set_masked)) {
+                            # `case` の外（`set_masked` が空）では走査するものが無い。
+                            # 回すと `set_command()` の剥がしを同じ本文に対して 2 度走らせるだけ
+                            while (set_masked != "" && set_arm <= length(set_masked)) {
                                 # ここが命令の位置なら確定
                                 set_probe = set_command(substr(struct_text, set_arm + 1))
                                 if (set_probe != "") { break }
@@ -1446,8 +1448,21 @@ ci_workflow_extract() {
                         nbuf++
                         buf[nbuf] = step_id "\t" ops[j] "\t" ((dead_depth >= 0 || unreachable) ? 0 : errexit) "\t" pipefail "\t" uncertain "\t" text
                         # 偽と分かる条件のブロックに入るところを覚える（この深さより深い間は無効）
-                        if (dead_depth < 0 && struct_text ~ /^(if|while)[[:space:]]+false([[:space:]]|;|$)/) { dead_depth = depth }
-                        else if (dead_depth < 0 && struct_text ~ /^until[[:space:]]+true([[:space:]]|;|$)/) { dead_depth = depth }
+                        # **連鎖が続くなら条件は 1 語だけではない。** `split_commands` は `&&` / `||` で
+                        # 切るので、`if false || true; then` の断片は `if false` になる。素直に
+                        # 「必ず走らない」と印を付けると、実際には走る本体の `set +e` が捨てられ、
+                        # 握り潰されたスイートが「ゲートしている」と読まれる（fail-open。実測）。
+                        # **除くのは短絡で結論が変わりうる向きだけ**にする（無条件に除くと、
+                        # 本当に走らない `if false && true` の本体まで生きていると読んで
+                        # 正しくゲートしているステップを赤くする。実測で両向きを確認）:
+                        #   - 条件が偽（`if false` / `while false`）… `&&` はそのまま偽なので印を維持、
+                        #     `||` は右側で真になりうるので除く
+                        #   - 条件が真（`until true`）… `||` はそのまま真なので印を維持、
+                        #     `&&` は右側で偽になりうるので除く
+                        if (dead_depth < 0 && ops[j] != "||" \
+                            && struct_text ~ /^(if|while)[[:space:]]+false([[:space:]]|;|$)/) { dead_depth = depth }
+                        else if (dead_depth < 0 && ops[j] != "&&" \
+                                 && struct_text ~ /^until[[:space:]]+true([[:space:]]|;|$)/) { dead_depth = depth }
                         # **grouping を閉じた断片に付いた区切りは、その中身すべてに掛かる。**
                         # `( bash x ) || true` は中の `bash x` も「失敗が伝わらない」——
                         # 中身だけを見ると区切りが無いので「ゲートしている」と読まれる（レビューで実測）

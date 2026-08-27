@@ -1942,6 +1942,42 @@ jobs:
           esac
           bash ${SUITE_PATH}"
 
+# --- 偽と分かる条件も、連鎖が続けば結論が変わる ------------------------------------
+#
+# 除くのは**短絡で結論が変わりうる向きだけ**。無条件に除くと本当に走らない本体まで
+# 生きていると読み、無条件に印を付けると走る本体の set +e を捨てる（両向きで実測）
+
+assert_not_wired "if false || <条件> の本体の set +e は効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          if false || true; then set +e; fi
+          bash ${SUITE_PATH}"
+
+assert_not_wired "until true && <条件> の本体の set +e も効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          until true && false; do set +e; break; done
+          bash ${SUITE_PATH}"
+
+# 締めすぎない側: `&&` は偽のままなので、本体は本当に走らない
+assert_wired "if false && <条件> の本体は走らない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          if false && true; then set +e; fi
+          bash ${SUITE_PATH}"
+
 assert_wired "コマンド置換は括弧の釣り合いを崩さない" "name: ci
 jobs:
   type-check:
