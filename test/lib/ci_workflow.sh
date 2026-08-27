@@ -925,6 +925,26 @@ ci_workflow_extract() {
             return 0
         }
 
+        # `errexit` を 1 つ分更新し、**落とした階層の記録**（`weak_depth` / `weak_prev`。どちらも大域）も
+        # 併せて維持する。短い綴りと長い綴りで記録の有無がずれると、片方の括りだけが
+        # 打ち消せずゲートしているステップが「未配線」と誤報されるため、ここ 1 か所に寄せてある。
+        # **打ち消しは「1 に戻す」ではなく「落とす前の値へ戻す」**のが要点で、
+        # 1 に固定すると内側の括りが**外側でまだ効いている** `set +e` まで消してしまう（fail-open）
+        function apply_errexit(on, strengthen_ok, weaken_ok, cancel, current, at,   updated) {
+            # 打ち消し（同じ階層で自分が落とした分を戻す）なら、有効へ戻す。
+            # **記録を残すのは「まだ握り潰されていない状態から落とした」ときだけ**なので
+            # （下の `current != 0`）、戻り先は必ず有効側になる。外側で `set +e` がまだ
+            # 効いている入れ子の `set +e` は記録を上書きせず、ここへは来ない
+            # ——上書きさせると、内側の括りが**外側でまだ効いている**握り潰しまで
+            # 消してしまう（fail-open。実 bash と差分照合して実測）
+            if (on && cancel && strengthen_ok) { weak_depth = -1; return 1 }
+            # それ以外は通常の適用（`next` は awk の予約語なので使わない）
+            updated = set_flag(on, strengthen_ok, weaken_ok, current)
+            # 新しく落としたなら、その階層と落とす前の値を控える
+            if (!on && updated == 0 && current != 0) { weak_depth = at; weak_prev = current }
+            return updated
+        }
+
         # `set` のオプション 1 つ分の新しい値を返す。**向きごとに反映してよい条件が違う**（issue #113）。
         # `on` が真なら `-`（ゲートを強める）、偽なら `+`（弱める）。反映してよくなければ現在値を返す。
         # 短い綴りと長い綴りで同じ判断を書き写さないよう、ここ 1 か所に寄せてある
@@ -965,7 +985,7 @@ ci_workflow_extract() {
         # **ここでは出力しない**のが要点で、ジョブ単位の無効化キー（`if: false` 等）は
         # YAML のキー順が自由である以上 `steps:` の**後ろ**にも書ける。書いた時点で
         # 出力済みのステップは取り消せないため、ジョブ 1 つ分を溜めてから出す
-        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_placed, set_forked, set_masked, set_arm, weak_depth, set_in_fndef, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, strengthen_ok, weaken_ok) {
+        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_placed, set_forked, set_masked, set_arm, weak_cancel, set_in_fndef, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, strengthen_ok, weaken_ok) {
             # **シェルのオプションはステップごとにリセットする。** ステップは 1 つずつ
             # 別のシェルで走るので、前のステップの `set +e` / `pipefail` は引き継がれない。
             # **控えるのは `set` で明示された分だけ（-1 = 明示なし）。** シェルの既定と突き合わせるのは
@@ -992,8 +1012,14 @@ ci_workflow_extract() {
             chain_status = ""
             # 部分シェル（`( … )`）の入れ子の数。**`set` はここでは外へ漏れない**
             subshell = 0
-            # 直近で errexit を落とした階層（-1 = 無し）。同じ階層の `set -e` で戻せる
+            # 直近で errexit を落とした階層（-1 = 無し）。同じ階層の `set -e` で戻せる。
+            # **この 2 つだけは局所変数にしない**——記録は `apply_errexit()` が行うので、
+            # 局所にすると関数側からは同名の大域を触ることになり、記録が一切残らない
+            # （awk の局所変数は仮引数だけなので、関数をまたぐ状態は大域で持つほかない）。
+            # ステップごとに別のシェルで走るため、ここで毎回リセットする
             weak_depth = -1
+            # その階層で落とす直前の errexit（記録を残してよい状態だったかの判定に使う）
+            weak_prev = -1
             # 関数定義（`f() { … }`）の入れ子の数。**定義しただけでは本文は走らない**ので、
             # 中の `set` は弱める向きでも反映しない（`uncertain` とは別に数える）
             fndef = 0
@@ -1175,8 +1201,10 @@ ci_workflow_extract() {
                             # 隠すものが無い。ここを見ないと `for f in …; do set +e; check; set -e; done`
                             # のような括りが「以降ずっと握り潰し」と読まれ、ゲートしているステップを
                             # 「未配線」と誤報して CI を恒常的に赤くする（実 bash と差分照合して実測）
+                            # 同じ階層の括りを打ち消せるのは、その階層で自分が落としたときだけ
+                            weak_cancel = (errexit == 0 && weak_depth == depth)
                             strengthen_ok = (set_probe == text && !set_in_fndef && prev_op != "&&" && prev_op != "||" \
-                                             && (uncertain == 0 || (errexit == 0 && weak_depth == depth)))
+                                             && (uncertain == 0 || weak_cancel))
                             # 弱める向きは、定義の本文でなければ（＝走るかもしれない時点で）反映する
                             weaken_ok = (!set_in_fndef)
                             # **語を左から右へ順に適用する。** bash はそう解釈するので
@@ -1190,22 +1218,21 @@ ci_workflow_extract() {
                                 setopt = setw[sw]
                                 # `--` から後ろは位置パラメータであってオプションではない
                                 if (setopt == "--") { break }
+                                # **最初の非オプション語でそこから後ろは位置パラメータになる。**
+                                # 読み飛ばして続けると、`set +e foo -e` の `-e` を効いたものとして数え、
+                                # 実際には握り潰されているステップが「合否に効く」と読まれる（fail-open）
                                 # `-` / `+` で始まる短い綴りの並び（`-e` / `+ex` / `-euo`）だけを読む
                                 # **大文字も混ざる**（`-Eeuo pipefail` は定型句）。小文字だけを
                                 # 許すと語ごと捨ててしまい、`+eE` の握り潰しを見落とし、
                                 # `-Eeuo pipefail` ではゲートを「効いていない」と誤報する。
                                 # 拾うのは小文字の `e` / `o` だけなので、`E`（errtrace）とは混ざらない
-                                if (setopt !~ /^[-+][a-zA-Z]*$/) { continue }
+                                if (setopt !~ /^[-+][a-zA-Z]*$/) { break }
                                 # 先頭の記号が向きを決める（`-` で有効化、`+` で無効化）
                                 seton = (substr(setopt, 1, 1) == "-")
                                 # 記号を除いた残りが、まとめて書かれたオプション文字の並び
                                 setbody = substr(setopt, 2)
                                 # 並びのどこかに `e` があれば errexit の指定
-                                if (setbody ~ /e/) {
-                                    errexit = set_flag(seton, strengthen_ok, weaken_ok, errexit)
-                                    # 落としたのがどの階層かを覚えておく（同じ階層の `set -e` で戻せる）
-                                    if (!seton && weaken_ok) { weak_depth = depth }
-                                }
+                                if (setbody ~ /e/) { errexit = apply_errexit(seton, strengthen_ok, weaken_ok, weak_cancel, errexit, depth) }
                                 # **末尾が `o` なら次の語が長い綴りの名前**（`-o errexit` / `-euo pipefail`）。
                                 # 短い綴りだけを見ると、1 行でゲートを外したまま「ゲートしている」と読む
                                 # **`o` は並びのどこにあってもよい。** bash は `-oe pipefail` を
@@ -1215,7 +1242,9 @@ ci_workflow_extract() {
                                     sw++
                                     setname = setw[sw]
                                     # `errexit` は失敗でその場で止まるかどうか
-                                    if (setname == "errexit") { errexit = set_flag(seton, strengthen_ok, weaken_ok, errexit) }
+                                    # **長い綴りでも同じ記録を残す。** 残さないと、`set +o errexit … set -o errexit` の
+                                    # 括りだけが打ち消せず、ゲートしているステップが「未配線」と誤報される
+                                    if (setname == "errexit") { errexit = apply_errexit(seton, strengthen_ok, weaken_ok, weak_cancel, errexit, depth) }
                                     # `pipefail` が立っていればパイプ越しでも失敗が伝わる
                                     else if (setname == "pipefail") { pipefail = set_flag(seton, strengthen_ok, weaken_ok, pipefail) }
                                 }
@@ -1319,7 +1348,13 @@ ci_workflow_extract() {
                         # 一方 `if <条件>` / ループ / 関数定義の中身は、条件や呼び出し元を読まないと決まらない
                         # （両者を深さ 1 本で扱うと、grouping の中の呼び出しが「未配線」と誤報され、
                         #   通る分岐の `set +e` が握り潰しを隠す。どちらもレビューで実測）
-                        if (struct_text ~ /^(if|while)[[:space:]]+(true|:)([[:space:]]|;|$)/) { depth++; true_at[depth] = 1 }
+                        if (struct_text ~ /^(if|while)[[:space:]]+(true|:)([[:space:]]|;|$)/) {
+                            depth++; true_at[depth] = 1
+                            # **必ず走る入れ子なので grouping と同じ扱い。** 開始位置を控えないと、
+                            # 閉じた `fi` / `done` に付いた `|| true` が中身へ伝わらず、
+                            # 握り潰された実行が「ゲートしている」と読まれる
+                            group_start[depth] = nbuf
+                        }
                         else if (struct_text ~ /^(if|while|until|for|case|select)([[:space:]]|$)/) {
                             depth++; uncertain++; uncertain_at[depth] = 1
                         }

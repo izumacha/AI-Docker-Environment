@@ -1356,6 +1356,78 @@ jobs:
           case \"${DOLLAR}X\" in (a) set +e ;; esac
           bash ${SUITE_PATH}"
 
+# 打ち消しは「有効へ戻す」だけで、**外側でまだ効いている握り潰しは消さない**。
+# 内側の `set +e` に記録を上書きさせると、外側の `set +e` ごと消える（fail-open）
+assert_not_wired "内側の括りは外側の set +e を消さない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          set +e
+          if [ -n \"${DOLLAR}NOPE\" ]; then
+            set +e
+            set -e
+          fi
+          bash ${SUITE_PATH}"
+
+# 長い綴りでも同じ記録を残す（残さないと長い綴りの括りだけが打ち消せない）
+assert_wired "長い綴りの set +o errexit … set -o errexit も打ち消し合う" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          for f in a; do
+            set +o errexit
+            echo hi
+            set -o errexit
+          done
+          bash ${SUITE_PATH}"
+
+# 必ず走る入れ子（`while true`）も grouping と同じで、閉じた側の区切りが中身に掛かる
+assert_not_wired "while true の done に付いた || true は中身に掛かる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          while true; do
+            bash ${SUITE_PATH}
+            break
+          done || true"
+
+# **最初の非オプション語でオプションの解釈は終わる**（後ろは位置パラメータ）
+assert_not_wired "set +e foo -e の -e は位置パラメータ" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          set +e foo -e
+          bash ${SUITE_PATH}"
+
+# --- 既知の残件（締めすぎ側。挙動を固定して黙って変わらないようにする） -------------
+#
+# ブレースグループは必ず走るので、この `set -e` は実際には効く。だが `{ if false` のように
+# **1 つの断片が開き語を 2 つ運ぶ**綴りがあり、そのときの `uncertain` は内側をまだ数えていない。
+# そこで強める向きは「`set` が断片の先頭そのもの」のときだけ信用する側に倒してある。
+# 向きは fail-closed（CI が赤くなって人が見る）。直すなら 1 断片で複数の階層を開けるようにする
+assert_not_wired "既知の残件: ブレースグループの中の set -e は credit しない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          set +e
+          { set -e; }
+          bash ${SUITE_PATH}"
+
 assert_wired "コマンド置換は括弧の釣り合いを崩さない" "name: ci
 jobs:
   type-check:
