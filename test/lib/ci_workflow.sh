@@ -945,12 +945,40 @@ ci_workflow_extract() {
             # 握り潰されたスイートを「ゲートしている」と読ませる（fail-open。実 bash と差分照合して実測）
             # 記録を残すのは「まだ握り潰されていない状態から落とした」ときだけなので
             # （下の `current != 0`）、外側で `set +e` がまだ効いている入れ子はここへ来ない
-            if (on && cancel && ok) { weak_depth = -1; return weak_prev }
+            # 確実に走ると分かるなら `set -e` は「明示された」ので 1。
+            # 分からないときだけ落とす前の値へ戻す（`shell: bash {0}` のように
+            # `-e` を持たないシェルで、明示された `set -e` を捨てないため）
+            if (on && cancel && ok) { weak_depth = -1; return (at_uncertain == 0) ? 1 : weak_prev }
             # それ以外は通常の適用（`next` は awk の予約語なので使わない）
             updated = set_flag(on, ok, weaken_ok, current)
             # 新しく落としたなら、その階層と落とす前の値を控える
             if (!on && updated == 0 && current != 0) { weak_depth = at; weak_prev = current }
             return updated
+        }
+
+        # 先頭の飾りを落として `set …` そのものを返す。該当しなければ空文字。
+        # **落としてよいのは「現在のシェルのまま `set` を呼ぶ」書き方だけ**——
+        # ブレースグループ / 変数代入の前置き / `builtin` / `command` / `eval`。
+        # `CI_WORKFLOW_COMMAND_START` の実行ラッパ一覧（`sudo` / `env` / `timeout` 等）は
+        # **意図的に共有しない**。あちらは「スクリプトを走らせるか」を問う側の一覧で、
+        # どれも別プロセスを起こすため `set` を渡しても親のオプションは変わらない
+        # （`sudo set +e` は握り潰しではない）。同じ一覧にすると fail-closed 側に化ける
+        function set_command(t,   probe) {
+            probe = t
+            # 剥がせるものが無くなるまで繰り返す（入れ子で重なることがある）
+            while (1) {
+                # ブレースグループは同じシェルで走る
+                if (sub(/^\{[[:space:]]+/, "", probe)) { continue }
+                # `VAR=x set +e` の前置き（特殊組み込みなので代入も残るが、要点は `set` が走ること）
+                if (sub(/^[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+/, "", probe)) { continue }
+                # 同じ組み込みをそのまま呼ぶ書き方
+                if (sub(/^(builtin|command)[[:space:]]+/, "", probe)) { continue }
+                # `eval` は現在のシェルで走るので、引用を外して中身を見る
+                if (sub(/^eval[[:space:]]+/, "", probe)) { gsub(/["\047]/, "", probe); continue }
+                break
+            }
+            # 飾りを落とした先が `set` でなければ、この断片に `set` は無い
+            return (probe ~ /^set([[:space:]]|$)/) ? probe : ""
         }
 
         # `set` のオプション 1 つ分の新しい値を返す。**向きごとに反映してよい条件が違う**（issue #113）。
@@ -1116,7 +1144,9 @@ ci_workflow_extract() {
                         # 下の `set` の判定側で求めると 1 周ずれ、アーム見出しの**次**の断片で
                         # 生きている記録を誤って捨てる（`a) set +e` の次の `echo m` で消え、
                         # 同じアームの `set -e` が打ち消せなくなる。実 bash と差分照合して実測）
-                        set_arm_here = (case_depth > 0 && struct_text ~ /^[^()]*\)([[:space:]]|;|$)/)
+                        # **伏せた本文で測る。** 引用の中の `) `（`echo "a) b"`）をアームの移動と
+                        # 読むと、生きている括りの記録を捨てて正しくゲートしているステップを赤くする
+                        set_arm_here = (case_depth > 0 && mask_quoted(struct_text) ~ /^[^()]*\)([[:space:]]|;|$)/)
                         # **別の `case` アームへ移ったら、この階層の括りの記録は捨てる。**
                         # アーム同士は排他なので、`*)` の `set -e` は `linux*)` の `set +e` を
                         # 打ち消さない（`else` / `elif` と同じ理屈。複数行で書いたときは
@@ -1144,18 +1174,14 @@ ci_workflow_extract() {
                         # 本文の先頭に立ちうる語を**繰り返し**剥がす（`then { set +e; }` のように
                         # 入れ子になるため 1 つでは足りない）。`ci_workflow_runs_script` 側は
                         # これを許してはいけない——`do` の中身が走るかは回数次第のため
-                        set_probe = struct_text
-                        while (sub(/^\{[[:space:]]+/, "", set_probe)) { }
-                        # **`builtin set` / `command set` は同じ組み込みをそのまま呼ぶ。**
-                        # 剥がさないと `^set` に当たらず、握り潰しを丸ごと見落とす
-                        while (sub(/^(builtin|command)[[:space:]]+/, "", set_probe)) { }
+                        set_probe = set_command(struct_text)
                         # **命令の位置に置けたか**で、その後の credit の仕方を変える。
                         # 置けたなら向きの判断に `uncertain` を使えるが、置けなかったとき
                         # （`case "$X" in Linux) set +e` のようなアームの中など）は
                         # 「どこで走るか分からない `set`」なので、**強める向きは決して信用しない**。
                         # 一方その場合でも弱める向きは反映する——綴りを網羅しきれない以上、
                         # 見えた `set +e` を無視する側が fail-open になるため（実測で 2 綴り漏れていた）
-                        set_placed = (set_probe ~ /^set([[:space:]]|$)/)
+                        set_placed = (set_probe != "")
                         # **パイプの構成要素とバックグラウンドは子シェルで走る。** `true | set -e` も
                         # `set -e &` も親のオプションは変えないので、どちらの向きも反映しない
                         # （`prev_op` は手前の区切り、`ops[j]` は直後の区切り。実 bash と差分照合して実測）
@@ -1185,7 +1211,7 @@ ci_workflow_extract() {
                             set_arm = 0
                             while (set_arm <= length(set_masked)) {
                                 # ここが命令の位置なら確定
-                                if (substr(set_masked, set_arm + 1) ~ /^set([[:space:]]|$)/) { break }
+                                if (set_command(substr(struct_text, set_arm + 1)) != "") { break }
                                 set_rest = substr(set_masked, set_arm + 1)
                                 # 次の `)` まで進める（丸括弧の組があれば組ごと）
                                 if (!match(set_rest, /^[^()]*\([^()]*\)[[:space:]]*/) \
@@ -1194,21 +1220,12 @@ ci_workflow_extract() {
                                 if (RLENGTH < 1) { set_arm = -1; break }
                                 set_arm += RLENGTH
                             }
-                            if (set_arm > 0 && set_arm <= length(set_masked) \
-                                && substr(set_masked, set_arm + 1) ~ /^set([[:space:]]|$)/) {
-                                set_probe = substr(struct_text, set_arm + 1)
-                            }
-                            # **`eval` は現在のシェルで走る**ので、引数の `set` はそのまま効く。
-                            # 引用を外して中身を見ないと `eval "set +e"` の握り潰しを見落とす（fail-open）
-                            else if (struct_text ~ /^eval[[:space:]]/) {
-                                set_probe = struct_text
-                                sub(/^eval[[:space:]]+/, "", set_probe)
-                                gsub(/["\047]/, "", set_probe)
-                                if (set_probe !~ /^set([[:space:]]|$)/) { set_probe = "" }
+                            if (set_arm > 0 && set_arm <= length(set_masked)) {
+                                set_probe = set_command(substr(struct_text, set_arm + 1))
                             }
                             else { set_probe = "" }
                         }
-                        if (set_probe ~ /^set([[:space:]]|$)/ && dead_depth < 0 && subshell == 0 && !set_forked && !unreachable) {
+                        if (set_probe != "" && dead_depth < 0 && subshell == 0 && !set_forked && !unreachable) {
                             # **`set` の反映は「どちらへ倒すか」で非対称にする（issue #113）。**
                             # 制御構造の中（`uncertain > 0`）は走るか分からないが、`+` と `-` では
                             # 分からないときに倒すべき先が逆になる:

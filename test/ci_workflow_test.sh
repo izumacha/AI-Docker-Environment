@@ -1698,6 +1698,94 @@ jobs:
           done
           bash ${SUITE_PATH}"
 
+# --- 先頭の飾り（同じシェルのまま `set` を呼ぶ書き方）------------------------------
+#
+# 落としてよいのはブレースグループ / 変数代入 / `builtin` / `command` / `eval` だけ。
+# アームの中でも同じ判定を通すので、1 トークン足しただけで穴が開かない
+
+assert_not_wired "case アームの中の command set +e" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case a in a) command set +e ;; esac
+          bash ${SUITE_PATH}"
+
+assert_not_wired "case アームの中のブレースグループの set +e" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case a in a) { set +e; } ;; esac
+          bash ${SUITE_PATH}"
+
+assert_not_wired "ブレースグループの中の eval \"set +e\"" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          { eval \"set +e\"; }
+          bash ${SUITE_PATH}"
+
+assert_not_wired "変数代入を前置きした set +e" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          X=1 set +e
+          bash ${SUITE_PATH}"
+
+# 締めすぎない側: **別プロセスを起こす**実行ラッパは落とさない。
+# `sudo set +e` は子プロセスのオプションを変えるだけで、親は握り潰さない
+assert_wired "sudo set +e は親のオプションを変えない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          sudo set +e 2>/dev/null || true
+          bash ${SUITE_PATH}"
+
+# 引用の中の `) ` はアームの移動ではない（生きている括りの記録を捨てない）
+assert_wired "引用の中の ) はアームの移動と読まない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case linux in
+            linux)
+              set +e
+              echo \"a) b\"
+              set -e
+              ;;
+          esac
+          bash ${SUITE_PATH}"
+
+# 確実に走ると分かる `set -e` は「明示された」ので、-e を持たないシェルでも有効
+assert_wired "自前テンプレートでも最上位の set -e は明示として効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        shell: bash {0}
+        run: |
+          set +e
+          echo a
+          set -e
+          bash ${SUITE_PATH}"
+
 assert_wired "コマンド置換は括弧の釣り合いを崩さない" "name: ci
 jobs:
   type-check:
