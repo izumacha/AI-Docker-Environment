@@ -1041,7 +1041,7 @@ ci_workflow_extract() {
         # **ここでは出力しない**のが要点で、ジョブ単位の無効化キー（`if: false` 等）は
         # YAML のキー順が自由である以上 `steps:` の**後ろ**にも書ける。書いた時点で
         # 出力済みのステップは取り消せないため、ジョブ 1 つ分を溜めてから出す
-        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, closed_any, fn_form, set_in_fndef, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok) {
+        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, closed_any, fn_form, depth_before, case_before, pipe_in, set_in_fndef, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok) {
             # **シェルのオプションはステップごとにリセットする。** ステップは 1 つずつ
             # 別のシェルで走るので、前のステップの `set +e` / `pipefail` は引き継がれない。
             # **控えるのは `set` で明示された分だけ（-1 = 明示なし）。** シェルの既定と突き合わせるのは
@@ -1225,6 +1225,9 @@ ci_workflow_extract() {
                         # `case` のアーム模様（`a|linux*)`）の `|` は選択肢の区切りであってパイプではない。
                         # `split_commands` はそこで切るので、素直に見ると本文が「パイプの構成要素」に化け、
                         # アームの中の `set +e` が丸ごと落ちる（実 bash と差分照合して実測）
+                        # **入ってきた区切りをここで控える。** `prev_op` はこの断片の処理中に
+                        # 自分の区切りへ更新されるので、開き側の判定まで持たない
+                        pipe_in = (prev_op == "|")
                         set_forked = ((prev_op == "|" && !set_arm_here) || ops[j] == "|" || ops[j] == "&")
                         if (!set_placed) {
                             # **`case` のアームの後ろは命令の位置。** `case "$X" in Linux) set +e` は
@@ -1270,8 +1273,8 @@ ci_workflow_extract() {
                                 set_probe = set_command(substr(struct_text, set_arm + 1))
                                 if (set_probe != "") { break }
                             }
-                            # 走査が `set` に着地していなければ、この断片に `set` は無い
-                            if (set_arm < 1 || set_arm > length(set_masked)) { set_probe = "" }
+                            # ここへ来た時点で `set_probe` は、着地した `set …` か空のどちらか
+                            # （ループは着地したときだけ `break` し、それ以外は空のまま抜ける）
                         }
                         if (set_probe != "" && dead_depth < 0 && subshell == 0 && !set_forked && !unreachable) {
                             # **`set` の反映は「どちらへ倒すか」で非対称にする（issue #113）。**
@@ -1298,10 +1301,12 @@ ci_workflow_extract() {
                             # `set +e` の後ろに `[ -z "$FORCE" ] && set -e` と書かれた場合、
                             # この `set -e` は条件次第でしか走らないのに `uncertain` は 0 のままで、
                             # 握り潰しを打ち消したように見えていた（実 bash と差分照合して実測）
-                            # **関数定義の本文は、その場では走らない。** 定義を開く断片そのもの
-                            # （`function f { set +e; }`）と、見出しの次に来る `{`（`f()` → `{ set -e; }`）も
-                            # 本文の中なので、どちらの向きも反映しない
-                            set_in_fndef = (fndef > 0 || was_pending_fndef || fn_form == 2)
+                            # **関数定義の本文は、その場では走らない。** 見出しの次に来る `{`
+                            # （`f()` → `{ set -e; }`）も本文の中なので、どちらの向きも反映しない。
+                            # 定義を開く断片そのもの（`function f { set +e; }`）はここへ来ない——
+                            # `set_command()` は関数見出しを剥がさないので `set_probe` が空になり、
+                            # このブロックに入らない（入る形が増えたら `set_command()` 側を直す）
+                            set_in_fndef = (fndef > 0 || was_pending_fndef)
                             # **強める向きを信用するのは `set` が断片の先頭そのもののときだけ。**
                             # 継続語や `{` を剥がして見つけた `set` は、剥がした側に
                             # `{ if false` のような開き語が混ざっていることがあり、そのときの
@@ -1342,9 +1347,8 @@ ci_workflow_extract() {
                             nsetw = split(set_probe, setw, /[[:space:]]+/)
                             for (sw = 2; sw <= nsetw; sw++) {
                                 setopt = setw[sw]
-                                # `--` から後ろは位置パラメータであってオプションではない
-                                if (setopt == "--") { break }
                                 # **最初の非オプション語でそこから後ろは位置パラメータになる。**
+                                # `--` もここで落ちる（2 文字目が `[a-zA-Z]` ではないため）
                                 # 読み飛ばして続けると、`set +e foo -e` の `-e` を効いたものとして数え、
                                 # 実際には握り潰されているステップが「合否に効く」と読まれる（fail-open）
                                 # `-` / `+` で始まる短い綴りの並び（`-e` / `+ex` / `-euo`）だけを読む
@@ -1490,6 +1494,9 @@ ci_workflow_extract() {
                         }
                         # 次の断片から見た「直前」を控える
                         prev_op = ops[j]
+                        # 開く前の深さと `case` の入れ子を控える（下でパイプの中かどうかを印すのに使う）
+                        depth_before = depth
+                        case_before = case_depth
                         # 開き側はこの断片の後ろから効く（`if` 自身は外側の階層にある）
                         # `case` の入れ子を数えておく（上のパターン判定に使う）
                         if (struct_text ~ /^case([[:space:]]|$)/) { case_depth++ }
@@ -1540,6 +1547,19 @@ ci_workflow_extract() {
                             }
                             # そうでなければ素の grouping（必ず走るので uncertain は増やさない）
                             else { group_start[depth] = nbuf }
+                        }
+                        # **パイプの構成要素として開いた複合コマンドは子シェルで走る。**
+                        # `echo x | while read -r l; do set +e; done` の `set +e` は親へ漏れないので、
+                        # 印を付けないと「走るかもしれない握り潰し」として反映し、
+                        # 実際にはゲートしているステップを「未配線」と誤報して赤くする
+                        # （`( … )` は釣り合いで拾えるが、パイプはこの経路でしか分からない）
+                        # **`case` の中と `case` を開く断片では見送る。** アーム模様の `|`
+                        # （`a|b)`）は選択肢の区切りであってパイプではなく、`split_commands` は
+                        # そこでも切るため、区別が付かない（見送る側は従来どおりの扱いに戻るだけ）
+                        if (depth > depth_before && (pipe_in || ops[j] == "|") \
+                            && case_before == 0 && struct_text !~ /^case([[:space:]]|$)/ \
+                            && !subshell_at[depth]) {
+                            subshell_at[depth] = 1; subshell++
                         }
                         # 部分シェルの開き分（釣り合いの正側）を足す。
                         # **部分シェルであることを階層ごとに覚える**（中の `set` を外へ持ち出さない）

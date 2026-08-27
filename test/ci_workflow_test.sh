@@ -2029,6 +2029,45 @@ jobs:
           while false; do case a in a) : ;; esac; set -e; done
           bash ${SUITE_PATH}"
 
+# --- パイプの構成要素として開いた複合コマンドは子シェル -----------------------------
+#
+# `( … )` は釣り合いで拾えるが、パイプはこの経路でしか分からない。
+# 印を付けないと親へ漏れない `set +e` を握り潰しとして数え、赤くする
+
+assert_wired "パイプの中のループの set +e は親へ漏れない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          echo x | while read -r l; do set +e; done
+          bash ${SUITE_PATH}"
+
+assert_wired "パイプの中の if の set +e も親へ漏れない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          echo x | if true; then set +e; fi
+          bash ${SUITE_PATH}"
+
+# 締めすぎない側: `case` のアーム模様の `|` はパイプではないので、この印を付けない
+# （付けるとアームの中の set +e が丸ごと落ちて握り潰しを見逃す）
+assert_not_wired "丸括弧付きの選択肢アームの set +e は数える" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case \"${DOLLAR}X\" in
+          (a|b) set +e ;;
+          esac
+          bash ${SUITE_PATH}"
+
 assert_wired "コマンド置換は括弧の釣り合いを崩さない" "name: ci
 jobs:
   type-check:
