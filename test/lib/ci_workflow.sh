@@ -930,7 +930,14 @@ ci_workflow_extract() {
         # 打ち消せずゲートしているステップが「未配線」と誤報されるため、ここ 1 か所に寄せてある。
         # **打ち消しは「1 に戻す」ではなく「落とす前の値へ戻す」**のが要点で、
         # 1 に固定すると内側の括りが**外側でまだ効いている** `set +e` まで消してしまう（fail-open）
-        function apply_errexit(on, strengthen_ok, weaken_ok, cancel, current, at,   updated) {
+        # `cancel` を**引数で受け取らない**のが要点。ループの外で 1 度だけ計算すると、
+        # `set +e -e` のように 1 つの語で自分を打ち消す綴りで判定が古いままになり、
+        # 2 コマンドに分けた同じ意味（`set +e` 改行 `set -e`）と答えが食い違う
+        function apply_errexit(on, strengthen_base, at_uncertain, weaken_ok, current, at,   cancel, ok, updated) {
+            # 同じ階層で自分が落とした分か（毎回この場で測る）
+            cancel = (current == 0 && weak_depth == at)
+            # 強める向きを反映してよいか（確実に走るか、自分で落とした分の打ち消しか）
+            ok = (strengthen_base && (at_uncertain == 0 || cancel))
             # 打ち消し（同じ階層で自分が落とした分を戻す）なら、**落とす前の値**へ返す。
             # **1 に固定してはいけない。** 落とす前が -1（＝明示なし）だったとき、1 を返すと
             # 「`set -e` が明示された」と読まれ、`shell: bash {0}` のように `-e` を持たない
@@ -938,9 +945,9 @@ ci_workflow_extract() {
             # 握り潰されたスイートを「ゲートしている」と読ませる（fail-open。実 bash と差分照合して実測）
             # 記録を残すのは「まだ握り潰されていない状態から落とした」ときだけなので
             # （下の `current != 0`）、外側で `set +e` がまだ効いている入れ子はここへ来ない
-            if (on && cancel && strengthen_ok) { weak_depth = -1; return weak_prev }
+            if (on && cancel && ok) { weak_depth = -1; return weak_prev }
             # それ以外は通常の適用（`next` は awk の予約語なので使わない）
-            updated = set_flag(on, strengthen_ok, weaken_ok, current)
+            updated = set_flag(on, ok, weaken_ok, current)
             # 新しく落としたなら、その階層と落とす前の値を控える
             if (!on && updated == 0 && current != 0) { weak_depth = at; weak_prev = current }
             return updated
@@ -986,7 +993,7 @@ ci_workflow_extract() {
         # **ここでは出力しない**のが要点で、ジョブ単位の無効化キー（`if: false` 等）は
         # YAML のキー順が自由である以上 `steps:` の**後ろ**にも書ける。書いた時点で
         # 出力済みのステップは取り消せないため、ジョブ 1 つ分を溜めてから出す
-        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_placed, set_forked, set_masked, set_arm, weak_cancel, strengthen_base, strengthen_pipe_ok, set_in_fndef, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, strengthen_ok, weaken_ok) {
+        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_placed, set_forked, set_masked, set_arm, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, set_in_fndef, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, strengthen_ok, weaken_ok) {
             # **シェルのオプションはステップごとにリセットする。** ステップは 1 つずつ
             # 別のシェルで走るので、前のステップの `set +e` / `pipefail` は引き継がれない。
             # **控えるのは `set` で明示された分だけ（-1 = 明示なし）。** シェルの既定と突き合わせるのは
@@ -1087,6 +1094,15 @@ ci_workflow_extract() {
                             # 偽と分かる条件の else 側は逆に**必ず走る**ので、偽の印を解除する
                             else if (dead_depth >= 0 && depth == dead_depth + 1) { dead_depth = -1 }
                         }
+                        # **別の `case` アームへ移ったら、この階層の括りの記録は捨てる。**
+                        # アーム同士は排他なので、`*)` の `set -e` は `linux*)` の `set +e` を
+                        # 打ち消さない（`else` / `elif` と同じ理屈。複数行で書いたときは
+                        # それぞれの `set` が断片の先頭になるので、深さだけでは区別できない）
+                        if (set_arm_here && weak_depth == depth) { weak_depth = -1 }
+                        # **ループを途中で抜ける綴りがあると、括りの後半は走るとは限らない。**
+                        # `set +e … continue … set -e` は、最後の周回が `continue` を通ると
+                        # errexit を落としたまま終わる。記録を捨てて打ち消しを成立させない
+                        if (struct_text ~ /^(break|continue|return|exit)([[:space:]]|;|$)/ && weak_depth >= 0) { weak_depth = -1 }
                         # **ブロックを開く語に続けて 1 行で書いた `set` も同じ `set`。**
                         # `split_commands` が `;` で切るので、`if …; then set +e; fi` の断片は
                         # `then set +e` になる。`^set` だけで探すと当たらず、**同じ意味を 1 行で
@@ -1125,7 +1141,11 @@ ci_workflow_extract() {
                         # **パイプの構成要素とバックグラウンドは子シェルで走る。** `true | set -e` も
                         # `set -e &` も親のオプションは変えないので、どちらの向きも反映しない
                         # （`prev_op` は手前の区切り、`ops[j]` は直後の区切り。実 bash と差分照合して実測）
-                        set_forked = (prev_op == "|" || ops[j] == "|" || ops[j] == "&")
+                        # `case` のアーム模様（`a|linux*)`）の `|` は選択肢の区切りであってパイプではない。
+                        # `split_commands` はそこで切るので、素直に見ると本文が「パイプの構成要素」に化け、
+                        # アームの中の `set +e` が丸ごと落ちる（実 bash と差分照合して実測）
+                        set_arm_here = (case_depth > 0 && struct_text ~ /^[^()]*\)([[:space:]]|;|$)/)
+                        set_forked = ((prev_op == "|" && !set_arm_here) || ops[j] == "|" || ops[j] == "&")
                         # **連鎖の届かない断片は 1 度も走らない**（`true || set +e` / `false && set +e`）。
                         # ここで判定しておかないと、走らない `set +e` を握り潰しとして数え、
                         # 実際にはゲートしているステップを「未配線」と誤報して赤くする。
@@ -1151,9 +1171,26 @@ ci_workflow_extract() {
                             set_arm = 0
                             # 丸括弧付きのアームは `case … in` と同じ行にも書ける（`case $X in (a) set +e`）。
                             # 先頭固定で探すと 1 行書きのときだけ外れる
-                            if (match(set_masked, /^[^()]*\([^()]*\)[[:space:]]*/)) { set_arm = RLENGTH }
-                            else if (match(set_masked, /^[^()]*\)[[:space:]]*/)) { set_arm = RLENGTH }
-                            if (set_arm > 0 && substr(set_masked, set_arm + 1) ~ /^set([[:space:]]|$)/) {
+                            # **`)` を 1 つずつ越えながら `set` を探す。** 1 つの正規表現で
+                            # 先頭から当てると、`case $(echo linux) in linux) set +e` のように
+                            # 主語にコマンド置換がある綴りで `$( … )` を食べて本物のアームを
+                            # 取り逃がす（実 bash と差分照合して実測）。丸括弧の組はまとめて越える
+                            # ので、`( set +e )` のような部分シェルは中身を跨いで終端の外へ出る
+                            # ＝ `set` に着地せず、これまでどおり反映しない
+                            set_arm = 0
+                            while (set_arm <= length(set_masked)) {
+                                # ここが命令の位置なら確定
+                                if (substr(set_masked, set_arm + 1) ~ /^set([[:space:]]|$)/) { break }
+                                set_rest = substr(set_masked, set_arm + 1)
+                                # 次の `)` まで進める（丸括弧の組があれば組ごと）
+                                if (!match(set_rest, /^[^()]*\([^()]*\)[[:space:]]*/) \
+                                    && !match(set_rest, /^[^()]*\)[[:space:]]*/)) { set_arm = -1; break }
+                                # 1 文字も進まないなら打ち切る（無限ループ避け）
+                                if (RLENGTH < 1) { set_arm = -1; break }
+                                set_arm += RLENGTH
+                            }
+                            if (set_arm > 0 && set_arm <= length(set_masked) \
+                                && substr(set_masked, set_arm + 1) ~ /^set([[:space:]]|$)/) {
                                 set_probe = substr(struct_text, set_arm + 1)
                             }
                             # **`eval` は現在のシェルで走る**ので、引数の `set` はそのまま効く。
@@ -1211,12 +1248,11 @@ ci_workflow_extract() {
                             # 同じ階層の括りを打ち消せるのは、その階層で自分が落としたときだけ
                             # 強める向きに共通の前提（命令の位置・定義の外・連鎖に守られていない）
                             strengthen_base = (set_probe == text && !set_in_fndef && prev_op != "&&" && prev_op != "||")
-                            # **括りの記録は errexit のものなので、errexit の判断にしか使わない。**
-                            # pipefail まで巻き込むと、無関係な `set +e` が同じ階層で開いているだけで
-                            # 走らないループの中の `set -o pipefail` が credit され、
-                            # パイプ越しの失敗が伝わらないステップを「伝わる」と読む（fail-open。実測）
-                            weak_cancel = (errexit == 0 && weak_depth == depth)
-                            strengthen_ok = (strengthen_base && (uncertain == 0 || weak_cancel))
+                            # **括りの記録は errexit のものなので、errexit の判断にしか使わない**
+                            # （`apply_errexit()` の中で測る）。pipefail まで巻き込むと、無関係な
+                            # `set +e` が同じ階層で開いているだけで走らないループの中の
+                            # `set -o pipefail` が credit され、パイプ越しの失敗が伝わらない
+                            # ステップを「伝わる」と読む（fail-open。実測）。
                             # pipefail には自前の括り記録が無いので、確実に走ると分かるときだけ
                             strengthen_pipe_ok = (strengthen_base && uncertain == 0)
                             # 弱める向きは、定義の本文でなければ（＝走るかもしれない時点で）反映する
@@ -1246,7 +1282,7 @@ ci_workflow_extract() {
                                 # 記号を除いた残りが、まとめて書かれたオプション文字の並び
                                 setbody = substr(setopt, 2)
                                 # 並びのどこかに `e` があれば errexit の指定
-                                if (setbody ~ /e/) { errexit = apply_errexit(seton, strengthen_ok, weaken_ok, weak_cancel, errexit, depth) }
+                                if (setbody ~ /e/) { errexit = apply_errexit(seton, strengthen_base, uncertain, weaken_ok, errexit, depth) }
                                 # **末尾が `o` なら次の語が長い綴りの名前**（`-o errexit` / `-euo pipefail`）。
                                 # 短い綴りだけを見ると、1 行でゲートを外したまま「ゲートしている」と読む
                                 # **`o` は並びのどこにあってもよい。** bash は `-oe pipefail` を
@@ -1258,7 +1294,7 @@ ci_workflow_extract() {
                                     # `errexit` は失敗でその場で止まるかどうか
                                     # **長い綴りでも同じ記録を残す。** 残さないと、`set +o errexit … set -o errexit` の
                                     # 括りだけが打ち消せず、ゲートしているステップが「未配線」と誤報される
-                                    if (setname == "errexit") { errexit = apply_errexit(seton, strengthen_ok, weaken_ok, weak_cancel, errexit, depth) }
+                                    if (setname == "errexit") { errexit = apply_errexit(seton, strengthen_base, uncertain, weaken_ok, errexit, depth) }
                                     # `pipefail` が立っていればパイプ越しでも失敗が伝わる
                                     else if (setname == "pipefail") { pipefail = set_flag(seton, strengthen_pipe_ok, weaken_ok, pipefail) }
                                 }

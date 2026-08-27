@@ -1524,6 +1524,75 @@ jobs:
           esac
           bash ${SUITE_PATH}"
 
+# 複数行で書いたアームは**それぞれの `set` が断片の先頭**になるので、
+# 1 行書きと違って深さだけでは区別できない（1 行書きだけを固定すると空振りする）
+assert_not_wired "複数行で書いた case アームも打ち消し合わない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case \"${DOLLAR}OS\" in
+            linux*)
+              set +e
+              ;;
+            *)
+              set -e
+              ;;
+          esac
+          bash ${SUITE_PATH}"
+
+# 途中でループを抜ける綴りがあると、括りの後半は走るとは限らない
+assert_not_wired "continue を挟んだ括りは打ち消しにしない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          for f in a b; do
+            set +e
+            false || continue
+            set -e
+          done
+          bash ${SUITE_PATH}"
+
+# 主語にコマンド置換があっても本物のアームを取り逃がさない
+assert_not_wired "case の主語がコマンド置換でもアームを見つける" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case ${DOLLAR}(echo linux) in linux) set +e ;; esac
+          bash ${SUITE_PATH}"
+
+# アーム模様の `|` は選択肢の区切りであってパイプではない
+assert_not_wired "選択肢を持つ case アームの set +e" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case \"${DOLLAR}OS\" in a|linux*) set +e ;; esac
+          bash ${SUITE_PATH}"
+
+# 1 語の中で自分を打ち消す綴りも、2 コマンドに分けた同じ意味と答えを揃える
+assert_wired "1 語の set +e -e はループの中でも打ち消し合う" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          for f in a; do
+            set +e -e
+          done
+          bash ${SUITE_PATH}"
+
 assert_wired "コマンド置換は括弧の釣り合いを崩さない" "name: ci
 jobs:
   type-check:
