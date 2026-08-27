@@ -906,6 +906,16 @@ ci_workflow_extract() {
             return n
         }
 
+        # `set` のオプション 1 つ分の新しい値を返す。**向きごとに反映してよい条件が違う**（issue #113）。
+        # `on` が真なら `-`（ゲートを強める）、偽なら `+`（弱める）。反映してよくなければ現在値を返す。
+        # 短い綴りと長い綴りで同じ判断を書き写さないよう、ここ 1 か所に寄せてある
+        function set_flag(on, strengthen_ok, weaken_ok, current) {
+            # 強める向きは、確実に走ると分かるときだけ立てる
+            if (on) { return strengthen_ok ? 1 : current }
+            # 弱める向きは、走るかもしれない時点で落とす
+            return weaken_ok ? 0 : current
+        }
+
         # その構造行がステップの中の鍵かどうかを返す。**ジョブ直下の鍵は `steps:` と同じ桁**に並ぶ
         # （どちらもジョブというマップの鍵なので）。ダッシュで始まる行はステップの先頭鍵なので中側。
         # その構造行が「ジョブ直下の鍵」「ステップ自身の鍵」「それより内側（入れ子の中身）」の
@@ -936,7 +946,7 @@ ci_workflow_extract() {
         # **ここでは出力しない**のが要点で、ジョブ単位の無効化キー（`if: false` 等）は
         # YAML のキー順が自由である以上 `steps:` の**後ろ**にも書ける。書いた時点で
         # 出力済みのステップは取り消せないため、ジョブ 1 つ分を溜めてから出す
-        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k) {
+        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, set_probe, setw, nsetw, sw, setopt, seton, setbody, setname, strengthen_ok, weaken_ok) {
             # **シェルのオプションはステップごとにリセットする。** ステップは 1 つずつ
             # 別のシェルで走るので、前のステップの `set +e` / `pipefail` は引き継がれない。
             # **控えるのは `set` で明示された分だけ（-1 = 明示なし）。** シェルの既定と突き合わせるのは
@@ -1037,45 +1047,41 @@ ci_workflow_extract() {
                             # スイートの失敗を握り潰したまま全表明を緑のまま通せた（実 bash と差分照合して実測）。
                             # 代償として「通らないかもしれない分岐の `set +e`」は未配線と誤報しうるが、
                             # そちらは CI が赤くなって人が見る**fail-closed** 側なので許容する。
-                            strengthen_ok = (uncertain == 0)
                             # **関数定義の本文は「その場では走らない」ので弱める向きも反映しない。**
                             # `cleanup() { set +e; … }` は定義しただけでは何も起きず、反映すると
                             # 実際にはゲートしている後続を「未配線」と誤報して CI を赤いままにする
                             # （呼ばれた場合の握り潰しは、そもそも呼び出しの追跡をしていないので
                             #   このライブラリの範囲外。main と同じ扱いに揃えてある）
+                            # 反映してよい条件は向きで違う。強める向きは走ると分かるときだけ、
+                            # 弱める向きは関数定義の本文でなければ（＝走るかもしれない時点で）
+                            strengthen_ok = (uncertain == 0)
                             weaken_ok = (fndef == 0)
                             # **語を左から右へ順に適用する。** bash はそう解釈するので
-                            # `set +e -e` は最後の `-e` が勝つ。1 本の正規表現で全体を見ると
-                            # この順序が落ち、ゲートしているステップを「未配線」と誤報する
+                            # `set +e -e` は後ろの `-e` が勝つ。1 本の正規表現で断片全体を見ると
+                            # この順序が落ち、ゲートしているステップを「未配線」と誤報して赤くする
                             nsetw = split(set_probe, setw, /[[:space:]]+/)
                             for (sw = 2; sw <= nsetw; sw++) {
                                 setopt = setw[sw]
                                 # `--` から後ろは位置パラメータであってオプションではない
                                 if (setopt == "--") { break }
-                                # `-` / `+` で始まる短い綴りの並び（`-e` / `+ex` / `-euo`）だけを見る
+                                # `-` / `+` で始まる短い綴りの並び（`-e` / `+ex` / `-euo`）だけを読む
                                 if (setopt !~ /^[-+][a-z]*$/) { continue }
                                 # 先頭の記号が向きを決める（`-` で有効化、`+` で無効化）
                                 seton = (substr(setopt, 1, 1) == "-")
+                                # 記号を除いた残りが、まとめて書かれたオプション文字の並び
                                 setbody = substr(setopt, 2)
                                 # 並びのどこかに `e` があれば errexit の指定
-                                if (setbody ~ /e/) {
-                                    if (seton) { if (strengthen_ok) { errexit = 1 } }
-                                    else if (weaken_ok) { errexit = 0 }
-                                }
+                                if (setbody ~ /e/) { errexit = set_flag(seton, strengthen_ok, weaken_ok, errexit) }
                                 # **末尾が `o` なら次の語が長い綴りの名前**（`-o errexit` / `-euo pipefail`）。
-                                # 短い綴りだけを見ると 1 行でゲートを外したまま「ゲートしている」と読む
+                                # 短い綴りだけを見ると、1 行でゲートを外したまま「ゲートしている」と読む
                                 if (setbody ~ /o$/ && sw < nsetw) {
+                                    # 名前の語を消費する（次の周回では読まない）
                                     sw++
                                     setname = setw[sw]
-                                    if (setname == "errexit") {
-                                        if (seton) { if (strengthen_ok) { errexit = 1 } }
-                                        else if (weaken_ok) { errexit = 0 }
-                                    }
+                                    # `errexit` は失敗でその場で止まるかどうか
+                                    if (setname == "errexit") { errexit = set_flag(seton, strengthen_ok, weaken_ok, errexit) }
                                     # `pipefail` が立っていればパイプ越しでも失敗が伝わる
-                                    else if (setname == "pipefail") {
-                                        if (seton) { if (strengthen_ok) { pipefail = 1 } }
-                                        else if (weaken_ok) { pipefail = 0 }
-                                    }
+                                    else if (setname == "pipefail") { pipefail = set_flag(seton, strengthen_ok, weaken_ok, pipefail) }
                                 }
                             }
                         }
