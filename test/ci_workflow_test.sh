@@ -1273,6 +1273,89 @@ jobs:
           command set +e
           bash ${SUITE_PATH}"
 
+# --- 同じ階層で括った `set +e … set -e`（打ち消し合う） -----------------------------
+#
+# 非対称の扱いは「通らない分岐の `set -e` が**外側**の握り潰しを隠す」ことへの備えなので、
+# 落としたのが同じ階層の `set +e` なら、戻す側も同じだけ条件付きで隠すものが無い。
+# ここを見ないと、この括りが「以降ずっと握り潰し」と読まれて CI が恒常的に赤くなる
+
+assert_wired "ループの中で括った set +e … set -e は打ち消し合う" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          for f in a; do
+            set +e
+            true
+            set -e
+          done
+          bash ${SUITE_PATH}"
+
+assert_wired "1 行で括った set +e … set -e も打ち消し合う" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          for f in a; do set +e; true; set -e; done
+          bash ${SUITE_PATH}"
+
+# 締めすぎない代わりに、**外側**の握り潰しは隠さない（階層が違えば戻せない）
+assert_not_wired "外側の set +e は内側の set -e で戻らない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          set +e
+          for f in a; do set -e; done
+          bash ${SUITE_PATH}"
+
+# 別のブロックへ持ち越さない（階層の数字が同じでも別のブロック）
+assert_not_wired "別ブロックの同じ深さの set -e では戻らない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          if [ -n \"${DOLLAR}A\" ]; then set +e; fi
+          if [ -n \"${DOLLAR}B\" ]; then set -e; fi
+          bash ${SUITE_PATH}"
+
+# --- 関数定義の 3 綴り（一覧を 2 か所に分けると必ず片方が漏れる） -------------------
+
+# `function f()` の綴りはどちらの一覧からも抜けていた。定義が階層を開かないのに
+# 閉じ `}` だけが深さを減らし、外側のブロックを潰す（条件付きの呼び出しが証拠に化ける）
+assert_not_wired "function f() { } の綴りでも外側のブロックが潰れない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          if [ -n \"${DOLLAR}SKIP\" ]; then
+            function note() { echo x; }
+            bash ${SUITE_PATH}
+          fi"
+
+# --- 丸括弧付きの case アームは 1 行書きでも拾う -----------------------------------
+
+assert_not_wired "case … in (a) set +e を 1 行で書いた綴り" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          set -e
+          case \"${DOLLAR}X\" in (a) set +e ;; esac
+          bash ${SUITE_PATH}"
+
 assert_wired "コマンド置換は括弧の釣り合いを崩さない" "name: ci
 jobs:
   type-check:
