@@ -548,6 +548,28 @@ jobs:
           }
           bash ${SUITE_PATH}"
 
+assert_not_wired "条件付きブロックを閉じた fi に付いた || true" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          if [ -n \"${DOLLAR}X\" ]; then
+            bash ${SUITE_PATH}
+          fi || true"
+
+assert_not_wired "ループを閉じた done に付いた || true" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          for f in a; do
+            bash ${SUITE_PATH}
+          done || true"
+
 assert_not_wired "複数行の部分シェルを閉じた行の || true" "name: ci
 jobs:
   type-check:
@@ -1976,6 +1998,35 @@ jobs:
       - name: subject
         run: |
           if false && true; then set +e; fi
+          bash ${SUITE_PATH}"
+
+# --- 1 行書きの case を外側のブロックの中に置く ------------------------------------
+#
+# 深さも `case_depth` も増えるのは断片の末尾なので、1 行書きを処理している最中はまだ 0。
+# アームの `)` を部分シェルの閉じと数えると、囲っているブロックの階層が巻き戻り、
+# 走らないはずの本体が「最上位で確実に走る」に化ける
+
+assert_not_wired "偽と分かるブロックの中の 1 行 case は外側を巻き戻さない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          if false; then
+            case \"${DOLLAR}RUNNER_OS\" in Linux) echo linux ;; esac
+            bash ${SUITE_PATH}
+          fi"
+
+assert_not_wired "走らないループの中の 1 行 case も外側を巻き戻さない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          set +e
+          while false; do case a in a) : ;; esac; set -e; done
           bash ${SUITE_PATH}"
 
 assert_wired "コマンド置換は括弧の釣り合いを崩さない" "name: ci
