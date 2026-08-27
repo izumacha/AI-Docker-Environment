@@ -1715,6 +1715,534 @@ jobs:
           bash ${SUITE_PATH}
           MARK"
 
+# **前の手順の名前に書かれた区切り文字が、後ろの手順の実行を消してはいけない。**
+# 上の構造行の契約が守る規則を、消費側（配線の検査）から見た形でも押さえる。
+# ブロック形式の平文にある `,` の直後のアポストロフィを引用スカラーの開始と読むと、
+# 閉じない引用が次の行以降へ引き継がれて `run: |` が本文として扱われなくなり、
+# **本文に書かれた検証コマンドが抽出から丸ごと消える**（実測で `not-wired` に化けた）。
+# 手順名は PyYAML が 1 つの平文として読む、なんの変哲もない文字列
+assert_wired "前の手順名の読点とアポストロフィは後ろの手順の実行を消さない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Build image, 'tis the slow step
+        run: echo build
+      - name: subject
+        run: |
+          bash ${SUITE_PATH}"
+
+# --- 構造行の書き出し（`emit_structural_lines`）の契約 -----------------------------
+#
+# **この共有トークナイザの規則を、消費側の正規表現越しでなく直接固定する。**
+# issue #93 の対応で入れた「引用に囲まれたスカラーの中のフロー区切りを伏せる」処理は、
+# これまで `action_pin_test.sh` の位置規則を通してしか検査されていなかった。つまり伏せる処理を
+# 丸ごと消しても、このスイートも網羅性検査も緑のままだった（実測）。トークナイザの契約が
+# 消費側 1 つの実装詳細に人質を取られている状態なので、ここで直接押さえる。
+
+# 仮ワークフローの連番（ケースごとに別名にして、失敗した入力がディスクに残るようにする）
+STRUCTURAL_SEQ=0
+
+# 合成したワークフローを `emit_structural_lines` に 1 度だけ通し、全出力を
+# `STRUCTURAL_OUT` に置く。**仮ファイルの名前も呼び出しもここだけが持つ**（呼び出し側が
+# 同じパスを書き写すと、名前の付け方を変えたときに「別のファイルを見て緑」になる）
+structural_emit() {
+    # 引数を意味の分かる名前に取り出す（ワークフロー本文）
+    local body="$1"
+    # 検査ごとに別名の仮ワークフローを作る（失敗したケースの入力がディスクに残るように）
+    STRUCTURAL_SEQ=$((STRUCTURAL_SEQ + 1))
+    local path="${TMP_DIR}/structural-${STRUCTURAL_SEQ}.yml"
+    # 合成ワークフローを書き出す
+    printf '%s\n' "${body}" > "${path}"
+    # 構造行の全出力を控える（emit はこの 1 回だけ）
+    STRUCTURAL_OUT="$(emit_structural_lines "${path}")"
+}
+
+# 構造行が期待どおりかを数える。第 1 引数がケース名、第 2 引数が期待する内容、
+# 第 3 引数がワークフロー本文、第 4 引数が見たい行番号
+assert_structural_line() {
+    # 仮ワークフローを作って構造行の全出力を取る
+    structural_emit "$3"
+    # **構造行が 1 行でも出ているかを先に確かめる。** 期待値が空文字のケース
+    # （ブロックスカラーの本文が漏れないこと）は、解析器が丸ごと壊れて何も出なくなった場合にも
+    # 一致してしまう（「不在＝合格」。このリポジトリが繰り返し塞いできた形）
+    if [ -z "${STRUCTURAL_OUT}" ]; then
+        report_fail "$1" "構造行が 1 行も書き出されなかった（解析器が壊れています。行の中身以前の失敗）"
+        return
+    fi
+    # 控えた出力から目的の行だけを取り出し、行番号の接頭辞を落とす
+    local actual
+    actual="$(printf '%s\n' "${STRUCTURAL_OUT}" | awk -F: -v n="$4" '
+        $1 == n { sub(/^[0-9]+:/, ""); print }')"
+    # 期待と一致すれば合格、違えば両方を見せて落とす
+    if [ "${actual}" = "$2" ]; then
+        report 0 "$1"
+    else
+        report_fail "$1" "期待«$2» に対して «${actual}» が書き出された"
+    fi
+}
+
+# 引用の中の読点は構造ではないので、代役の文字へ伏せて書き出す（幻の参照を作らないため）
+assert_structural_line "引用された手順名の読点は伏せられる" \
+    '      - name: compare pinning~ uses: policy' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: "compare pinning, uses: policy"' 6
+
+# 伏せる文字は読点だけではない。**波括弧・角括弧も同じく構造としてしか意味を持たない**ので、
+# 引用の中にあれば伏せる。ここを読点だけに絞ると `- name: "a{uses: policy}"` で幻の参照が戻り、
+# `- name: "Rotate {secrets: prod}"` は特権判定を read-only から privileged へ倒してしまう
+# （実測: `flow_re` を `[,]` に狭める変異は、この 1 件を足す前は全スイート緑のまま通った）
+assert_structural_line "引用された値の中の波括弧も伏せられる" \
+    '      - name: a~uses: policy~' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: "a{uses: policy}"' 6
+
+# 角括弧も同様（フロー並びの開き・閉じとして読まれないようにする）
+assert_structural_line "引用された値の中の角括弧も伏せられる" \
+    '      - name: a~uses: policy~' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: "a[uses: policy]"' 6
+
+# 引用の中の `#` も伏せる。YAML でコメントを始めるのは引用の外の `#` だけなのに、
+# 引用符を落とした後の行を見る消費側にはその区別が付かないため、ここで決める
+# （伏せないと特権判定が値の中の `#` で行を切り、後ろの `secrets:` を捨てて fail-open になる）
+assert_structural_line "引用された値の中の # も伏せられる" \
+    '      - name: a: ~b' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: "a: #b"' 6
+
+# 逆に、**引用の外の `#` はコメントの印なので伏せない**（版注記の取り出しがここに依存している）
+assert_structural_line "引用の外の # はそのまま残る" \
+    '      - uses: a/b@v1  # v1' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: a/b@v1  # v1' 6
+
+# 伏せるのは区切り文字だけで、引用された値の綴りには触れない（参照を読めなくしないため）
+assert_structural_line "引用された uses: の値はそのまま残る" \
+    '      - uses: actions/checkout@v7' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: "actions/checkout@v7"' 6
+
+# 素のスカラー途中のアポストロフィは引用の開始ではないので、後ろの区切りは生きたまま残る
+assert_structural_line "素のスカラー途中のアポストロフィでは伏せない" \
+    '      - {name: dont, uses: actions/evil@v1, desc: its fine}' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - {name: don'"'"'t, uses: actions/evil@v1, desc: it'"'"'s fine}' 6
+
+# 行内で閉じない引用は伏せずに従来の姿へ倒す（本物の区切りを隠さないため）
+assert_structural_line "閉じない引用は伏せずにそのまま出す" \
+    '      - {name: oops, uses: actions/evil@v1' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - {name: "oops, uses: actions/evil@v1' 6
+
+# --- 引用スカラーの「開始位置」の規則（ここまでの契約と同じく直接押さえる） ---
+#
+# 開始位置の規則はどれも、緩めると**本物の区切りを伏せて `uses:` を見逃す** fail-open か、
+# 厳しくすると**幻の参照で必須チェックが恒常的に赤くなる**かのどちらかに倒れる。
+# 消費側の位置規則越しでしか検査されていないと、トークナイザ側の契約が
+# `action_pin_test.sh` の正規表現に人質を取られたままになるので、ここでも固定する。
+
+# **既知の残件**: 値を持たない鍵の次の行に置いた引用値は、行頭の引用符を開始と認めないため
+# 伏せられない（幻の参照が出る側＝余分に赤くなる）。前の行を見て例外を作る実装は
+# 複数行にまたがる引用で fail-open を 3 通り作ったため撤回した（requirements.md の (d)）
+assert_structural_line "KNOWN RESIDUAL: 値を持たない鍵の次行の引用値は伏せられない" \
+    '          compare pinning, uses: policy' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name:
+          "compare pinning, uses: policy"' 7
+
+
+# **引用を開いたまま終わった行は「値を持たない鍵」ではない。** 未終端の引用は素の姿へ倒して
+# 書き出すので `steps: [{name: "a:` が `:` で終わって見えるが、次の行の先頭にあるのは
+# **閉じる側**の引用符であって新しい値の始まりではない。ここを鍵と読むと、閉じ側を開始と誤読して
+# 後ろの本物の区切りごと伏せ、`uses:` を見逃す（実測: main は `actions/evil@v1` を検出し、
+# この守りを入れる前のこちらは 1 件も返さなかった。**fail-open**）
+assert_structural_line "引用を開いたまま終わった行の次行では伏せない" \
+    '      , uses: actions/evil@v1, note: x}]' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps: [{name: "a:
+      ", uses: actions/evil@v1, note: "x"}]' 6
+
+# 同じ形の **3 行以上**版。行頭を開始と認める実装では、途中の行の見え方によって
+# 閉じ側の引用符が開始と誤読され、`actions/evil@v1` が消えた（実測）。行内で完結する
+# いまの判定ではどの行も伏せないので、読点は構造として残る
+assert_structural_line "引用の中の途中の行でも鍵と認めない" \
+    '      , uses: actions/evil@v1}]' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps: [{name: "a:
+      b:
+      ", uses: "actions/evil@v1"}]' 7
+
+# 引用スカラーが 1 つ出た時点で、行頭の「字下げと `-` だけ」の並びは終わっていること。
+# ここを降ろさないと、後ろの `-` を並びの印と読んで次の引用符を開始と認め、
+# 本物の区切りごと伏せてしまう（実測: 降ろさない実装では `actions/evil@v1` が消えた）
+assert_structural_line "引用の後ろのハイフンは並びの印ではない" \
+    '          a - b, uses: actions/evil@v1' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name:
+          "a" - '"'"'b, uses: actions/evil@v1'"'"'' 7
+
+# **閉じた**引用スカラーでも、行頭の印の並びはそこで終わっていること。
+# 上のケースは行頭が引用符なので「落とした」経路を通る。こちらは `- ` の後ろで**開いて閉じる**ため
+# 閉じ側の経路を通り、そこで降ろさないと後ろの `- ` を並びの印と読んで次の引用符を開始と認め、
+# 読点を伏せて `actions/evil@v1` を取り逃がす（実測。2 つの経路は別々に押さえる必要がある）
+assert_structural_line "閉じた引用の後ろのハイフンも並びの印ではない" \
+    '      - a - b, uses: actions/evil@v1' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - "a" - '"'"'b, uses: actions/evil@v1'"'"'' 6
+
+# 落とした引用符をまたいで**位置の記憶を持ち越さない**こと。持ち越すと、壊れた形で
+# 「引用された鍵の直後の `:`」と誤認して本物の区切りを伏せる（`{"a"" :"b, secrets: …"}` で実測。
+# 特権判定が read-only へ倒れ、ワークフロー内の可変タグが検査から全部外れる **fail-open**）
+assert_structural_line "落とした引用符をまたいで位置の記憶を持ち越さない" \
+    '  j: {a :b, secrets: inherit, runs-on: ubuntu-latest}' \
+    'name: ci
+jobs:
+  j: {"a"" :"b, secrets: inherit", runs-on: ubuntu-latest}' 3
+
+# 開始と認めずに**落とした**引用符でも、行頭の印の並びはそこで終わっていること。
+# 降ろさないと、後ろの `- ` を並びの印と読んで次の引用符を開始と認め、区切りを伏せてしまう
+# （実測: 降ろさない実装では読点が伏せられ、`actions/evil@v1` が抽出から消えた）
+assert_structural_line "落とした引用符の後ろのハイフンも並びの印ではない" \
+    '      - - b, uses: actions/evil@v1' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      -" - '"'"'b, uses: actions/evil@v1'"'"'' 6
+
+# **引用スカラーの続きの行では、どこに引用符があっても伏せない。** 継続行に現れる引用符は
+# 「閉じる側」かもしれず、開始位置の文字（`,` `{` `[` / 空白付きの `:` `-`）の直後に来ると
+# 開始と誤読して後ろの**本物の区切り**ごと伏せる（実測: 可変タグが検査から消えた **fail-open**）。
+# 続きの行かどうかは前の行が引用を開いたままかで分かり、この止め方は
+# **伏せるのをやめる方向にしか効かない**ので、見立てを誤っても余分に赤くなるだけで済む
+assert_structural_line "続きの行では閉じ側の引用符を開始と読まない" \
+    '      ,, uses: actions/evil@v1}]' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps: [{name: "a,
+      ,", uses: "actions/evil@v1"}]' 6
+
+# 続きの行の**脱出表記は終端ではない**こと。`\"` を終端と読むと引用の続きがそこで終わったことになり、
+# 次の行から伏せる判断が復活して、そこにある**本物の区切り**を伏せてしまう
+# （実測: 読点が `~` になり `actions/evil@v1` が抽出から消えた **fail-open**）
+assert_structural_line "続きの行の脱出された引用符は終端ではない" \
+    '      ,, uses: actions/evil@v1}]' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps: [{name: "a,
+      \", b,
+      ,", uses: "actions/evil@v1"}]' 7
+
+# 単一引用の側の脱出表記（`'"'"''"'"'` ＝ 2 つ続けたアポストロフィ）も終端ではないこと。
+# **綴りを共有した `is_escape_at` の単一引用側だけを消しても、上の二重引用の case では緑のまま
+# 通った**（実測）ので、両方の綴りをここで押さえる。観測点は「引用スカラーの続きの行は伏せない」
+# という契約で、規則が壊れると 6 行目で span が閉じたことになり、7 行目に伏せる処理が復活して
+# `p, uses: policy` が `p~ uses: policy` に変わる。
+#
+# **7 行目の期待値は幻の参照 `policy` を含む** — これは続きの行を伏せない設計の帰結（residual）で、
+# 「余分に赤くなる」側。PyYAML はこの入力を
+# `{'"'"'name'"'"': "a, '"'"', b, ", '"'"'x'"'"': '"'"'p, uses: policy'"'"', '"'"'uses'"'"': '"'"'actions/evil@v1'"'"'}` と読むので、
+# 本物の参照は `actions/evil@v1` だけ。その参照が同じ行に残っていることも同時に押さえている
+assert_structural_line "続きの行の単一引用の脱出表記も終端ではない" \
+    '      , x: p, uses: policy, uses: actions/evil@v1}]' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps: [{name: '"'"'a,
+      '"'"''"'"', b,
+      '"'"', x: '"'"'p, uses: policy'"'"', uses: actions/evil@v1}]' 7
+
+# 続きの行が閉じたら、**その次の行からは通常どおり伏せる**こと（止めっぱなしにすると、
+# 以降のふつうの手順名でこの PR が直した幻の参照が戻る）
+assert_structural_line "続きが閉じた次の行では通常どおり伏せる" \
+    '      - {name: b~ uses: policy, uses: ./local}' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - {name: "a,
+      "}
+      - {name: "b, uses: policy", uses: ./local}' 8
+
+# 逆に、**素のスカラーの継続行**の先頭にある引用符は開始ではない（伏せると本物の区切りが消える）
+assert_structural_line "継続行の先頭の引用符では伏せない" \
+    '      b, uses: actions/evil@v1, z: 1}, {uses: ./local}]' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps: [{name: a
+      '"'"'b, uses: actions/evil@v1'"'"', z: 1}, {uses: ./local}]' 6
+
+# 引用された鍵に続く `:` は空白が無くても開始（JSON 形式）
+assert_structural_line "JSON 形式の引用された鍵の後は伏せられる" \
+    '      - {name:a~ uses: policy, uses: ./local}' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - {"name":"a, uses: policy", uses: ./local}' 6
+
+# 素の鍵に続く `:` は空白を要求する（`{name:"a` は鍵ごと 1 つのスカラーなので開始ではない）
+assert_structural_line "素の鍵の後ろの空白なしの引用符では伏せない" \
+    '      - {name:a, uses: actions/evil@v1, note: b}' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - {name:"a, uses: actions/evil@v1, note: b"}' 6
+
+# 空白で囲まれていてもスカラー途中の `-` は並びの印ではない（伏せると可変タグが消える）
+assert_structural_line "スカラー途中の空白付きハイフンでは伏せない" \
+    '      - {name: Lint - tis time, uses: actions/evil@v1, note: its ok}' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - {name: Lint - '"'"'tis time, uses: actions/evil@v1, note: it'"'"'s ok}' 6
+
+# --- ブロックスカラーの見つけ方（本文を構造と読み違えないこと） ---
+#
+# `run: |` の**本文**は YAML の構造ではなくただの文字列なので、そこに書かれた `uses:` を
+# 宣言と読むと、実在しない参照で必須チェックが恒常的に赤くなる（このライブラリを切り出した理由）。
+# 開始行の判定は**行末コメントを落としてから**行うので、その落とし方が壊れると
+# `run: |  # 説明` が開始行として認識されず、本文が丸ごと構造として漏れ出す。
+
+# ブロックスカラーの本文（`uses:` を含む）は構造行として書き出さないこと
+assert_structural_line "行末コメント付きの run: | の本文は漏れない" \
+    '' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |  # 説明
+          uses: actions/evil@v1
+      - uses: ./local' 7
+
+# 同じ入力で**本文の後ろの行はきちんと出る**こと（上の空文字が「何も出ていない」ことの
+# 裏返しにならないよう、走査が生きていることを同時に押さえる）
+assert_structural_line "本文を読み飛ばしても後続の構造行は出る" \
+    '      - uses: ./local' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |  # 説明
+          uses: actions/evil@v1
+      - uses: ./local' 8
+
+# **引用スカラーの続きの行は、たとえ `run: |` の形をしていてもブロックスカラーを始めない。**
+# その行は文字列の中身であって構造ではない。ここで始めてしまうと以降の行を本文として読み飛ばし、
+# **その中にある本物の `uses:` が抽出から丸ごと消える**（違反 0 件で通る **fail-open**）。
+# 下の入力は PyYAML では手順が 2 つで、2 つ目が `uses: actions/evil@v1` を持つ
+# （`{'name': 'a run: | ', 'uses': 'actions/evil@v1'}`）。可変タグを載せた 9 行目が
+# 書き出されることを固定する
+assert_structural_line "続きの行が run: | の形でも本文として読み飛ばさない" \
+    '            , uses: actions/evil@v1}' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./local
+      - {name: "a
+          run: |
+            ", uses: actions/evil@v1}' 9
+
+# **行末コメントの中で開いた引用符は、次の行へ引き継がない。** YAML のコメントは行末までなので、
+# そこに書かれた `\"` は複数行にまたがる引用スカラーの始まりではない。引き継ぐと以降の行がすべて
+# 「引用スカラーの続き」と見なされ、**`run: |` がブロックスカラーとして認識されなくなってシェル本文が
+# 構造として漏れ出す**（実測: `run:` の本文の `uses: …@v1` が幻の参照として報告され、本文の
+# `permissions: write-all` を宣言と読んで read-only のワークフローが特権と判定された。
+# 必須チェックが恒常的に赤くなる **fail-open**）。PyYAML はこの入力の 2 つ目の手順を
+# `{'run': 'uses: actions/evil@v1\n'}` と読む＝本文は文字列であって構造ではない
+assert_structural_line "コメントの中の閉じない引用符は次の行へ引き継がない" \
+    '' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./local   # see: "release notes
+      - run: |
+          uses: actions/evil@v1
+      - uses: ./other' 8
+
+# 同じ入力で**本文の後ろの行はきちんと出る**こと（上の空文字が「解析器が止まった」の裏返しに
+# ならないよう、走査が生きていることを同時に押さえる）
+assert_structural_line "コメントの引用符に足を取られても後続の構造行は出る" \
+    '      - uses: ./other' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./local   # see: "release notes
+      - run: |
+          uses: actions/evil@v1
+      - uses: ./other' 9
+
+# **続きの行は「閉じたか」ではなく「末尾で何が開いているか」で見る。** 閉じた時点で打ち切ると、
+# 同じ行の後ろでもう 1 つ引用が開く形を取り逃がし、次の行が「引用の中なのに普通の行」として扱われる。
+# するとそこに書かれた `run: |` がブロックスカラーとして認識され、**続く行が本文として丸ごと落ちる**
+# （**fail-open**。下の入力では 9・10 行目が構造行から消えていた）
+assert_structural_line "続きの行の後ろで開き直した引用も引き継ぐ" \
+    '            uses: actions/checkout@v7' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: "a
+          b" note: '"'"'c
+          run: |
+            uses: actions/checkout@v7
+            more string
+          d'"'"'' 9
+
+# **ブロック形式では `{` `[` `,` は構造ではなく、ただの平文。** これらを無条件に
+# 「値が始まりうる位置」と読むと、素のスカラーの中の引用符（`Build image, '"'"'tis the slow step` の
+# アポストロフィ）が引用スカラーの開始に化ける。その引用は行内で閉じないので
+# **複数行スカラーとして次の行以降へ引き継がれ**、以降の行がすべて「続き」扱いになる。
+# すると `run: |` がブロックスカラーとして認識されなくなり、本文が構造として漏れ出す
+# （実測: 本文の `uses: …@v1` が幻の参照として報告され、同時に本文の検証コマンドが
+# 抽出から消えて「配線されていない」と判定された。**両方向に壊れる**）。
+# PyYAML はこの手順名を 1 つの平文 `Build image, 'tis the slow step` として読む。
+#
+# 3 つの区切り文字それぞれで押さえる（1 つだけ直しても他の 2 つで同じ穴が開くため）
+for tight_case in "読点" "Build image, 'tis the slow step" \
+                  "波括弧" 'Compare {a, "b} against c' \
+                  "角括弧" "Compare [a, 'b] against c"; do
+    # 2 語で 1 組なので、名前を控えたら次の回で本文を受け取る
+    if [ -z "${tight_label-}" ]; then tight_label="${tight_case}"; continue; fi
+    # ブロック形式の平文を手順名に持つワークフローを組み立てる
+    tight_body="name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: ${tight_case}
+      - run: |
+          uses: actions/evil@v1
+      - uses: ./other"
+    # ブロックスカラーの本文（8 行目）は構造ではないので、1 行も書き出されてはいけない
+    assert_structural_line "ブロック形式の${tight_label}の直後の引用符は開始と認めない" \
+        '' "${tight_body}" 8
+    # 同じ入力で後続の構造行が出ること（上の空文字が「解析器が止まった」の裏返しにならないように）
+    assert_structural_line "ブロック形式の${tight_label}に足を取られても後続の構造行は出る" \
+        '      - uses: ./other' "${tight_body}" 9
+    # 次の組のために名前を空へ戻す
+    tight_label=""
+done
+# ループで使った作業変数は後続のケースへ持ち越さない
+unset tight_case tight_label tight_body
+
+# **逆に、フロー形式の中の区切りの直後は今までどおり開始と認める。** 上の修正を
+# 「`{` `[` `,` を開始位置から外す」で済ませると、`{name: a, "b, uses: policy": c}` の
+# 引用の中の読点が伏せられなくなり、**幻の参照 `policy`**（issue #93 の 2 件目）が戻る。
+# PyYAML はこの入力を `{'name': 'a', 'b, uses: policy': 'c'}` と読む＝読点は値の一部
+assert_structural_line "フロー形式の中の読点の直後は引用スカラーの開始と認める" \
+    '      - {name: a, b~ uses: policy: c}' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - {name: a, "b, uses: policy": c}' 6
+
+# **引用符は 1 つも書き出さない。** 消費側（`scan_workflow_structure`）はこの前提のもとで
+# `"permissions":` と `permissions:` を同じ形として扱っている。ここが崩れると、崩れ方は
+# 「特権ワークフローを非特権と誤判定する」向き（fail-open）なので、契約として明示的に固定する
+quote_free_body='name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: "a, b"
+      - name: '"'"'c, d'"'"'
+      - name: "say \"hi\""
+      - name: '"'"'don'"'"''"'"'t'"'"'
+      - {"name":"e, f", "uses": ./local}
+      - name: "unclosed, g'
+printf '%s\n' "${quote_free_body}" > "${TMP_DIR}/quote-free.yml"
+# **まず出力を受け取ってから判定する。** `| grep -q` に直接つなぐと、解析器が壊れて 1 行も
+# 出さなくなった場合も「引用符が見つからない＝合格」になり、**このスイートが守るはずの
+# fail-open をそのまま見逃す**（＝「不在＝合格」。このリポジトリが繰り返し塞いできた形）
+quote_free_out="$(emit_structural_lines "${TMP_DIR}/quote-free.yml")"
+# 何も出てこないのは解析器の異常なので、引用符の有無を見るより先に落とす
+if [ -z "${quote_free_out}" ]; then
+    report_fail "構造行に引用符を 1 つも残さない" \
+        "構造行が 1 行も書き出されなかった（解析器が壊れています。引用符の有無以前の失敗）"
+elif printf '%s\n' "${quote_free_out}" | grep -q "['\"]"; then
+    report_fail "構造行に引用符を 1 つも残さない" \
+        "書き出された構造行に引用符が残っている（消費側の正規化の前提が崩れ、特権判定が fail-open になる）"
+else
+    report 0 "構造行に引用符を 1 つも残さない"
+fi
+
 # 存在しないファイルも同じ扱い（読めないまま先へ進ませない）
 if ci_workflow_load "${TMP_DIR}/does-not-exist.yml" "${TMP_DIR}/missing-out" 2> /dev/null; then
     report_fail "存在しないワークフローは読み込み失敗として返る" "読めないファイルなのに成功が返った"

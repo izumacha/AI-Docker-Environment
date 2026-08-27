@@ -135,9 +135,9 @@ scan_workflow_structure() {
     local path="$1"
 
     # YAML を 1 行ずつたどり、`permissions:` の値（同一行のスカラー／フロー形式／続く字下げブロック）を解釈する。
-    # 引用符の文字集合は awk の変数として渡す（awk のプログラムはシェルの単一引用符で囲まれており、
-    # その中に `'` を直接書けないため）
-    emit_structural_lines "$path" | awk -v quote_chars='["'"'"']' '
+    # コメントの開始位置を表す断片は共有定数から awk へ渡す（綴りの持ち主は
+    # `test/lib/ci_workflow.sh` の `CI_WORKFLOW_COMMENT_START` 1 か所だけ）
+    emit_structural_lines "$path" | awk -v comment_re="${CI_WORKFLOW_COMMENT_START}" '
         # ブロック形式の `permissions:` を読んでいる最中かどうか、結論を出したかどうか、
         # そして構造行を 1 行でも受け取ったかどうかを表す旗
         BEGIN { in_block = 0; block_indent = 0; decided = 0; seen = 0 }
@@ -152,12 +152,20 @@ scan_workflow_structure() {
             indent = match(line, /[^[:space:]]/) - 1
 
             # 構造として解釈するので、行末コメントを落とす
-            # （`contents: write  # 説明` のような書き方でも値だけを見るため）
-            sub(/[[:space:]]*#.*$/, "", line)
-            # 引用符をすべて取り除き、`"permissions":` と `permissions:`、`"write"` と `write` を同じ形に揃える。
-            # YAML は鍵も値も引用できるため、引用の有無を綴りとして数え上げると必ず取りこぼす
-            # （`"permissions": write-all` が非特権と誤判定される穴を実測）
-            gsub(quote_chars, "", line)
+            # （`contents: write  # 説明` のような書き方でも値だけを見るため）。
+            # **`#` の直前に空白か行頭を要求する。** YAML で `#` がコメントを始めるのはその位置だけで、
+            # 値の途中の `#`（`name: "a#b"`）はただの文字。空白を任意にすると、そこで行を切って
+            # **後ろにある本物の `secrets:` / `permissions:` を丸ごと捨ててしまい、特権ワークフローを
+            # read-only と誤判定する**（fail-open。実測: `{name: "a#b", secrets: inherit, …}` が
+            # read-only になった）。綴りは `test/lib/ci_workflow.sh` の共有定数
+            # `CI_WORKFLOW_COMMENT_START` が唯一の持ち主で、それを使う 4 か所のうちの 1 つがここ
+            # （`strip_comment()` は**シェルの引用規則**で `#` を判別する別物なので、この定数は使わない）
+            sub(comment_re ".*$", "", line)
+            # **引用符の正規化はここでは行わない。** `"permissions":` と `permissions:` を同じ形に
+            # 揃えるのは `emit_structural_lines()` の役目で、そこが引用符を 1 つも出力しないことは
+            # `ci_workflow_test.sh` の「構造行に引用符を 1 つも残さない」が機械的に固定している。
+            # ここに写しを置いても、前提が崩れたときには先にあちらが赤くなるので受け皿にならず、
+            # 「正規化の持ち主が 2 つある」という読み違いだけが残る（§6 デッドコードを残さない）
             # 大文字小文字の揺れも同様に潰しておく（`WRITE` と `write`、`Secrets:` と `secrets:` を同じ形にする）
             line = tolower(line)
             # コメントだけの行はここで読み飛ばす
@@ -477,15 +485,20 @@ verify_marker_against_pin() {
 # 同じ行の後ろにローカル action を並べると指摘 0 件で通ることを実測）。
 # 出現ごとにばらしてから渡すことで、消費側は 1 個だけを見ればよくなる。
 #
-# **行末コメントは値の探索対象から外す**: 構造としての `uses:` はコメントより前にしか置けない。
-# バージョンマーカーはコメント側にあるので、切り離したうえで**1 件しかない行に限り**付けて渡す。
+# **バージョンマーカーは行末コメント側から取る**ので、参照の探索が終わってから切り離して
+# **1 件しかない行に限り**付けて渡す。なお**参照の探索自体はコメントの手前で切っていない**:
+# 引用符は落ちるため素の `#` と区別が付かず、そこで切ると後ろの本物の参照ごと捨ててしまう。
+# 代わりに位置規則で除くことにしているが、**読点に続く形は除ききれない**
+# （`# … script, uses: actions/cache@v4 …` が幻の参照になる。requirements.md の残件 (b)、
+# `KNOWN RESIDUAL: a comma-preceded uses: in a comment is reported` で固定）。
 #
 # **鍵として置ける位置だけを見る**（「空白の後ろならどこでも」にしない）: 引用符は
 # `emit_structural_lines()` が一律に落とすため、`- name: Verify that every workflow uses: a pinned SHA`
 # のような**値の中の散文**が素の文字列として届く。空白の後ろを一律に鍵と見なすと、これを参照
 # `a` と読んで違反を報告し、特権ワークフロー（`post-ci-verify.yml`）に同種の文言が入った時点で
 # CI が恒常的に赤くなる。鍵になれるのは行頭（字下げと `- ` を挟んでよい）か、フロー集合の内側にある
-# `{` / `,` の直後だけ（集合の外のカンマは散文の読点なので区切りと認めない）。
+# `{` / `[` / `,` の直後だけ。**カンマに「集合の内側か」の条件は付けない**——一度入れたところ、
+# 集合が複数行に跨る書き方で参照を丸ごと取り逃がした（要件側にも明記。fail-open のため撤回）。
 #
 # 出力は「行番号 <TAB> 参照 <TAB> マーカー」。**値の切り出しをここだけに持たせる**ため、
 # 消費側は受け取った値をそのまま使う（両方で切り出すと、鍵の表記ゆれへの対応が片方だけ古くなる）
@@ -494,7 +507,7 @@ split_uses_occurrences() {
     local path="$1"
 
     # 構造行（ブロックスカラーの本文を除いた行）を出現ごとにばらす
-    emit_structural_lines "$path" | awk '
+    emit_structural_lines "$path" | awk -v comment_re="${CI_WORKFLOW_COMMENT_START}" '
         # コメント本文の先頭語が「版の注記らしい形」かどうかを調べる関数。
         # 引用符が落ちた値の中の `#`（`release #1}` 等）を注記と取り違えないための歯止めで、
         # タグに現れない構造文字（`}` `)` `,` など）を含む語は注記として認めない
@@ -514,7 +527,7 @@ split_uses_occurrences() {
         # 単一行の参照（値の後ろ）と、値を次行に置いた参照（続きの行）の**両方**がこれを使う（§6 DRY）
         function marker_from(tail,   body, word) {
             # `#` を順に探し、直後の最初の語が版らしければそれを注記として返す
-            while (match(tail, /(^|[[:space:]])#/)) {
+            while (match(tail, comment_re)) {
                 # `#` の直後から後ろをコメント本文の候補として取り出す
                 body = substr(tail, RSTART + RLENGTH)
                 # 候補の先頭にある空白を落として、最初の語の頭に合わせる
@@ -634,7 +647,11 @@ split_uses_occurrences() {
             # `- {name: release #1, uses: actions/checkout@v1}` の `#` は素の文字として届く。
             # そこで切ると後ろの本物の参照ごと捨ててしまい、未ピンの可変タグが検査から消える
             # （＝このファイルが繰り返し塞いできた「不在＝合格」に戻る）。
-            # コメント中の `uses:` は下の位置規則（行頭 / 集合内の `{` `,` の直後）で自然に除かれる。
+            # **コメント中の `uses:` は位置規則では除ききれない**（残件。requirements.md の (b)）:
+            # 読点に続く形（`# … script, uses: actions/cache@v4 …`）はフロー形式の区切りの規則に
+            # 当たってしまい、幻の参照として報告される。コメントの境界はトークナイザ側
+            # （`emit_structural_lines` の `probe`）が既に計算しているので、直すならそれを
+            # 消費側へ渡す形になる（issue #97 の 1 件目）。
             # 走査位置（`n` / `rest` / `scanned` / `at_line_head`）は上の保留処理までに用意済み
             #
             # 値をこの行に持たない uses: 鍵を見つけたかどうか（次行に値がある記法の候補）
@@ -1359,6 +1376,108 @@ jobs:
     steps:
       - uses: actions/checkout@v7'
 
+# 引用の中を伏せる処理（issue #93）は `emit_structural_lines()` を分類器と共有しているので、
+# **分類の側にも回帰ケースを置く**。ここが無いと、開始位置の規則を後から動かしたときに
+# 「`, secrets: inherit` を含む行が read-only に化ける」向きの取りこぼしを誰も検出しない
+# （requirements.md FR-8.1 が負例・正例を要求しているのはこのため）。
+
+# 引用された手順名の中の `, permissions: write` は**ただの文字列**なので特権ではない。
+# 伏せる処理が入る前は、この読点が区切りと読まれて特権へ倒れていた（過剰な特権判定）
+assert_privilege_classification plain 'a permissions phrase inside a quoted job name' \
+'name: X
+permissions: read-all
+jobs:
+  j: {name: "a, permissions: write", runs-on: ubuntu-latest}'
+
+# 逆に、**引用の外にある本物の `, secrets: inherit`** は今までどおり特権と判定すること。
+# 伏せる範囲を広げすぎると、ここが read-only へ化けてワークフロー内の可変タグが
+# 丸ごと検査対象外になる（fail-open。この向きだけは絶対に緩めない）
+assert_privilege_classification privileged 'a real secrets key after a quoted job name' \
+'name: X
+permissions: read-all
+jobs:
+  j: {name: "a, b", secrets: inherit, runs-on: ubuntu-latest}'
+
+# 値の途中の `#` は**コメントの開始ではない**（YAML でコメントを始めるのは行頭か空白の直後だけ）。
+# ここで行を切ると、後ろにある本物の `secrets:` を丸ごと捨てて read-only と誤判定し、
+# **そのワークフロー内の可変タグが検査から全部外れる**（fail-open。実測で再現）
+assert_privilege_classification privileged 'a hash inside a value does not hide a later secrets key' \
+'name: X
+permissions: read-all
+jobs:
+  j: {name: "a#b", secrets: inherit, runs-on: ubuntu-latest}'
+
+# 引用符の無い形でも同じこと（`#` の直前に空白が無ければコメントではない）
+assert_privilege_classification privileged 'a bare hash inside a value does not hide a later secrets key' \
+'name: X
+permissions: read-all
+jobs:
+  j: {name: b##, secrets: inherit, runs-on: ubuntu-latest}'
+
+# **引用された値の中では、空白の後ろの `#` でもコメントではない。** 引用符を落とした行だけを見ると
+# その空白は値の中身なのか構造なのか区別が付かないので、`emit_structural_lines()` の側で
+# 引用の中の `#` を伏せている。伏せないと、ここで行が切れて後ろの `secrets:` が消える（fail-open）
+assert_privilege_classification privileged 'a spaced hash inside a quoted value does not hide a later secrets key' \
+'name: X
+permissions: read-all
+jobs:
+  j: {name: "a: #b", secrets: inherit, runs-on: ubuntu-latest}'
+
+# 単一引用でも、値が `#` だけでも同じこと
+assert_privilege_classification privileged 'a single-quoted spaced hash does not hide a later secrets key' \
+'name: X
+permissions: read-all
+jobs:
+  j: {name: '"'"'a: #b'"'"', secrets: inherit, runs-on: ubuntu-latest}'
+
+# 逆に、**空白の後ろの `#` は本物のコメント**なので、その後ろは構造として読まないこと
+# （ここを厳しくしすぎると、コメントに書いた語で特権へ倒れて CI が恒常的に赤くなる）
+assert_privilege_classification plain 'a real trailing comment is still stripped' \
+'name: X
+permissions: read-all
+jobs:
+  j: {name: b, runs-on: ubuntu-latest}  # secrets: inherit'
+
+# 引用を開いたまま終わった行の次の行でも、後ろの本物の `secrets:` を見落とさないこと。
+# ここが privileged になるのは、閉じない引用を含む行を**伏せずにそのまま出す**ためで、
+# 結果として `, secrets: inherit` の読点が構造として残るから。伏せる範囲を広げて
+# この読点まで覆うと read-only へ化ける（＝ワークフロー内の可変タグが検査から全部外れる）
+assert_privilege_classification privileged 'a secrets key after an unterminated quote is still seen' \
+'name: X
+permissions: read-all
+jobs:
+  j: {name: "a:
+    ", secrets: inherit, runs-on: ubuntu-latest}'
+
+# **既知の残件（特権判定側。requirements.md の同項に記載）。** 引用の範囲が行内で確定しない場合
+# ——閉じない引用と、開始と認めず落とした引用符——は中身を伏せないため、値の中の `#` が構造行に
+# 残り、そこで行が切れて後ろの本物の `secrets:` が捨てられる。**これは台帳で唯一の見逃し方向**
+# （そのワークフロー内の可変タグが検査から全部外れる）なので、**main と同じ挙動であっても
+# ケースで固定する**: 広がったときに気付けるようにするのが台帳の役目。
+# 筋の対処は「範囲が確定しない引用を含む行ではコメントとして切らない」（issue #97）
+assert_privilege_classification plain 'KNOWN RESIDUAL: a hash inside an unterminated quote hides a later secrets key' \
+'name: X
+permissions: read-all
+jobs:
+  j: {name: "a
+    #b", secrets: inherit, runs-on: ubuntu-latest}'
+
+# 同じ残件の、**開始と認めず落とした引用符**（アンカーを挟んだ形）版
+assert_privilege_classification plain 'KNOWN RESIDUAL: a hash inside an anchored value hides a later secrets key' \
+'name: X
+permissions: read-all
+jobs:
+  j: {name: &n "a #b", secrets: inherit, runs-on: ubuntu-latest}'
+
+# 継続行の先頭に置いた引用符から始まる形でも、後ろの本物の `secrets:` を見落とさないこと
+# （行頭の引用符を開始と誤読すると、間の区切りごと伏せて特権判定が read-only へ化ける）
+assert_privilege_classification privileged 'a real secrets key after a continuation line' \
+'name: X
+permissions: read-all
+jobs:
+  j: {name: a
+    '"'"'b, secrets: inherit'"'"', runs-on: ubuntu-latest}'
+
 # --- 分類とピン強制の接続（判定結果が実際に規則へ効いているか） ---
 
 # 特権ワークフロー中の可変タグは違反として検出されなければならない（FR-9.6(b) の中心）
@@ -1535,6 +1654,22 @@ jobs:
         run: echo ok
       - uses: ./.github/actions/local'
 
+# issue #93 の 2 件目を、検査経路の端から端まで（`check_workflow_path()`）で固定する。
+# 上の分解単体の検査だけでは、**問題の無いワークフローが赤くならない**という結末そのものを
+# 表明できない。上の検査との違いは手順名の**読点**で、修正前はそれがフロー形式の区切りと読まれ、
+# 幻の参照 `policy` に対して「版を名乗っていない」という違反 1 件が出ていた（実測）。
+# 上流への問い合わせを避けるため、実在の action ではなくローカル action を置く（同スイートの方針）
+assert_pin_enforcement accepted 'a comma in a quoted step name does not invent a violation' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: "compare pinning, uses: policy"
+        run: echo hi
+      - uses: ./.github/actions/local'
+
 # 1 行 1 件のときは、行末の版注記をその参照のものとして渡す（従来どおりの正常系）
 assert_split_output 'a single ref keeps its own trailing version marker' \
 "7"$'\t'"actions/checkout@1111111111111111111111111111111111111111"$'\t'"v4" \
@@ -1655,11 +1790,18 @@ jobs:
 # `uses:` の鍵を**フロー形式の区切り（`,`）の直後**で見つけた場合も、次行記法の判定に使う桁を
 # **行頭からの絶対桁**で持つこと。`RSTART` は走査中の残り文字列の中の位置なので、素直に使うと
 # 桁を実際よりずっと小さく見積もる。すると直後の無関係な行（ここでは本物の `uses:` を載せた
-# 兄弟キーの行）まで「値」と見なして食べてしまい、**その行の参照が抽出から丸ごと落ちる**。
-# 引用符は抽出時に一律で落ちるため、`- name: "Check pins, uses:"` のような**散文の手順名**が
-# この形で届く（実測: 修正前は 8 行目の `@v7` が消え、7 行目に偽の参照だけが出ていた）。
-# 7 行目が空参照で赤くなるのは散文の取り違えによる「余分な赤」で、見逃しより安全側
-assert_split_output 'a comma-preceded empty uses: does not swallow the next line' \
+# 兄弟キーの行）まで「値」と見なして食べてしまい、**その行の参照が抽出から丸ごと落ちる**
+# （実測: 修正前は 8 行目の `@v7` が消え、7 行目に偽の参照だけが出ていた）。
+# 7 行目が空参照で赤くなるのは「値の無い `uses:`」に対する正しい fail-closed で、見逃しより安全側。
+# **これは壊れた YAML に対する頑健性の検査**（`yaml.safe_load` は `ParserError` を出し、
+# Actions もこの形は受け付けない）。実在しうる入力を模しているのではなく、
+# 「解釈できない形を渡されても黙って飛ばさない」ことを固定するのが目的。
+# **引用符を使わない形で書く**のも要点: 引用の中の読点は下の issue #93 の対応で伏せられるため、
+# 散文の手順名で代用すると `uses:` の鍵そのものが見つからなくなる。
+# なお上のコメントが述べている桁（`RSTART` の取り違え）そのものを駆動しているのは
+# **このケースではない**（`pend_indent` を 0 に落とす変異を入れてもここは緑のまま）。
+# 桁の側は `a second valueless uses: after a resolved value still fails closed` が押さえている
+assert_split_output 'a comma-preceded empty uses: does not swallow the next line (malformed input)' \
 "7"$'\t'$'\t'$'\n'"8"$'\t'"actions/checkout@v7"$'\t' \
 'name: X
 permissions: write-all
@@ -1667,8 +1809,308 @@ jobs:
   j:
     runs-on: ubuntu-latest
     steps:
-      - name: "Check pins, uses:"
+      - {name: a, uses:
         uses: actions/checkout@v7'
+
+# issue #93 の 2 件目: **引用符で囲んだ手順名の中の読点は、フロー形式の区切りではない**。
+# `emit_structural_lines()` が引用符を無条件に落としていた頃は、この手順名が
+# `- name: Check pins, uses: policy` という素の文字列になり、「カンマの直後の `uses:`」という
+# 位置規則に当たって**存在しない参照 `policy` を報告**していた。`post-ci-verify.yml` は
+# 無条件に特権扱いで type-check は必須チェックなので、**この形の手順名を書くだけで、
+# 正しく SHA ピンされたリポジトリの CI が恒常的に赤くなる**（実測）。
+# 引用の中の区切り文字を伏せることで、幻の参照は出ず、同じ手順の本物の参照だけが残る
+assert_split_output 'a comma inside a quoted step name is not a flow delimiter' \
+"8"$'\t'"actions/checkout@v7"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: "compare pinning, uses: policy"
+        uses: actions/checkout@v7'
+
+# 引用の中を伏せても、**引用の中に書かれた本物の参照は読めたままである**こと。
+# 中身ごと伏せる実装にすると `uses: "actions/checkout@v7"` の可変タグが検査を素通りし、
+# このファイルが繰り返し塞いできた fail-open へ逆戻りする（伏せるのは区切り文字だけ）
+assert_split_output 'a quoted uses value is still read as a reference' \
+"7"$'\t'"actions/checkout@v7"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: "actions/checkout@v7"'
+
+# **素のスカラーの途中のアポストロフィを引用の開始と読まないこと。** YAML ではこれはただの文字で、
+# 開始と読むと次のアポストロフィまでが「引用の中」になり、そこに挟まれた**本物の区切り**ごと
+# 伏せてしまう。結果、可変タグが検査から丸ごと消える（fail-open。伏せる実装を入れた初回に実測で
+# 再現し、`actions/evil@v1` が main では検出されるのにこちらでは消えた）。
+# 引用の開始と認めるのは「値が始まりうる位置」＝行頭 / `{` `[` `,` の直後 / 空白を挟んだ `:` `-` の後
+assert_split_output 'an apostrophe inside a plain scalar does not open a quoted span' \
+"7"$'\t'"actions/evil@v1"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - {name: don'"'"'t, uses: actions/evil@v1, desc: it'"'"'s fine}'
+
+# 上と同じ fail-open の、**`-` を悪用する形**。`-` は「空白が続くとき」だけ並びの区切りで、
+# `pre-'"'"'release` の `-` はただの文字。空白の有無を見ずに `-` の直後を開始と認めると、
+# ここから `it'"'"'s` までが引用の中になり、間の**本物の区切り**ごと伏せて可変タグを見逃す
+# （実測: この形で `actions/evil@v1` が検査から消えた。同じ理由で `:` にも空白を要求する）
+assert_split_output 'a hyphen inside a word does not make the next quote an opener' \
+"7"$'\t'"actions/evil@v1"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - {name: pre-'"'"'release, uses: actions/evil@v1, note: it'"'"'s ok}'
+
+# **単一引用の脱出表記 `'"'"''"'"'` で早く閉じないこと。** YAML ではこれは「文字としてのアポストロフィ」で、
+# スカラーはまだ続いている。最初の 1 個で閉じると残りが引用の外として出てくるため、
+# そこに書かれた読点が区切りとして生き、**issue #93 の 2 件目（幻の参照）がそのまま再現する**
+# （実測: 脱出表記を扱う前の実装では `policy` が報告されていた）
+assert_split_output 'an escaped apostrophe does not close a single-quoted scalar' \
+"9"$'\t'"./.github/actions/local"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: '"'"'don'"'"''"'"'t compare pinning, uses: policy'"'"'
+        run: echo hi
+      - uses: ./.github/actions/local'
+
+# **既知の残件（ブロック形式で書いた引用値）。** requirements.md の (d)。
+# 値を次の行へ置く書き方も正しい YAML で、`yaml.safe_load` は手順名を
+# `compare pinning, uses: policy` という 1 つの文字列として読むが、行頭の引用符は
+# 「新しい値の開始」か「素のスカラーの継続行の途中」かが**行だけ見ても決まらない**ため
+# 開始と認めておらず、読点が生きて幻の参照が出る。
+# **前の行が値を持たない鍵かどうかで例外を作る実装は、いったん入れて撤回した**:
+# 引用が複数行にまたがる形（途中の行が `:` で終わる／別種の引用符を含む）で
+# 閉じ側の引用符を開始と誤読し、後ろの区切りごと伏せて `uses:` / `secrets:` を
+# 見逃す fail-open を 3 通り作り込んだため（詳細は requirements.md の同項）。
+# 行をまたいで引用を正しく追うには本物の YAML パーサが要る（issue #97 の (b)）
+assert_split_output 'KNOWN RESIDUAL: a quoted value on the line after a bare key is a phantom' \
+"8"$'\t'"policy"$'\t'$'\n'"10"$'\t'"./.github/actions/local"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name:
+          "compare pinning, uses: policy"
+        run: echo hi
+      - uses: ./.github/actions/local'
+
+# 上と同じ残件の、**鍵と値のあいだにコメント行が挟まる**派生。挙動は同じ（幻の参照が出る）
+assert_split_output 'KNOWN RESIDUAL: a comment before the quoted value does not change it' \
+"9"$'\t'"policy"$'\t'$'\n'"11"$'\t'"./.github/actions/local"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name:
+          # pinned below
+          "compare pinning, uses: policy"
+        run: echo hi
+      - uses: ./.github/actions/local'
+
+# 上と同じ fail-open の、**行頭の引用符を悪用する形**。素のスカラーは複数行に続けられ、
+# その継続行は引用符から始まってよい（YAML が禁じるのはスカラーの先頭文字だけ）。
+# 1 行ずつしか見ないこの層では「新しいスカラーの開始」か「継続行の中の 1 文字」かを決められず、
+# 開始と読むと間の**本物の区切り**ごと伏せて可変タグを見逃す
+# （実測: `yaml.safe_load` は 7 行目を `{'"'"'name'"'"': "a '"'"'b", '"'"'uses'"'"': "actions/evil@v1'"'"'"}` と読むのに、
+# 検出側は `./local` しか返さなかった）。
+# **`index()` に空の探し文字列を渡したときの答えが実装で割れる**点にも注意（mawk は 1 を返す）。
+# そのため行頭かどうかは `prev != ""` で明示的に守る。
+# （直前の行が値を持たない鍵で終わっていた場合だけは開始と確定できる。上のケースを参照）
+assert_split_output 'a quote at the start of a continuation line does not open a span' \
+"7"$'\t'"actions/evil@v1"$'\t'$'\n'"7"$'\t'"./local"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps: [{name: a
+      '"'"'b, uses: actions/evil@v1'"'"', z: 1}, {uses: ./local}]'
+
+# 上と同じ fail-open の、**空白で囲んだ `-` を悪用する形**。`- ` が並びの印になるのは
+# **行頭（字下げの直後）だけ**で、スカラーの途中の `Lint - '"'"'tis time` の `-` はただの文字。
+# 位置を見ずに「空白を挟んだ `-` の後ろ」を開始と認めると、そこから `it'"'"'s` までが引用の中になり、
+# 間の**本物の区切り**ごと伏せて可変タグを見逃す
+# （実測: `yaml.safe_load` は `uses: actions/evil@v1` を実在の手順として読むのに、
+# 検出側は 8 行目のローカル action しか返さず、違反 0 件で通っていた）
+assert_split_output 'a hyphen surrounded by spaces mid-scalar is not a sequence indicator' \
+"7"$'\t'"actions/evil@v1"$'\t'$'\n'"8"$'\t'"./.github/actions/local"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - {name: Lint - '"'"'tis time, uses: actions/evil@v1, note: it'"'"'s ok}
+      - uses: ./.github/actions/local'
+
+# JSON 形式のうち、**コロンの前にだけ空白がある**書き方。`{"name" :"…"}` は
+# 「引用された鍵の直後の `:`」なので開始と認める（後ろに空白が無いので `gap` は立たない）。
+# 引用が閉じたことの記憶を空白で消してしまうと、この形でだけ幻の参照が戻る
+assert_split_output 'a JSON-style key with a space only before the colon still opens' \
+"7"$'\t'"./.github/actions/local"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - {"name" :"compare pinning, uses: policy", "uses": ./.github/actions/local}'
+
+# **JSON 形式（`:` の直後に空白が無い）でも引用された値を認識すること。** `{"name":"…"}` は
+# 正しい YAML で、`yaml.safe_load` も `{'"'"'name'"'"': '"'"'…'"'"'}` と読む。空白を一律に要求すると
+# この形が引用と認められず、**issue #93 の 2 件目（幻の参照）がそのまま再現する**
+# （実測: 空白を要求していた実装では `policy` が報告された）
+assert_split_output 'a JSON-style quoted key opens the following quoted value' \
+"7"$'\t'"./.github/actions/local"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - {"name":"compare pinning, uses: policy", "uses": ./.github/actions/local}'
+
+# 逆に、**引用されていない鍵**に続く `:` では空白を要求し続けること。`{name:"a` は YAML では
+# `name:"a` までで 1 つの鍵になり、引用スカラーは始まっていない。ここを緩めると
+# 語中のハイフンと同じ形の fail-open（本物の区切りを伏せて `uses:` を見逃す）を新たに開ける
+assert_split_output 'a plain key with no space before the quote does not open a span' \
+"7"$'\t'"actions/evil@v1"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - {name:"a, uses: actions/evil@v1, note: b"}'
+
+# **二重引用の脱出表記 `\"` でも早く閉じないこと。** 理由と結末は上の単一引用と同じ
+assert_split_output 'an escaped double quote does not close a double-quoted scalar' \
+"9"$'\t'"./.github/actions/local"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: "say \"hi\", uses: policy2"
+        run: echo hi
+      - uses: ./.github/actions/local'
+
+# **既知の残件（issue #93 の 2 件目のうち、複数行にまたがる引用スカラーの形）。**
+# `yaml.safe_load` は下の手順名を `compare pinning and, uses: policy` という 1 つの文字列として
+# 読むが、この層は 1 行ずつしか見ないので 2 行目の読点を伏せられず、幻の参照 `policy` が残る。
+# **倒れる向きは「余分に赤くなる」側**（見逃しではない）なので、行をまたいで引用を追う仕組みを
+# 入れるより現状を明示的に記録することを選ぶ — 追う仕組みは、追い方を誤ると本物の区切りを
+# 伏せる fail-open に化けるため、別途 issue #97 の枠で扱う。
+# ここで固定しておかないと、将来この挙動が変わったとき「直したのか壊したのか」が分からない
+assert_split_output 'KNOWN RESIDUAL: a quoted scalar spanning lines still yields a phantom' \
+"8"$'\t'"policy"$'\t'$'\n'"9"$'\t'"actions/checkout@v9"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: "compare pinning
+          and, uses: policy"
+        uses: actions/checkout@v9'
+
+# 版注記の取り出しも同じコメント規則（`#` の直前に空白か行頭）に従うこと。
+# ここを緩めると、値の中の `r#v1.2` のような綴りを注記と読み、実在しないタグを上流へ
+# 問い合わせて「SHA と一致しない」と誤報する（必須チェックが恒常的に赤くなる）。
+# 共有定数 `CI_WORKFLOW_COMMENT_START` を使う 4 か所のうち、ここだけが未固定だった
+assert_split_output 'a hash inside a value is not read as a version marker' \
+"7"$'\t'"actions/checkout@1111111111111111111111111111111111111111"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - {uses: actions/checkout@1111111111111111111111111111111111111111, name: r#v1.2 }'
+
+# **既知の残件（行末コメントに書かれた `, uses: …`）。** requirements.md の (b)。
+# 読点に続く形はフロー形式の区切りの規則に当たるため、コメントの中でも参照として報告される。
+# `post-ci-verify.yml` は無条件に特権扱いなので、この形の説明コメントを書くと必須チェックが
+# 恒常的に赤くなる（main も同じ挙動）。コメントの境界を消費側へ渡す直し方は issue #97 の 1 件目。
+# **台帳に挙げている残件はすべてケースで固定する**（挙動が変わったとき気付けるように）
+assert_split_output 'KNOWN RESIDUAL: a comma-preceded uses: in a comment is reported' \
+"7"$'\t'"./local"$'\t'$'\n'"8"$'\t'"actions/cache@v4"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./local
+      # TODO: replace the bespoke script, uses: actions/cache@v4 would do'
+
+# **既知の残件（YAML のアンカー／タグを挟んだ引用値）。**
+# `- name: &n "…"` のようにアンカーを挟むと、引用符の直前が `n` になって開始位置の規則に
+# どれも当たらず、伏せられないまま読点が生きて幻の参照が出る（main も同じ挙動）。
+# **GitHub Actions はワークフローでアンカーを解釈しない**ため実害は極めて小さいが、
+# 残件の台帳を実態と合わせるために固定しておく（挙動が変わったとき気付けるように）
+assert_split_output 'KNOWN RESIDUAL: an anchored quoted value still yields a phantom' \
+"7"$'\t'"policy"$'\t'$'\n'"8"$'\t'"./local"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: &n "compare pinning, uses: policy"
+      - uses: ./local'
+
+# **既知の残件（伏せる処理が参照の綴りを変える唯一の形）。**
+# 引用された値そのものが区切り文字を含むと、その値も伏せられる。動的参照を引用符で囲んだ
+# `uses: "${{ inputs.action_ref }}"` はこれに当たり、参照が `$~~` として抽出される。
+# **検査は通らない側へ倒れる**（ピン済みとは扱われない）ので安全側だが、診断に出る綴りが
+# ファイル中の文字列と一致しない。引用しない形は `a reference built from an expression is
+# still checked` が押さえているので、引用した形はこちらで固定する
+# shellcheck disable=SC2016  # YAML の中身をそのまま書くので `${{ }}` は展開させない
+assert_split_output 'KNOWN RESIDUAL: a quoted expression ref is masked in the diagnostic' \
+"7"$'\t'"\$~~"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: "${{ inputs.action_ref }}"'
+
+# 引用が行内で閉じない場合（複数行にまたがる引用スカラーなど）は、伏せずに従来どおりの姿へ倒すこと。
+# ここで伏せてしまうと**本物の区切りを隠して `uses:` を見逃す**ため、
+# 「対応が取れないなら手を加えない」を選ぶ（余分に赤くなる側＝fail-closed に倒す）。
+# **引用が実際に開くこと**が要点: 開かない書き方で代用すると、この倒し込み自体が検査されない
+# （倒し込みを削っても緑のままになる＝「不在＝合格」の形）
+assert_split_output 'a quote left open on the line falls back to the previous behaviour' \
+"7"$'\t'"actions/evil@v1"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - {name: "oops, uses: actions/evil@v1}'
 
 # 鍵と次行の値の**あいだに置かれたコメント行**は値ではないので、保留を閉じずに読み飛ばすこと。
 # YAML のコメントは字下げの深さに関係なくどこにでも置ける。これを値として食べると、
