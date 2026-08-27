@@ -1460,6 +1460,70 @@ jobs:
           set -e
           bash ${SUITE_PATH} | cat"
 
+# --- 排他なアームは打ち消し合わない（同じ深さでも別の枝） ---------------------------
+#
+# `if …; then set +e; else set -e; fi` の 2 つは**排他**なので、
+# else 側の `set -e` は then 側の `set +e` を打ち消さない。階層だけで見ると
+# 同じ深さなので打ち消しが成立してしまい、握り潰されたスイートが
+# 「ゲートしている」と読まれる（fail-open）
+
+assert_not_wired "else 側の set -e は then 側の set +e を打ち消さない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          if [ -z \"${DOLLAR}NEVER\" ]
+          then
+          set +e
+          else
+          set -e
+          fi
+          bash ${SUITE_PATH}"
+
+assert_not_wired "elif 側の set -e も打ち消さない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          if [ -z \"${DOLLAR}NEVER\" ]; then
+          set +e
+          elif true; then
+          set -e
+          fi
+          bash ${SUITE_PATH}"
+
+assert_not_wired "長い綴りでも排他なアームは打ち消し合わない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          if [ -z \"${DOLLAR}NEVER\" ]
+          then
+          set +o errexit
+          else
+          set -o errexit
+          fi
+          bash ${SUITE_PATH}"
+
+assert_not_wired "別の case アームの set -e も打ち消さない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case \"${DOLLAR}OS\" in
+          linux*) set +e ;;
+          never) set -e ;;
+          esac
+          bash ${SUITE_PATH}"
+
 assert_wired "コマンド置換は括弧の釣り合いを崩さない" "name: ci
 jobs:
   type-check:
