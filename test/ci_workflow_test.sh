@@ -1786,6 +1786,91 @@ jobs:
           set -e
           bash ${SUITE_PATH}"
 
+# --- 連鎖が続く条件は「必ず走る」ではない ------------------------------------------
+#
+# `split_commands` は `&&` で切るので `if true && [ … ]; then` の断片は `if true`。
+# 素直に読むと、2 トークン足すだけで走るとは限らない本体が
+# 「最上位で確実に走る」に化ける（実行の証拠として数えられてしまう）
+
+assert_not_wired "if true && <条件> の本体は実行の証拠にしない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          if true && [ -z \"${DOLLAR}SKIP\" ]; then
+            bash ${SUITE_PATH}
+          fi"
+
+assert_not_wired "while true && <条件> の本体も同じ" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          while true && [ -z \"${DOLLAR}SKIP\" ]; do
+            bash ${SUITE_PATH}
+            break
+          done"
+
+# --- 同じシェルのまま set を呼ぶ、残りの綴り --------------------------------------
+
+assert_not_wired "エイリアスを止める \\set +e" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          \\set +e
+          bash ${SUITE_PATH}"
+
+assert_not_wired "終了状態を反転する ! set +e" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ! set +e
+          bash ${SUITE_PATH}"
+
+assert_not_wired "time set +e" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          time set +e
+          bash ${SUITE_PATH}"
+
+assert_not_wired "先頭に置いたリダイレクト付きの set +e" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          >/dev/null set +e
+          bash ${SUITE_PATH}"
+
+# --- case を開く断片に載ったアームの set は本体の階層に属する ----------------------
+
+# 深さが増えるのは断片の**末尾**なので、素直に記録すると同じアームの後続
+# （1 つ深い）の set -e が打ち消せず、複数行で書いた同じアームと答えが食い違う
+assert_wired "1 行の case アームでも同じアームの中で打ち消し合う" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case \"${DOLLAR}X\" in y) set +e; true; set -e ;; esac
+          bash ${SUITE_PATH}"
+
 assert_wired "コマンド置換は括弧の釣り合いを崩さない" "name: ci
 jobs:
   type-check:

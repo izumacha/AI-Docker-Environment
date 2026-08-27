@@ -956,6 +956,14 @@ ci_workflow_extract() {
             return updated
         }
 
+        # その断片が `case` のアーム見出しで始まるか（`y)` / `(y)` / `y|z)`）。
+        # **伏せた本文で測る**——引用の中の `) `（`echo "a) b"`）をアームと読むと、
+        # 深さの勘定と括りの記録の両方が狂う。同じ規則が 3 か所にあったので 1 つへ寄せた
+        # （うち 1 か所は生の本文で測っており、引用の扱いが食い違っていた）
+        function starts_case_arm(t) {
+            return (mask_quoted(t) ~ /^[^()]*\)([[:space:]]|;|$)/)
+        }
+
         # 先頭の飾りを落として `set …` そのものを返す。該当しなければ空文字。
         # **落としてよいのは「現在のシェルのまま `set` を呼ぶ」書き方だけ**——
         # ブレースグループ / 変数代入の前置き / `builtin` / `command` / `eval`。
@@ -975,6 +983,14 @@ ci_workflow_extract() {
                 if (sub(/^(builtin|command)[[:space:]]+/, "", probe)) { continue }
                 # `eval` は現在のシェルで走るので、引用を外して中身を見る
                 if (sub(/^eval[[:space:]]+/, "", probe)) { gsub(/["\047]/, "", probe); continue }
+                # `\set` はエイリアス展開を止めるだけで、呼ぶ組み込みは同じ
+                if (sub(/^\\[[:space:]]*/, "", probe)) { continue }
+                # `! set +e` は終了状態を反転するだけ。オプションの変更はそのまま効く
+                if (sub(/^![[:space:]]+/, "", probe)) { continue }
+                # `time` は計測するだけで、組み込みは現在のシェルで走る
+                if (sub(/^time[[:space:]]+(-p[[:space:]]+)?/, "", probe)) { continue }
+                # 先頭に置いたリダイレクトも前置きであって別プロセスではない
+                if (sub(/^[0-9]*[<>]&?[[:space:]]*[^[:space:]]+[[:space:]]+/, "", probe)) { continue }
                 break
             }
             # 飾りを落とした先が `set` でなければ、この断片に `set` は無い
@@ -1021,7 +1037,7 @@ ci_workflow_extract() {
         # **ここでは出力しない**のが要点で、ジョブ単位の無効化キー（`if: false` 等）は
         # YAML のキー順が自由である以上 `steps:` の**後ろ**にも書ける。書いた時点で
         # 出力済みのステップは取り消せないため、ジョブ 1 つ分を溜めてから出す
-        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_placed, set_forked, set_masked, set_arm, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, set_in_fndef, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok) {
+        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, closed_any, set_in_fndef, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok) {
             # **シェルのオプションはステップごとにリセットする。** ステップは 1 つずつ
             # 別のシェルで走るので、前のステップの `set +e` / `pipefail` は引き継がれない。
             # **控えるのは `set` で明示された分だけ（-1 = 明示なし）。** シェルの既定と突き合わせるのは
@@ -1146,7 +1162,9 @@ ci_workflow_extract() {
                         # 同じアームの `set -e` が打ち消せなくなる。実 bash と差分照合して実測）
                         # **伏せた本文で測る。** 引用の中の `) `（`echo "a) b"`）をアームの移動と
                         # 読むと、生きている括りの記録を捨てて正しくゲートしているステップを赤くする
-                        set_arm_here = (case_depth > 0 && mask_quoted(struct_text) ~ /^[^()]*\)([[:space:]]|;|$)/)
+                        # この断片で実際に階層を閉じたか（下の記録の捨て方に使う）
+                        closed_any = 0
+                        set_arm_here = (case_depth > 0 && starts_case_arm(struct_text))
                         # **別の `case` アームへ移ったら、この階層の括りの記録は捨てる。**
                         # アーム同士は排他なので、`*)` の `set -e` は `linux*)` の `set +e` を
                         # 打ち消さない（`else` / `elif` と同じ理屈。複数行で書いたときは
@@ -1277,6 +1295,12 @@ ci_workflow_extract() {
                             # ステップを「伝わる」と読む（fail-open。実測）。
                             # pipefail には自前の括り記録が無いので、確実に走ると分かるときだけ
                             strengthen_pipe_ok = (strengthen_base && uncertain == 0)
+                            # **`case` を開く断片に載ったアームの `set` は、本体の階層に属する。**
+                            # 深さが増えるのはこの断片の**末尾**なので、素直に `depth` で記録すると
+                            # 同じアームの後続（1 つ深い）の `set -e` が打ち消せず、
+                            # 正しくゲートしているステップを赤くする（複数行で書いた同じアームとも
+                            # 答えが食い違う。実 bash と差分照合して実測）
+                            set_depth = depth + ((struct_text ~ /^case([[:space:]]|$)/) ? 1 : 0)
                             # 弱める向きは、定義の本文でなければ（＝走るかもしれない時点で）反映する
                             weaken_ok = (!set_in_fndef)
                             # **語を左から右へ順に適用する。** bash はそう解釈するので
@@ -1304,7 +1328,7 @@ ci_workflow_extract() {
                                 # 記号を除いた残りが、まとめて書かれたオプション文字の並び
                                 setbody = substr(setopt, 2)
                                 # 並びのどこかに `e` があれば errexit の指定
-                                if (setbody ~ /e/) { errexit = apply_errexit(seton, strengthen_base, uncertain, weaken_ok, errexit, depth) }
+                                if (setbody ~ /e/) { errexit = apply_errexit(seton, strengthen_base, uncertain, weaken_ok, errexit, set_depth) }
                                 # **末尾が `o` なら次の語が長い綴りの名前**（`-o errexit` / `-euo pipefail`）。
                                 # 短い綴りだけを見ると、1 行でゲートを外したまま「ゲートしている」と読む
                                 # **`o` は並びのどこにあってもよい。** bash は `-oe pipefail` を
@@ -1316,7 +1340,7 @@ ci_workflow_extract() {
                                     # `errexit` は失敗でその場で止まるかどうか
                                     # **長い綴りでも同じ記録を残す。** 残さないと、`set +o errexit … set -o errexit` の
                                     # 括りだけが打ち消せず、ゲートしているステップが「未配線」と誤報される
-                                    if (setname == "errexit") { errexit = apply_errexit(seton, strengthen_base, uncertain, weaken_ok, errexit, depth) }
+                                    if (setname == "errexit") { errexit = apply_errexit(seton, strengthen_base, uncertain, weaken_ok, errexit, set_depth) }
                                     # `pipefail` が立っていればパイプ越しでも失敗が伝わる
                                     else if (setname == "pipefail") { pipefail = set_flag(seton, strengthen_pipe_ok, weaken_ok, pipefail) }
                                 }
@@ -1339,7 +1363,7 @@ ci_workflow_extract() {
                             true_at[depth] = 0
                             if (subshell_at[depth]) { subshell--; subshell_at[depth] = 0 }
                             group_start[depth] = -1
-                            depth--
+                            depth--; closed_any = 1
                         }
                         # **括弧は釣り合いで測る。** 閉じ側が断片の**先頭**に来るとは限らず、
                         # `( cd /tmp; echo hi )` のように末尾で閉じる書き方だと深さが戻らない
@@ -1350,7 +1374,7 @@ ci_workflow_extract() {
                         # 数えてしまうと `case` が開いた深さがその場で打ち消され、
                         # 一致しないアームの中身が「最上位で実行される」と読まれる（レビューで実測）
                         paren_probe = text
-                        if (case_depth > 0 && paren_probe ~ /^[^()]*\)([[:space:]]|;|$)/) {
+                        if (case_depth > 0 && starts_case_arm(paren_probe)) {
                             sub(/^[^()]*\)/, "", paren_probe)
                         }
                         paren = paren_delta(paren_probe)
@@ -1363,11 +1387,14 @@ ci_workflow_extract() {
                                 true_at[depth] = 0
                                 if (subshell_at[depth]) { subshell--; subshell_at[depth] = 0 }
                                 group_start[depth] = -1
-                                depth--
+                                depth--; closed_any = 1
                             }
                         }
-                        # 閉じたブロックの中で落とした記録は、外へ持ち出さない
-                        if (weak_depth > depth) { weak_depth = -1 }
+                        # 閉じたブロックの中で落とした記録は、外へ持ち出さない。
+                        # **実際に閉じた断片でだけ見る**のが要点で、無条件に比べると
+                        # `case … in y) set +e` のように「これから増える階層」へ記録した分を
+                        # 同じ断片の中で消してしまう（深さが増えるのは断片の末尾のため）
+                        if (closed_any && weak_depth > depth) { weak_depth = -1 }
                         # **条件がその場で偽と分かるブロックの中身は、どの照会からも証拠にしない。**
                         # 深さで除くのは実行の照会だけなので、`if false; then shellcheck $LIST; fi` は
                         # リンタの照合（ステップの形を見る側）を素通りしてしまう——2 行で lint を止められる
@@ -1420,7 +1447,12 @@ ci_workflow_extract() {
                         # 一方 `if <条件>` / ループ / 関数定義の中身は、条件や呼び出し元を読まないと決まらない
                         # （両者を深さ 1 本で扱うと、grouping の中の呼び出しが「未配線」と誤報され、
                         #   通る分岐の `set +e` が握り潰しを隠す。どちらもレビューで実測）
-                        if (struct_text ~ /^(if|while)[[:space:]]+(true|:)([[:space:]]|;|$)/) {
+                        # **連鎖が続くなら条件は `true` だけではない。** `split_commands` は `&&` で
+                        # 切るので `if true && [ -z "$SKIP" ]; then` の断片は `if true` になる。
+                        # 素直に「必ず走る」と読むと、2 トークン足すだけで走るとは限らない本体が
+                        # 「最上位で確実に走る」に化ける（実 bash と差分照合して実測。fail-open）
+                        if (struct_text ~ /^(if|while)[[:space:]]+(true|:)([[:space:]]|;|$)/ \
+                            && ops[j] != "&&" && ops[j] != "||") {
                             depth++; true_at[depth] = 1
                             # **必ず走る入れ子なので grouping と同じ扱い。** 開始位置を控えないと、
                             # 閉じた `fi` / `done` に付いた `|| true` が中身へ伝わらず、
