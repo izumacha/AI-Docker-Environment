@@ -1062,6 +1062,15 @@ ci_workflow_extract() {
                         # 後ろにある呼び出しが記録から消える（YAML のブロックスカラーにタブは書ける）
                         text = trim(seg[j])
                         gsub(/\t/, " ", text)
+                        # **構造の判定に使う本文。** `split_commands` は `;` で切るので
+                        # `if …; then if false; then …` の断片は `then if false` になる。
+                        # `^` で錨を打つ判定（深さ・関数定義・偽と分かる条件）が継続語を
+                        # 剥がさないままだと、内側の `if false` が丸ごと見えず、**走らない
+                        # ブロックの中の `set -e` が最上位で走ったように扱われる**（fail-open。
+                        # 実 bash と差分照合して実測）。剥がすのは**それ自身は階層を開かない**
+                        # 継続語だけで、`{` は残す（`{` は 1 階層開くので、剥がすと勘定が合わない）
+                        struct_text = text
+                        while (sub(/^(then|else|do)[[:space:]]+/, "", struct_text)) { }
                         # `set +e` 以降はエラーが伝わらない。`set -e` で元に戻る
                         # （`set +e … set -e` で囲った検査を「ゲートしない」と決め付けると、
                         #   実際には落ちるステップが「配線されていない」と逆の診断で赤くなる）
@@ -1094,6 +1103,20 @@ ci_workflow_extract() {
                             # 偽と分かる条件の else 側は逆に**必ず走る**ので、偽の印を解除する
                             else if (dead_depth >= 0 && depth == dead_depth + 1) { dead_depth = -1 }
                         }
+                        # **連鎖の届かない断片は 1 度も走らない**（`true || set +e` / `false && set +e`）。
+                        # ここで判定しておかないと、走らない `set +e` を握り潰しとして数え、
+                        # 実際にはゲートしているステップを「未配線」と誤報して赤くする。
+                        # 空の断片では触らない（下の `continue` で弾かれる側なので状態を動かさない）
+                        if (text != "") {
+                            if (prev_op != "||" && prev_op != "&&") { unreachable = 0; chain_status = "" }
+                            else if (prev_op == "&&") { unreachable = (chain_status == "f") }
+                            else { unreachable = (chain_status == "t") }
+                        }
+                        # この断片が `case` のアーム見出しか。**使う前にここで求める**——
+                        # 下の `set` の判定側で求めると 1 周ずれ、アーム見出しの**次**の断片で
+                        # 生きている記録を誤って捨てる（`a) set +e` の次の `echo m` で消え、
+                        # 同じアームの `set -e` が打ち消せなくなる。実 bash と差分照合して実測）
+                        set_arm_here = (case_depth > 0 && struct_text ~ /^[^()]*\)([[:space:]]|;|$)/)
                         # **別の `case` アームへ移ったら、この階層の括りの記録は捨てる。**
                         # アーム同士は排他なので、`*)` の `set -e` は `linux*)` の `set +e` を
                         # 打ち消さない（`else` / `elif` と同じ理屈。複数行で書いたときは
@@ -1101,22 +1124,17 @@ ci_workflow_extract() {
                         if (set_arm_here && weak_depth == depth) { weak_depth = -1 }
                         # **ループを途中で抜ける綴りがあると、括りの後半は走るとは限らない。**
                         # `set +e … continue … set -e` は、最後の周回が `continue` を通ると
-                        # errexit を落としたまま終わる。記録を捨てて打ち消しを成立させない
-                        if (struct_text ~ /^(break|continue|return|exit)([[:space:]]|;|$)/ && weak_depth >= 0) { weak_depth = -1 }
+                        # errexit を落としたまま終わる。記録を捨てて打ち消しを成立させない。
+                        # **走らないと分かっている綴りは数えない**（`true || continue` や
+                        # `if false; then exit 1; fi`）——数えると、2 トークン足すだけで
+                        # 正しくゲートしているステップを恒常的に赤くできる（実測）
+                        if (struct_text ~ /^(break|continue|return|exit)([[:space:]]|;|$)/ \
+                            && dead_depth < 0 && !unreachable && weak_depth >= 0) { weak_depth = -1 }
                         # **ブロックを開く語に続けて 1 行で書いた `set` も同じ `set`。**
                         # `split_commands` が `;` で切るので、`if …; then set +e; fi` の断片は
                         # `then set +e` になる。`^set` だけで探すと当たらず、**同じ意味を 1 行で
                         # 書き直すだけで**握り潰しが見えなくなる（`{ set +e; }` に至っては
                         # 無条件に走るのに丸ごと見落とす。実 bash と差分照合して実測）。
-                        # **構造の判定に使う本文。** `split_commands` は `;` で切るので
-                        # `if …; then if false; then …` の断片は `then if false` になる。
-                        # `^` で錨を打つ判定（深さ・関数定義・偽と分かる条件）が継続語を
-                        # 剥がさないままだと、内側の `if false` が丸ごと見えず、**走らない
-                        # ブロックの中の `set -e` が最上位で走ったように扱われる**（fail-open。
-                        # 実 bash と差分照合して実測）。剥がすのは**それ自身は階層を開かない**
-                        # 継続語だけで、`{` は残す（`{` は 1 階層開くので、剥がすと勘定が合わない）
-                        struct_text = text
-                        while (sub(/^(then|else|do)[[:space:]]+/, "", struct_text)) { }
                         # 見出しの予約は**次の 1 断片だけ**有効（`{` 以外が来たら消える）。
                         # **`set` の判定より前に**確定させるのが要点で、後ろに置くと
                         # `f()` と次行の `{ set -e; }` で、まだ `fndef` が立っていない状態のまま
@@ -1144,17 +1162,7 @@ ci_workflow_extract() {
                         # `case` のアーム模様（`a|linux*)`）の `|` は選択肢の区切りであってパイプではない。
                         # `split_commands` はそこで切るので、素直に見ると本文が「パイプの構成要素」に化け、
                         # アームの中の `set +e` が丸ごと落ちる（実 bash と差分照合して実測）
-                        set_arm_here = (case_depth > 0 && struct_text ~ /^[^()]*\)([[:space:]]|;|$)/)
                         set_forked = ((prev_op == "|" && !set_arm_here) || ops[j] == "|" || ops[j] == "&")
-                        # **連鎖の届かない断片は 1 度も走らない**（`true || set +e` / `false && set +e`）。
-                        # ここで判定しておかないと、走らない `set +e` を握り潰しとして数え、
-                        # 実際にはゲートしているステップを「未配線」と誤報して赤くする。
-                        # 空の断片では触らない（下の `continue` で弾かれる側なので状態を動かさない）
-                        if (text != "") {
-                            if (prev_op != "||" && prev_op != "&&") { unreachable = 0; chain_status = "" }
-                            else if (prev_op == "&&") { unreachable = (chain_status == "f") }
-                            else { unreachable = (chain_status == "t") }
-                        }
                         if (!set_placed) {
                             # **`case` のアームの後ろは命令の位置。** `case "$X" in Linux) set +e` は
                             # `;` で切れないので 1 つの断片に載り、`^set` では当たらない。

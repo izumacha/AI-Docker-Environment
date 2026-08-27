@@ -1633,6 +1633,71 @@ jobs:
           for f in x; do case \"${DOLLAR}X\" in a|b) set +e ;; esac; done
           bash ${SUITE_PATH}"
 
+# --- 判定は使う前に求める（1 周ずれると生きている記録を捨てる） ---------------------
+
+# アーム見出しと同じ行に `set +e` を置くと、**次の**断片で「アームへ移った」と誤判定して
+# 記録を捨てていた。同じアームの `set -e` が打ち消せなくなり、正しくゲートしている
+# ステップが赤くなる（同じ意味を 2 行に分けた綴りとも答えが食い違う）
+assert_wired "アーム見出しと同じ行の set +e も同じアームで打ち消せる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case \"${DOLLAR}X\" in
+            a) set +e
+              echo m
+              set -e
+              ;;
+          esac
+          bash ${SUITE_PATH}"
+
+# 走らないと分かっている `continue` / `exit` は「途中で抜ける綴り」に数えない。
+# 数えると 2 トークン足すだけで正しくゲートしているステップを恒常的に赤くできる
+assert_wired "連鎖で届かない continue は括りを壊さない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          for f in a b; do
+            set +e
+            true || continue
+            set -e
+          done
+          bash ${SUITE_PATH}"
+
+assert_wired "偽と分かるブロックの中の exit も括りを壊さない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          for f in a b; do
+            set +e
+            if false; then exit 1; fi
+            set -e
+          done
+          bash ${SUITE_PATH}"
+
+# 締めすぎない側: **届く** continue は今までどおり括りを壊す
+assert_not_wired "届く continue は括りを壊す" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          for f in a b; do
+            set +e
+            false || continue
+            set -e
+          done
+          bash ${SUITE_PATH}"
+
 assert_wired "コマンド置換は括弧の釣り合いを崩さない" "name: ci
 jobs:
   type-check:
