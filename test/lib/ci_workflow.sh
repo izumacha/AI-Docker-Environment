@@ -506,8 +506,11 @@ ci_workflow_run_with_structure() {
     local structural_file="${scratch}.structural"
     # awk プログラムを書き出す先（下記のとおり引数では渡さない）
     local program_file="${scratch}.awk"
-    # 構造行を書き出す。失敗したら以降の解析が成立しない
-    emit_structural_lines "${workflow}" > "${structural_file}" || return 1
+    # 構造行を書き出す。失敗したら以降の解析が成立しない（中間ファイルは残さない）
+    if ! emit_structural_lines "${workflow}" > "${structural_file}"; then
+        rm -f "${structural_file}" || true
+        return 1
+    fi
     # **プログラムは引数ではなくファイルで渡す（`-f`）。**
     # Linux の `MAX_ARG_STRLEN` は 1 引数あたり 128 KiB（32 ページ）で、これは
     # `ARG_MAX` を上げても変わらない固定値。このプログラムは既に 119 KiB あり、
@@ -518,9 +521,11 @@ ci_workflow_run_with_structure() {
     # 前置きの BEGIN と呼び出し側を 1 つのファイルに書き出せば意味は変わらない。
     # 書き出しに失敗したら**解析せずに落とす**（プログラムが欠けたまま「該当なし」を
     # 返すと、走っていないスイートが緑で通る）
-    {
-        # 構造行の表を読み込む前置き（呼び出し側は自分の初期化を別の BEGIN に書ける）
-        printf '%s\n' '
+    # **`&&` で繋ぐのが要点。** 波括弧の並びの終了コードは**最後のコマンドのもの**なので、
+    # `;` で並べると前置きの書き出しだけが失敗しても 0 が返る。そのとき awk は
+    # 構造行の表を読まないプログラムを走らせ、`structural[]` が空のまま
+    # 「どの行も構造行ではない」＝**該当なし**を静かに返す（fail-open。レビューで指摘）
+    if ! { printf '%s\n' '
         BEGIN {
             while ((getline entry < structural_file) > 0) {
                 colon = index(entry, ":")
@@ -528,10 +533,11 @@ ci_workflow_run_with_structure() {
             }
             close(structural_file)
         }
-        '
-        # 呼び出し側のプログラム本体
-        printf '%s\n' "${program}"
-    } > "${program_file}" || return 1
+        ' && printf '%s\n' "${program}"; } > "${program_file}"; then
+        # 書き出せなかったら解析せずに落とす（中間ファイルも残さない）
+        rm -f "${structural_file}" "${program_file}" || true
+        return 1
+    fi
     # 構造行の表を BEGIN で読み込んでから、呼び出し側のプログラムを続ける
     awk -v structural_file="${structural_file}" -v comment_re="${CI_WORKFLOW_COMMENT_START}" \
         -f "${program_file}" "${workflow}"
@@ -969,13 +975,26 @@ ci_workflow_extract() {
         # 本体を同じ断片で開く定義（form 2）から、見出しを落とした残り（`{ …`）を返す。
         # 1 行書き（`f() { set +e; }`）の `set` は、見出しが付いたままでは `set_command()` が
         # 拾えない。ここで見出しだけを落として、あとは通常の経路に載せる
-        function function_body_rest(t,   s) {
+        # **入れ子の 1 行定義にも対応するため繰り返す。** `outer() { inner() { set +e; }; … }` は
+        # 見出しを 1 つ落としただけでは `{ inner() { set +e` が残り、`set` に届かない
+        # （＝ `set +e` の存在自体を見落とす。レビューで実測。fail-open）。
+        # 落とした結果は**いちばん外側の関数**に紐づける——`outer` を呼べば `inner` の定義も
+        # 呼び出しも走るので、`outer` が弱めると読むのが実 bash と一致する
+        function function_body_rest(t,   s, before) {
             s = t
             # 見出しに当たらなければ切り出すものが無い
             if (!match(s, function_head_re())) { return "" }
-            # 見出しの直後から末尾までが本体側（先頭の空白は `set_command()` のために落とす）
-            s = substr(s, RLENGTH + 1)
-            sub(/^[[:space:]]+/, "", s)
+            # 変化が無くなるまで「空白 → `{` → 見出し」を落とし続ける
+            do {
+                # この周回の開始時の姿を控える（変化の有無を測るため）
+                before = s
+                # 先頭の空白を落とす
+                sub(/^[[:space:]]+/, "", s)
+                # 本体を開く `{` を落とす
+                sub(/^\{[[:space:]]+/, "", s)
+                # さらに見出しが続くなら、それも落とす（入れ子の定義）
+                if (match(s, function_head_re())) { s = substr(s, RLENGTH + 1) }
+            } while (s != before)
             return s
         }
 
@@ -1100,6 +1119,11 @@ ci_workflow_extract() {
                 if (sub(/^[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+/, "", probe)) { continue }
                 # 同じ組み込みをそのまま呼ぶ書き方（関数を探すときは落とさない。上の説明を参照）
                 if (strip_lookup_bypass && sub(/^(builtin|command)[[:space:]]+/, "", probe)) { continue }
+                # **条件の位置も命令の位置。** `if set +e; then …` の `set` は条件として
+                # 現在のシェルで走るので、握り潰しはそのまま効く（実 bash と差分照合して実測）。
+                # `struct_text` 側では剥がせない——あちらは `if` が 1 階層開くことを数える
+                # ための本文で、剥がすと深さの勘定が壊れる。**`set` と呼び出しを探す側でだけ**落とす
+                if (sub(/^(if|elif|while|until)[[:space:]]+/, "", probe)) { continue }
                 # `eval` は現在のシェルで走るので、引用を外して中身を見る
                 if (sub(/^eval[[:space:]]+/, "", probe)) { gsub(/["\047]/, "", probe); continue }
                 # `\set` はエイリアス展開を止めるだけで、呼ぶ組み込み・関数は同じ

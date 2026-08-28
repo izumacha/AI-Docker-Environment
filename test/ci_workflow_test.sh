@@ -1483,6 +1483,129 @@ jobs:
           g
           bash ${SUITE_PATH}"
 
+# --- 条件の位置に置いた `set` と呼び出し ---------------------------------------------
+#
+# `if set +e; then …` の `set` は**条件として現在のシェルで走る**ので握り潰しは効く。
+# `struct_text` は `then` / `else` / `do` しか剥がさないため、`if` を剥がす場所が
+# どこにも無く、1 行でゲートを外せた（**main 既存**の fail-open。レビューで検出）。
+# 剥がすのは `set` と呼び出しを探す側だけで、`struct_text` では剥がさない
+# （あちらは `if` が 1 階層開くことを数えるための本文。剥がすと深さの勘定が壊れる）。
+
+assert_not_wired "条件の位置の set +e も効く（if）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          if set +e; then :; fi
+          bash ${SUITE_PATH}"
+
+assert_not_wired "条件の位置の set +e も効く（while）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          while set +e; do break; done
+          bash ${SUITE_PATH}"
+
+assert_not_wired "条件の位置の set +e も効く（until）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          until set +e; do break; done
+          bash ${SUITE_PATH}"
+
+assert_not_wired "条件の位置の set +e も効く（elif）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          if false; then :; elif set +e; then :; fi
+          bash ${SUITE_PATH}"
+
+# 呼び出しも同じ位置に書ける（剥がす一覧を共有していないと 3 トークンで抜けられる）
+assert_not_wired "条件の位置の呼び出しでも本文の set +e が効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          if f; then :; fi
+          bash ${SUITE_PATH}"
+
+assert_not_wired "while の条件で呼んでも本文の set +e が効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          while f; do break; done
+          bash ${SUITE_PATH}"
+
+# 締めすぎの側: 強める向きは条件の位置でも credit しない（条件次第でしか走らない）
+assert_not_wired "条件の位置の set -e は打ち消しに使わない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          set +e
+          if set -e; then :; fi
+          bash ${SUITE_PATH}"
+
+# 締めすぎの側: 条件が `set` でも呼び出しでもない普通の綴りは今までどおり
+assert_wired "普通の条件は握り潰しと読まない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          if [ -n \"${DOLLAR}X\" ]; then :; fi
+          bash ${SUITE_PATH}"
+
+# --- 入れ子の 1 行定義 ---------------------------------------------------------------
+#
+# 見出しを 1 つ落としただけでは `{ inner() { set +e` が残り、`set` に届かない
+# （＝存在自体を見落とす。fail-open）。複数行で書いた同じコードは正しく扱えるので、
+# **1 行に畳むだけで穴が開く**形だった。
+
+assert_not_wired "入れ子の 1 行定義でも呼べば set +e が効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          outer() { inner() { set +e; }; inner; }
+          outer
+          bash ${SUITE_PATH}"
+
+# 締めすぎの側: 外側を呼ばなければ、入れ子の中身は 1 度も走らない
+assert_wired "入れ子の 1 行定義も呼ばなければ効かない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          outer() { inner() { set +e; }; inner; }
+          bash ${SUITE_PATH}"
+
 # --- 連鎖の届かない `set`（1 度も走らない） ----------------------------------------
 
 # `true || set +e` の右は走らないので、握り潰しとして数えてはいけない。
