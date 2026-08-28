@@ -1025,48 +1025,13 @@ ci_workflow_extract() {
         # 打ち消せるのは**同じ階層で落とした分だけ**——`set +e; if x; then set -e; fi` の
         # `set -e` は条件次第でしか走らないので、打ち消すと本物の握り潰しを見落とす
         # （fail-open）。最上位の `weak_depth` / `weak_prev` と同じ考え方を関数ごとの台帳へ移したもの
-        function clear_fn_weaken(name, want_e, want_pipe, we, wp, at, we_at, wp_at, restored) {
+        function clear_fn_weaken(name, want_e, want_pipe, we, wp, at, we_at, wp_at) {
             # 名前が無ければ台帳に無いので何もしない
             if (name == "") { return }
-            # **打ち消すものが無くても「戻す本文だ」という事実は控える。**
-            # 呼び先から伝播してきた弱め（`f() { g; set -e; }`）は、この時点ではまだ
-            # 台帳に載っていない——載るのは `f` を呼ぶ断片で畳み直したときで、そこには
-            # もう本文の `set -e` を見に行く経路が無い。控えておかないと、戻している関数が
-            # 「弱める関数」に化けて required なジョブが恒常的に赤くなる（レビューで実測）
-            if (want_e) { restored[name] = 1 }
             # errexit を戻す綴りで、落としたのが同じ階層なら取り消す
             if (want_e && we[name] && we_at[name] == at) { we[name] = 0 }
             # pipefail も同じ
             if (want_pipe && wp[name] && wp_at[name] == at) { wp[name] = 0 }
-        }
-
-        # 記録した呼び出し関係をたどって、弱める向きを**間接的な呼び出しにも**伝播させる。
-        # `h() { g; }` / `g() { f; }` / `f() { set +e; }` と書いて `h` を呼ぶと、実 bash では
-        # `set +e` が呼び出し元まで漏れる。1 段だけ見る実装だと**関数をもう 1 つ挟むだけ**で
-        # 追跡が外れる（レビューで実測。fail-open）。
-        # **記録した時点で畳まず、呼び出しに着いた時点で畳み直す**のが要点で、bash の関数定義は
-        # 順序が自由（`h` を `g` より先に書ける）ため、記録時に解決すると書く順で答えが変わる。
-        # **回数の上限は置かない。** 相互再帰（`a() { b; }` / `b() { a; }`）でも
-        # 止まることは条件そのものが保証する: この関数は `we[…]` を 1 に**する**だけで
-        # 戻すことがなく、名前の数は有限なので、いつか必ず「新しく分かったことが無い」
-        # 周回に達して `changed` が 0 になる。
-        # 上限を置くと、長い呼び出しの連鎖（`f1 → f2 → … → f101`）で畳み込みが
-        # 途中で打ち切られ、**記録済みの `set +e` が黙って落ちる**（解析の都合が
-        # そのまま fail-open に化ける。レビューで指摘）
-        # `restored` に載っている呼び元へは伝播させない（上の説明を参照）。
-        # 伝播を見送る側は「弱めを反映しない」＝これまでどおりなので新しい穴は開かない
-        function close_fn_weaken(we, edges, restored,   key, parts, changed) {
-            do {
-                # この周回で新しく分かったことがあるか
-                changed = 0
-                # 記録したすべての「呼び元 → 呼び先」を見る
-                for (key in edges) {
-                    # 連想配列の鍵は `呼び元 SUBSEP 呼び先` の形で持っている
-                    split(key, parts, SUBSEP)
-                    # 呼び先が弱めるなら、呼び元も呼ばれた時点で弱める
-                    if (we[parts[2]] && !we[parts[1]] && !restored[parts[1]]) { we[parts[1]] = 1; changed = 1 }
-                }
-            } while (changed)
         }
 
         # いまいる階層を内側から外側へたどり、最も近い関数定義の名前を返す（無ければ空文字）。
@@ -1214,7 +1179,7 @@ ci_workflow_extract() {
         # **ここでは出力しない**のが要点で、ジョブ単位の無効化キー（`if: false` 等）は
         # YAML のキー順が自由である以上 `steps:` の**後ろ**にも書ける。書いた時点で
         # 出力済みのステップは取り消せないため、ジョブ 1 つ分を溜めてから出す
-        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, closed_any, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fncall, fncall_rest, call_probe, fnedges, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, fnrestored_e, fnrestored_pipe, fnedges_dirty) {
+        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, closed_any, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok) {
             # **シェルのオプションはステップごとにリセットする。** ステップは 1 つずつ
             # 別のシェルで走るので、前のステップの `set +e` / `pipefail` は引き継がれない。
             # **控えるのは `set` で明示された分だけ（-1 = 明示なし）。** シェルの既定と突き合わせるのは
@@ -1583,7 +1548,7 @@ ci_workflow_extract() {
                                 # 短い綴りで落ちるのは errexit だけ（`pipefail` は長い綴りのみ）
                                 if (in_fndef_here && !seton) { record_fn_weaken(fndef_name_here, setbody ~ /e/, 0, fnweak_e, fnweak_pipe, fn_body_depth, fnweak_e_at, fnweak_pipe_at) }
                                 # 同じ本文の同じ階層で戻していれば、その関数は呼んでも弱めない
-                                else if (in_fndef_here && seton && fn_cancel_ok) { clear_fn_weaken(fndef_name_here, setbody ~ /e/, 0, fnweak_e, fnweak_pipe, fn_body_depth, fnweak_e_at, fnweak_pipe_at, fnrestored_e) }
+                                else if (in_fndef_here && seton && fn_cancel_ok) { clear_fn_weaken(fndef_name_here, setbody ~ /e/, 0, fnweak_e, fnweak_pipe, fn_body_depth, fnweak_e_at, fnweak_pipe_at) }
                                 # **末尾が `o` なら次の語が長い綴りの名前**（`-o errexit` / `-euo pipefail`）。
                                 # 短い綴りだけを見ると、1 行でゲートを外したまま「ゲートしている」と読む
                                 # **`o` は並びのどこにあってもよい。** bash は `-oe pipefail` を
@@ -1600,7 +1565,7 @@ ci_workflow_extract() {
                                     else if (setname == "pipefail") { pipefail = set_flag(seton, strengthen_pipe_ok, weaken_ok, pipefail) }
                                     # 長い綴り（`+o errexit` / `+o pipefail`）も短い綴りと同じように控える
                                     if (in_fndef_here && !seton) { record_fn_weaken(fndef_name_here, setname == "errexit", setname == "pipefail", fnweak_e, fnweak_pipe, fn_body_depth, fnweak_e_at, fnweak_pipe_at) }
-                                    else if (in_fndef_here && seton && fn_cancel_ok) { clear_fn_weaken(fndef_name_here, setname == "errexit", setname == "pipefail", fnweak_e, fnweak_pipe, fn_body_depth, fnweak_e_at, fnweak_pipe_at, fnrestored_e) }
+                                    else if (in_fndef_here && seton && fn_cancel_ok) { clear_fn_weaken(fndef_name_here, setname == "errexit", setname == "pipefail", fnweak_e, fnweak_pipe, fn_body_depth, fnweak_e_at, fnweak_pipe_at) }
                                 }
                             }
                         }
@@ -1655,26 +1620,19 @@ ci_workflow_extract() {
                             # **語の切れ目のときだけ呼び出しと読む。** `foo=1`（代入）や `foobar`（別の名前）を
                             # 巻き込むと、走らない握り潰しを反映してゲートしているステップを赤くする
                             if (fncall_rest == "" || fncall_rest ~ /^[[:space:]]/) {
-                                # **定義の本文の中の呼び出しは、その場では走らない。**
-                                # ただし外側の関数が呼ばれれば走るので、「呼び元 → 呼び先」を
-                                # 控えておき、外側の関数が呼ばれた時点でまとめて畳む。
-                                # 控えないと関数をもう 1 つ挟むだけで追跡が外れる
-                                # （`h() { g; }` / `g() { f; }` / `f() { set +e; }` ＋ `h`。fail-open）
-                                if (in_fndef_here) {
-                                    # 名前の取れない定義は後で引けないので控えない
-                                    if (fndef_name_here != "") { fnedges[fndef_name_here, fncall] = 1; fnedges_dirty = 1 }
-                                }
-                                else {
+                                # **定義の本文の中の呼び出しは、その場では走らない**ので何もしない。
+                                # 外側の関数が呼ばれれば走るため、呼び出し関係をたどって
+                                # 弱めを伝播させる仕組みも一度は入れたが、**関数の本文は
+                                # 「弱める／戻す」が起きた順序で結果が決まる**（`main() { set -e; relax; }`
+                                # と `f() { g; set -e; }` は同じ材料でも答えが逆になる）。
+                                # 順序を持たない台帳で近似すると、伝播を許せば握り潰しを見落とし
+                                # （fail-open）、伝播を止めれば正しくゲートしているステップを赤くする
+                                # （fail-closed）——どちらの向きにも実際に外し、レビューで 3 巡続けて
+                                # 回帰を出した。**間接の追跡は順序付きの解析として別途入れる**ことにし、
+                                # ここでは直接の本文だけを見る（`main` と同じ＝新しい穴は開かない）
+                                if (!in_fndef_here) {
                                     # **呼び出しに着いた時点で畳み直す。** 定義の順序は自由なので、
                                     # 控えた時点では呼び先がまだ弱めると分かっていないことがある
-                                    # **畳み直すのは呼び出し関係が増えたときだけ。** 判定は先頭が
-                                    # 識別子の断片すべてに掛かるので（`echo …` / `bash …` も含む）、
-                                    # 毎回畳むと長い連鎖のあるステップで無駄が積み上がる
-                                    if (fnedges_dirty) {
-                                        close_fn_weaken(fnweak_e, fnedges, fnrestored_e)
-                                        close_fn_weaken(fnweak_pipe, fnedges, fnrestored_pipe)
-                                        fnedges_dirty = 0
-                                    }
                                     # errexit を落とした関数なら、`set +e` と同じ扱いで落とす
                                     # （`apply_errexit()` を通すので、同じ階層の `set -e` で打ち消せる）
                                     if (fnweak_e[fncall]) { errexit = apply_errexit(0, 0, uncertain, 1, errexit, depth) }
