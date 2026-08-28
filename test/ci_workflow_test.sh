@@ -1314,6 +1314,175 @@ jobs:
           f
           bash ${SUITE_PATH}"
 
+# --- 呼び出しの綴り（`set` を探すときと同じ飾りを落とす） ---------------------------
+#
+# 飾りの一覧を呼び出し側だけ狭く持つと、**その綴りに書き換えるだけで追跡が外れる**。
+# `{ f; }` は 2 文字の抜け道だった（レビューで実測。fail-open）。
+# 期待値はすべて実 `bash -e` との差分照合で確かめてある。
+
+assert_not_wired "ブレースグループ越しの呼び出しでも効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          { f; }
+          bash ${SUITE_PATH}"
+
+assert_not_wired "! を前置きした呼び出しでも効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          ! f
+          bash ${SUITE_PATH}"
+
+assert_not_wired "eval 越しの呼び出しでも効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          eval f
+          bash ${SUITE_PATH}"
+
+assert_not_wired "time 越しの呼び出しでも効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          time f
+          bash ${SUITE_PATH}"
+
+assert_not_wired "変数代入を前置きした呼び出しでも効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          VERBOSE=1 f
+          bash ${SUITE_PATH}"
+
+# **`command` / `builtin` はシェル関数の探索を飛ばす綴り**なので、落としてはいけない。
+# 落とすと `command f` を関数 f の呼び出しと読み、実際には走らない握り潰しを反映して
+# ゲートしているステップを赤くする（実 bash と差分照合して実測）
+assert_wired "command 経由は関数の呼び出しではない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          command f || true
+          bash ${SUITE_PATH}"
+
+assert_wired "builtin 経由は関数の呼び出しではない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          builtin f || true
+          bash ${SUITE_PATH}"
+
+# --- 間接的な呼び出し（関数を 1 つ挟んでも追跡が外れないこと） ----------------------
+#
+# 1 段だけ見る実装だと、**関数をもう 1 つ挟むだけ**で 2 行の抜け道が復活する
+# （レビューで実測。fail-open）。定義の順序は bash では自由なので、
+# 「呼び元を先に書く」綴りでも同じ答えになることを対で固定する。
+
+assert_not_wired "関数を 1 つ挟んだ呼び出しでも効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          g() { f; }
+          g
+          bash ${SUITE_PATH}"
+
+assert_not_wired "関数を 2 つ挟んだ呼び出しでも効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          g() { f; }
+          h() { g; }
+          h
+          bash ${SUITE_PATH}"
+
+# 呼び元を先に書いても答えが変わらない（記録した時点ではなく呼び出しの時点で畳むため）
+assert_not_wired "呼び元を先に定義しても間接の追跡が効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          h() { g; }
+          g() { f; }
+          f() { set +e; }
+          h
+          bash ${SUITE_PATH}"
+
+# 締めすぎの側: 間接的にしか繋がっていなくても、**呼ばれなければ**効かない
+assert_wired "間接の連鎖を定義しただけでは効かない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          g() { f; }
+          h() { g; }
+          bash ${SUITE_PATH}"
+
+# 相互再帰でも畳み込みが止まること（止まらないと CI が固まる）
+assert_wired "相互に呼び合う定義でも解析が止まる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          a() { b; }
+          b() { a; }
+          bash ${SUITE_PATH}"
+
+# 呼び先が何も弱めないなら、間接でも効かない
+assert_wired "弱めない関数を挟んだだけでは効かない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { echo hi; }
+          g() { f; }
+          g
+          bash ${SUITE_PATH}"
+
 # --- 連鎖の届かない `set`（1 度も走らない） ----------------------------------------
 
 # `true || set +e` の右は走らないので、握り潰しとして数えてはいけない。
@@ -3877,6 +4046,48 @@ if ci_workflow_load "${TMP_DIR}/does-not-exist.yml" "${TMP_DIR}/missing-out" 2> 
 else
     report 0 "存在しないワークフローは読み込み失敗として返る"
 fi
+
+# --- awk プログラムの渡し方（引数長の崖を作り直さない） -----------------------------
+#
+# awk プログラムを**引数**で渡していたころ、Linux の `MAX_ARG_STRLEN`（1 引数 128 KiB。
+# `ARG_MAX` を上げても変わらない固定値）まで残り 11 KiB しかなかった。コメントを
+# 200 行足すだけで `awk: Argument list too long` になり、**解析が丸ごと死ぬ**
+# （実測: 本 PR の追加で 136 KiB に達し、260 表明が一斉に落ちた）。
+# いまは `-f` でファイルから読ませているので上限が無い。引数渡しへ戻すと
+# この崖が復活するため、**上限を超える大きさのプログラムが通ること**で固定する。
+# 「大きい」の基準は上限そのもの（131072）で、実装の都合を書き写さない
+awk_arg_limit_case() {
+    # 上限を確実に超える詰め物を作る（awk のコメント行なので意味は変えない）
+    local padding
+    padding="$(awk 'BEGIN { line = "# "; while (length(line) < 200) { line = line "x" }
+                           for (i = 0; i < 800; i++) { print line } }')"
+    # 詰め物を載せた小さなプログラムを、共有の入口経由で走らせる
+    local workflow="${TMP_DIR}/arg-limit.yml"
+    printf '%s\n' "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: bash ${SUITE_PATH}" > "${workflow}"
+    # 詰め物 ＋ 1 行だけの本体。通れば「引数長の上限に縛られていない」ことが示せる
+    local out
+    out="$(ci_workflow_run_with_structure "${workflow}" "${TMP_DIR}/arg-limit" \
+        "${padding}
+        END { print \"reached\" }" 2>&1)" || {
+        report_fail "上限を超える大きさの awk プログラムでも走る" \
+            "解析器がプログラムを受け取れなかった（引数渡しに戻っていると MAX_ARG_STRLEN で落ちる）: ${out}"
+        return
+    }
+    # 本体が実際に走ったことまで確かめる（受け取れても走らなければ意味がない）
+    if [ "${out}" = "reached" ]; then
+        report 0 "上限を超える大きさの awk プログラムでも走る"
+    else
+        report_fail "上限を超える大きさの awk プログラムでも走る" \
+            "プログラムは受け取れたが本体が走っていない（出力: ${out}）"
+    fi
+}
+awk_arg_limit_case
 
 # 集計を出して、失敗が 1 件でもあれば非ゼロで終わる
 harness_summary
