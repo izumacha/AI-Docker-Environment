@@ -1542,6 +1542,35 @@ jobs:
           f
           bash ${SUITE_PATH}"
 
+# **呼び先から伝わってきた弱めも、呼び元の本文が戻していれば効かない。**
+# 伝播が載るのは呼び元を呼ぶ断片で畳み直したときで、そこにはもう本文の `set -e` を
+# 見に行く経路が無い。控えておかないと、戻している関数が「弱める関数」に化けて
+# required なジョブが恒常的に赤くなる（レビューで実測。origin/main は正しく wired）
+assert_wired "呼び先の弱めも呼び元が戻していれば効かない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          g() { set +e; }
+          f() { g; set -e; }
+          f
+          bash ${SUITE_PATH}"
+
+# 見出しが別行の綴りでも打ち消しが成立する（本体の階層の数え方が 1 つずれていた）
+assert_wired "見出しが別行の関数が戻していてもゲートは残る" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f()
+          { set +e; set -e; }
+          f
+          bash ${SUITE_PATH}"
+
 # 穴の側: **条件の中で戻す**綴りは打ち消さない（走るとは限らないため）。
 # 打ち消すと、実際には握り潰されている呼び出しが「ゲートしている」と読まれる
 assert_not_wired "条件の中でしか戻さない関数は打ち消しにならない" "name: ci
