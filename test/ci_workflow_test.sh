@@ -1497,6 +1497,67 @@ ${body}"
 }
 fn_chain_case
 
+# --- 本文の中で戻している関数（CI スクリプトの定型句） -------------------------------
+#
+# `run_quietly() { set +e; "$@"; set -e; }` は呼んだあとの errexit が**有効なまま**。
+# 台帳へ記録しっぱなしにすると、この定型句があるだけで以降のスイートがすべて
+# 「未配線」と誤報され、**required なジョブが恒常的に赤くなる**（fail-closed だが、
+# 検出網ごと信用されなくなる。レビューで実測）。
+# 打ち消せるのは**同じ階層で落とした分だけ**——条件の中で戻す綴りは打ち消さない。
+
+assert_wired "本文で戻している関数を呼んでもゲートは残る" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          run_quietly() {
+            set +e
+            \"${DOLLAR}@\"
+            set -e
+          }
+          run_quietly echo hi
+          bash ${SUITE_PATH}"
+
+assert_wired "1 行で戻している関数を呼んでもゲートは残る" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; :; set -e; }
+          f
+          bash ${SUITE_PATH}"
+
+assert_wired "長い綴りで戻していても同じ" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +o errexit; :; set -o errexit; }
+          f
+          bash ${SUITE_PATH}"
+
+# 穴の側: **条件の中で戻す**綴りは打ち消さない（走るとは限らないため）。
+# 打ち消すと、実際には握り潰されている呼び出しが「ゲートしている」と読まれる
+assert_not_wired "条件の中でしか戻さない関数は打ち消しにならない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() {
+            set +e
+            if [ -n \"${DOLLAR}FORCE\" ]; then set -e; fi
+          }
+          f
+          bash ${SUITE_PATH}"
+
 # 呼び先が何も弱めないなら、間接でも効かない
 assert_wired "弱めない関数を挟んだだけでは効かない" "name: ci
 jobs:
@@ -1659,6 +1720,25 @@ jobs:
         run: |
           f() { set +e; }
           case ${DOLLAR}(echo linux) in (linux) : ;; esac
+          bash ${SUITE_PATH}"
+
+# **見出しの剥がしは `case` を開く断片だけに掛ける。** アームの**中身**にも掛けると、
+# `[^)]*` が `\$(` を跨いで `f \$(date)` のような呼び出しを丸ごと消してしまい、
+# 弱めが反映されない（握り潰されたスイートが「ゲートしている」と読まれる fail-open。
+# レビューで実測。1 度この形で入れて即座に検出された）
+assert_not_wired "アームの中身の呼び出しは引数のコマンド置換で消えない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          case x in
+            *)
+              f ${DOLLAR}(date)
+              ;;
+          esac
           bash ${SUITE_PATH}"
 
 # --- 入れ子の 1 行定義 ---------------------------------------------------------------

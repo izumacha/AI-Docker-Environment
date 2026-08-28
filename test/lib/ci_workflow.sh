@@ -1007,13 +1007,31 @@ ci_workflow_extract() {
         # 短い綴り（`+e`）と長い綴り（`+o errexit`）で書き写しが増えると、片方の綴りに
         # 書き換えるだけで追跡をすり抜けられるので、記録はここ 1 か所に寄せる。
         # 名前が取れなかった定義は名前で引けないので、何も控えずに戻る
-        function record_fn_weaken(name, want_e, want_pipe, we, wp) {
+        function record_fn_weaken(name, want_e, want_pipe, we, wp, at, we_at, wp_at) {
             # 名前が無ければ後で引けないため記録しない
             if (name == "") { return }
-            # errexit を落とす綴りだったか
-            if (want_e) { we[name] = 1 }
+            # errexit を落とす綴りだったか（本文のどの階層で落としたかも控える）
+            if (want_e) { we[name] = 1; we_at[name] = at }
             # pipefail を落とす綴りだったか
-            if (want_pipe) { wp[name] = 1 }
+            if (want_pipe) { wp[name] = 1; wp_at[name] = at }
+        }
+
+        # **本文の中で戻していれば、その関数は呼んでも弱めない。**
+        # `run_quietly() { set +e; "$@"; set -e; }` は CI スクリプトの定型句で、
+        # 呼んだあとの errexit は**有効なまま**。記録しっぱなしにすると、この定型句が
+        # あるだけで以降のスイートがすべて「未配線」と誤報され、**required なジョブが
+        # 恒常的に赤くなる**（向きは fail-closed だが、検出網ごと信用されなくなる。
+        # レビューで実測）。
+        # 打ち消せるのは**同じ階層で落とした分だけ**——`set +e; if x; then set -e; fi` の
+        # `set -e` は条件次第でしか走らないので、打ち消すと本物の握り潰しを見落とす
+        # （fail-open）。最上位の `weak_depth` / `weak_prev` と同じ考え方を関数ごとの台帳へ移したもの
+        function clear_fn_weaken(name, want_e, want_pipe, we, wp, at, we_at, wp_at) {
+            # 名前が無ければ台帳に無いので何もしない
+            if (name == "") { return }
+            # errexit を戻す綴りで、落としたのが同じ階層なら取り消す
+            if (want_e && we[name] && we_at[name] == at) { we[name] = 0 }
+            # pipefail も同じ
+            if (want_pipe && wp[name] && wp_at[name] == at) { wp[name] = 0 }
         }
 
         # 記録した呼び出し関係をたどって、弱める向きを**間接的な呼び出しにも**伝播させる。
@@ -1188,7 +1206,7 @@ ci_workflow_extract() {
         # **ここでは出力しない**のが要点で、ジョブ単位の無効化キー（`if: false` 等）は
         # YAML のキー順が自由である以上 `steps:` の**後ろ**にも書ける。書いた時点で
         # 出力済みのステップは取り消せないため、ジョブ 1 つ分を溜めてから出す
-        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, closed_any, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fncall, fncall_rest, call_probe, fnedges) {
+        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, closed_any, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fncall, fncall_rest, call_probe, fnedges, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok) {
             # **シェルのオプションはステップごとにリセットする。** ステップは 1 つずつ
             # 別のシェルで走るので、前のステップの `set +e` / `pipefail` は引き継がれない。
             # **控えるのは `set` で明示された分だけ（-1 = 明示なし）。** シェルの既定と突き合わせるのは
@@ -1509,6 +1527,15 @@ ci_workflow_extract() {
                             # 正しくゲートしているステップを赤くする（複数行で書いた同じアームとも
                             # 答えが食い違う。実 bash と差分照合して実測）
                             set_depth = depth + ((struct_text ~ /^case([[:space:]]|$)/) ? 1 : 0)
+                            # **関数ごとの台帳で使う階層。** 本体を同じ断片で開く 1 行書き
+                            # （`f() { set +e; }`）では深さが増えるのが断片の末尾なので、
+                            # 素の `depth` で控えると、続く断片の `set -e`（1 つ深い）と
+                            # 階層が一致せず打ち消せない
+                            fn_body_depth = depth + ((fn_form == 2) ? 1 : 0)
+                            # 台帳の打ち消しを認めてよい綴りか。強める向きを信用する条件から
+                            # 「定義の外であること」だけを外したもの——ここは定義の**中**の話で、
+                            # 見ているのは「この関数を呼んだあと errexit が有効か」だから
+                            fn_cancel_ok = (set_probe == text && prev_op != "&&" && prev_op != "||")
                             # 弱める向きは、定義の本文でなければ（＝走るかもしれない時点で）反映する
                             weaken_ok = (!in_fndef_here)
                             # **語を左から右へ順に適用する。** bash はそう解釈するので
@@ -1542,7 +1569,9 @@ ci_workflow_extract() {
                                 # 控えるのは弱める向きだけ（強める向きまで信用すると、
                                 # 呼ばれるとは限らない `set -e` が外側の握り潰しを隠す fail-open）
                                 # 短い綴りで落ちるのは errexit だけ（`pipefail` は長い綴りのみ）
-                                if (in_fndef_here && !seton) { record_fn_weaken(fndef_name_here, setbody ~ /e/, 0, fnweak_e, fnweak_pipe) }
+                                if (in_fndef_here && !seton) { record_fn_weaken(fndef_name_here, setbody ~ /e/, 0, fnweak_e, fnweak_pipe, fn_body_depth, fnweak_e_at, fnweak_pipe_at) }
+                                # 同じ本文の同じ階層で戻していれば、その関数は呼んでも弱めない
+                                else if (in_fndef_here && seton && fn_cancel_ok) { clear_fn_weaken(fndef_name_here, setbody ~ /e/, 0, fnweak_e, fnweak_pipe, fn_body_depth, fnweak_e_at, fnweak_pipe_at) }
                                 # **末尾が `o` なら次の語が長い綴りの名前**（`-o errexit` / `-euo pipefail`）。
                                 # 短い綴りだけを見ると、1 行でゲートを外したまま「ゲートしている」と読む
                                 # **`o` は並びのどこにあってもよい。** bash は `-oe pipefail` を
@@ -1558,7 +1587,8 @@ ci_workflow_extract() {
                                     # `pipefail` が立っていればパイプ越しでも失敗が伝わる
                                     else if (setname == "pipefail") { pipefail = set_flag(seton, strengthen_pipe_ok, weaken_ok, pipefail) }
                                     # 長い綴り（`+o errexit` / `+o pipefail`）も短い綴りと同じように控える
-                                    if (in_fndef_here && !seton) { record_fn_weaken(fndef_name_here, setname == "errexit", setname == "pipefail", fnweak_e, fnweak_pipe) }
+                                    if (in_fndef_here && !seton) { record_fn_weaken(fndef_name_here, setname == "errexit", setname == "pipefail", fnweak_e, fnweak_pipe, fn_body_depth, fnweak_e_at, fnweak_pipe_at) }
+                                    else if (in_fndef_here && seton && fn_cancel_ok) { clear_fn_weaken(fndef_name_here, setname == "errexit", setname == "pipefail", fnweak_e, fnweak_pipe, fn_body_depth, fnweak_e_at, fnweak_pipe_at) }
                                 }
                             }
                         }
@@ -1589,7 +1619,13 @@ ci_workflow_extract() {
                         # ようにコマンド置換が主語にある綴りは `$( … )` で止まって命令に届かないが、
                         # **届かない側は「弱めを反映しない」＝これまでどおり**なので新しい穴は開かない
                         # （`set` を探す側は `)` を 1 つずつ越える走査で同じ綴りに対応している）
-                        else if (case_depth > 0 || struct_text ~ /^case([[:space:]]|$)/) {
+                        # **`case` を開く断片だけに限る。** `case_depth > 0` まで広げると
+                        # アームの**中身**の断片にも掛かり、`f $(date)` のような呼び出しが
+                        # `[^)]*` に `$(` を跨がれて丸ごと消える＝弱めが反映されない
+                        # （握り潰されたスイートが「ゲートしている」と読まれる fail-open。
+                        #   レビューで実測）。アームの中身は上の `set_arm_here` と、
+                        # 見出しを持たない普通の断片としての扱いで足りる
+                        else if (struct_text ~ /^case([[:space:]]|$)/) {
                             sub(/^[^)]*\)[[:space:]]*/, "", call_probe)
                         }
                         # **先頭の飾りは `set` を探すときと同じ一覧で落とす。** 落とさないと
