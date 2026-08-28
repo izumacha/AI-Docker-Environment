@@ -1605,6 +1605,62 @@ jobs:
           if [ -n \"${DOLLAR}X\" ]; then :; fi
           bash ${SUITE_PATH}"
 
+# --- 1 行の POSIX アーム（`(pat)`）の後ろの呼び出し ------------------------------------
+#
+# `starts_case_arm()` は `[^()]*` で測るので、アームの `)` の手前に `(` があると跨げず、
+# **1 行に畳んだ POSIX 綴りだけ**が見出しとして剥がれない。剥がれないと断片の先頭が
+# `case` のまま残り、呼び出し先が `case` と読まれて追跡が外れる
+# （`(` を 1 つ足すだけで塞いだ穴が開き直す。レビューで検出。fail-open）。
+# 同じ綴りを 2 行に分けた場合は元から正しく扱えるので、対で固定する。
+
+assert_not_wired "1 行の POSIX アームの後ろの呼び出しでも効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          case linux in (linux) f ;; esac
+          bash ${SUITE_PATH}"
+
+assert_not_wired "2 行に分けた POSIX アームでも効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          case linux in
+            (linux) f ;;
+          esac
+          bash ${SUITE_PATH}"
+
+# 締めすぎの側: アームが弱めない関数を呼ぶだけなら効かない
+assert_wired "POSIX アームが弱めない関数を呼ぶだけでは効かない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { echo hi; }
+          case linux in (linux) f ;; esac
+          bash ${SUITE_PATH}"
+
+# 締めすぎの側: 主語のコマンド置換を見出しと読んで巻き込まない
+assert_wired "主語のコマンド置換を見出しと読まない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          case ${DOLLAR}(echo linux) in (linux) : ;; esac
+          bash ${SUITE_PATH}"
+
 # --- 入れ子の 1 行定義 ---------------------------------------------------------------
 #
 # 見出しを 1 つ落としただけでは `{ inner() { set +e` が残り、`set` に届かない
@@ -4207,10 +4263,25 @@ fi
 # この崖が復活するため、**上限を超える大きさのプログラムが通ること**で固定する。
 # 「大きい」の基準は上限そのもの（131072）で、実装の都合を書き写さない
 awk_arg_limit_case() {
+    # 上限そのもの（Linux の `MAX_ARG_STRLEN` = 32 ページ × 4096）。**この値から詰め物の量を導く**
+    # のが要点で、行数や行長を直接書くと、片方を削っただけで上限を下回っても
+    # テストは緑のまま通り、**何も検査しなくなったことに誰も気付かない**（レビューで指摘）
+    local arg_limit=131072
     # 上限を確実に超える詰め物を作る（awk のコメント行なので意味は変えない）
     local padding
-    padding="$(awk 'BEGIN { line = "# "; while (length(line) < 200) { line = line "x" }
-                           for (i = 0; i < 800; i++) { print line } }')"
+    padding="$(awk -v want="$((arg_limit + 4096))" 'BEGIN {
+        # 1 行分の長さを決める（コメント行なので中身は何でよい）
+        line = "# "; while (length(line) < 200) { line = line "x" }
+        # 上限を超えるまで行数を積む（行長から必要な本数を割り出す）
+        for (i = 0; i * (length(line) + 1) < want; i++) { print line }
+    }')"
+    # **詰め物が本当に上限を超えているか**をここで確かめる。超えていなければ
+    # このケースは崖を踏まないので、通っても何の証拠にもならない
+    if [ "${#padding}" -le "${arg_limit}" ]; then
+        report_fail "上限を超える大きさの awk プログラムでも走る" \
+            "詰め物が上限（${arg_limit} バイト）を超えていない（${#padding} バイト）。この検査は何も固定していません"
+        return
+    fi
     # 詰め物を載せた小さなプログラムを、共有の入口経由で走らせる
     local workflow="${TMP_DIR}/arg-limit.yml"
     printf '%s\n' "name: ci
