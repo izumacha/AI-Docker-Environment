@@ -916,13 +916,70 @@ ci_workflow_extract() {
         # 以降ずっと「入れ子の中」に見えるため（深さも `fndef` も戻らない）
         function function_form(t,   head) {
             # 見出しの綴り（`function` の有無と `()` の有無の組み合わせ）
-            head = "^(function[[:space:]]+[A-Za-z_][A-Za-z0-9_]*([[:space:]]*\\(\\))?|[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\\(\\))"
+            head = function_head_re()
             # `{` が同じ行にあるなら、この断片が本体を開く
             if (t ~ head "[[:space:]]*\\{([[:space:]]|$)") { return 2 }
             # `{` が無ければ見出しだけ。次に来る `{` が本体の開き
             if (t ~ head "[[:space:]]*$") { return 1 }
             # それ以外は関数定義ではない
             return 0
+        }
+
+        # 関数定義の見出しの綴り（`function f` / `function f()` / `f()`）を返す**唯一の場所**。
+        # 上の注記のとおり、この一覧を 2 か所に分けて持つと必ず片方が漏れる。
+        # 形（`function_form`）・名前（`function_name`）・本体の切り出し（`function_body_rest`）が
+        # すべてここを通るので、綴りを足すときに直すのはこの 1 行だけで済む
+        function function_head_re() {
+            return "^(function[[:space:]]+[A-Za-z_][A-Za-z0-9_]*([[:space:]]*\\(\\))?|[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\\(\\))"
+        }
+
+        # 定義の断片から関数名を返す（定義でなければ空文字）。
+        # 呼び出しを見つけたときに「どの関数の本体で `set +e` を見たか」を引くために使う
+        function function_name(t,   s) {
+            # 綴りの判定は `function_form()` に任せる（一覧を持ち込まない）
+            if (function_form(t) == 0) { return "" }
+            s = t
+            # `function` キーワード付きの綴りなら先に落とす（3 綴りのうち 2 つが持つ）
+            sub(/^function[[:space:]]+/, "", s)
+            # 残りの先頭にある識別子がそのまま関数名
+            if (match(s, /^[A-Za-z_][A-Za-z0-9_]*/)) { return substr(s, 1, RLENGTH) }
+            # 見出しの形なのに名前が取れないなら、名前で引く仕組みからは外す
+            return ""
+        }
+
+        # 本体を同じ断片で開く定義（form 2）から、見出しを落とした残り（`{ …`）を返す。
+        # 1 行書き（`f() { set +e; }`）の `set` は、見出しが付いたままでは `set_command()` が
+        # 拾えない。ここで見出しだけを落として、あとは通常の経路に載せる
+        function function_body_rest(t,   s) {
+            s = t
+            # 見出しに当たらなければ切り出すものが無い
+            if (!match(s, function_head_re())) { return "" }
+            # 見出しの直後から末尾までが本体側（先頭の空白は `set_command()` のために落とす）
+            s = substr(s, RLENGTH + 1)
+            sub(/^[[:space:]]+/, "", s)
+            return s
+        }
+
+        # 定義の本文で見た**弱める向き**を関数名に控える（呼ばれた時点で反映するため）。
+        # 短い綴り（`+e`）と長い綴り（`+o errexit`）で書き写しが増えると、片方の綴りに
+        # 書き換えるだけで追跡をすり抜けられるので、記録はここ 1 か所に寄せる。
+        # 名前が取れなかった定義は名前で引けないので、何も控えずに戻る
+        function record_fn_weaken(name, want_e, want_pipe, we, wp) {
+            # 名前が無ければ後で引けないため記録しない
+            if (name == "") { return }
+            # errexit を落とす綴りだったか
+            if (want_e) { we[name] = 1 }
+            # pipefail を落とす綴りだったか
+            if (want_pipe) { wp[name] = 1 }
+        }
+
+        # いまいる階層を内側から外側へたどり、最も近い関数定義の名前を返す（無ければ空文字）。
+        # `fndef_at[]` が立っている階層だけを見るので、閉じた階層に残った名前は拾わない
+        # （閉じ側の後始末を 2 か所へ増やさないための決め方。issue #121 を悪化させない）
+        function enclosing_fndef_name(d, at, names,   k) {
+            # 内側（深い方）から順に見て、最初に見つかった定義の名前を返す
+            for (k = d; k >= 1; k--) { if (at[k]) { return names[k] } }
+            return ""
         }
 
         # `errexit` を 1 つ分更新し、**落とした階層の記録**（`weak_depth` / `weak_prev`。どちらも大域）も
@@ -1041,7 +1098,7 @@ ci_workflow_extract() {
         # **ここでは出力しない**のが要点で、ジョブ単位の無効化キー（`if: false` 等）は
         # YAML のキー順が自由である以上 `steps:` の**後ろ**にも書ける。書いた時点で
         # 出力済みのステップは取り消せないため、ジョブ 1 つ分を溜めてから出す
-        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, closed_any, fn_form, depth_before, case_before, pipe_in, set_in_fndef, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok) {
+        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, closed_any, fn_form, depth_before, case_before, pipe_in, set_in_fndef, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fncall, fncall_rest, call_probe) {
             # **シェルのオプションはステップごとにリセットする。** ステップは 1 つずつ
             # 別のシェルで走るので、前のステップの `set +e` / `pipefail` は引き継がれない。
             # **控えるのは `set` で明示された分だけ（-1 = 明示なし）。** シェルの既定と突き合わせるのは
@@ -1208,10 +1265,20 @@ ci_workflow_extract() {
                         # 定義の本文を最上位のコードとして読む（fail-open。実 bash と差分照合して実測）
                         was_pending_fndef = pending_fndef
                         if (struct_text != "") { pending_fndef = 0 }
+                        # **いま関数定義の本文の中にいるか**を、`set` を見つけたかどうかとは
+                        # 無関係にこの場で確定させる。下の `set_in_fndef` は `set` が見つかった
+                        # 断片でしか代入されないため、呼び出しの判定に使い回すと前の断片の
+                        # 値が残る（定義の中の呼び出しを最上位の呼び出しと読む fail-open）
+                        in_fndef_body = (fndef > 0 || was_pending_fndef)
                         # 本文の先頭に立ちうる語を**繰り返し**剥がす（`then { set +e; }` のように
                         # 入れ子になるため 1 つでは足りない）。`ci_workflow_runs_script` 側は
                         # これを許してはいけない——`do` の中身が走るかは回数次第のため
                         set_probe = set_command(struct_text)
+                        # **1 行で書いた定義の本文も覗く。** `f() { set +e; }` は見出しが前に付くので
+                        # `set_command()` が当たらず、`set +e` の存在そのものを見落としていた。
+                        # ここで見出しだけを落として拾い、下で「本体の中の `set`」として
+                        # （＝その場では反映せず、関数名に控える形で）扱う
+                        if (set_probe == "" && fn_form == 2) { set_probe = set_command(function_body_rest(struct_text)) }
                         # **命令の位置に置けたか**で、その後の credit の仕方を変える。
                         # 置けたなら向きの判断に `uncertain` を使えるが、置けなかったとき
                         # （`case "$X" in Linux) set +e` のようなアームの中など）は
@@ -1293,9 +1360,10 @@ ci_workflow_extract() {
                             # そちらは CI が赤くなって人が見る**fail-closed** 側なので許容する。
                             # **関数定義の本文は「その場では走らない」ので弱める向きも反映しない。**
                             # `cleanup() { set +e; … }` は定義しただけでは何も起きず、反映すると
-                            # 実際にはゲートしている後続を「未配線」と誤報して CI を赤いままにする
-                            # （呼ばれた場合の握り潰しは、そもそも呼び出しの追跡をしていないので
-                            #   このライブラリの範囲外。main と同じ扱いに揃えてある）
+                            # 実際にはゲートしている後続を「未配線」と誤報して CI を赤いままにする。
+                            # **見送るのは「その場での反映」だけで、見なかったことにはしない**——
+                            # 本文で見た弱める向きは関数名に控え（`fnweak_*`）、その関数が
+                            # 呼ばれた断片で反映する（下の呼び出し追跡。issue #120 (2)）
                             # 反映してよい条件は向きで違う。強める向きは、命令の位置に置けて・
                             # 制御構造の外で・**連鎖に守られていない**ときだけ信用する。
                             # `set +e` の後ろに `[ -z "$FORCE" ] && set -e` と書かれた場合、
@@ -1303,10 +1371,20 @@ ci_workflow_extract() {
                             # 握り潰しを打ち消したように見えていた（実 bash と差分照合して実測）
                             # **関数定義の本文は、その場では走らない。** 見出しの次に来る `{`
                             # （`f()` → `{ set -e; }`）も本文の中なので、どちらの向きも反映しない。
-                            # 定義を開く断片そのもの（`function f { set +e; }`）はここへ来ない——
-                            # `set_command()` は関数見出しを剥がさないので `set_probe` が空になり、
-                            # このブロックに入らない（入る形が増えたら `set_command()` 側を直す）
-                            set_in_fndef = (fndef > 0 || was_pending_fndef)
+                            # **定義を開く断片そのもの（`f() { set +e; }`）もここへ来る。**
+                            # 以前は `set_command()` が見出しを剥がさず `set_probe` が空になるため
+                            # 素通りしていたが、それでは本文の `set +e` の存在自体を見落とし、
+                            # 関数が呼ばれたときの握り潰しを控えることもできなかった。
+                            # いまは上で見出しを落として拾うので、`fn_form == 2` を本文の中として扱う
+                            # （扱わないと、定義しただけの `set +e` を最上位の指定として反映し、
+                            #   ゲートしているステップを「未配線」と誤報する）
+                            set_in_fndef = (in_fndef_body || fn_form == 2)
+                            # **その `set` がどの関数の本体にあるか。** 呼ばれた時点で弱めを
+                            # 反映するために名前で控える。内側から順に決めるので、入れ子の
+                            # 定義でも「いちばん内側の関数」に紐づく
+                            fndef_name_here = (fn_form == 2) ? function_name(struct_text) \
+                                              : (was_pending_fndef ? pending_fndef_name \
+                                                 : enclosing_fndef_name(depth, fndef_at, fndef_name))
                             # **強める向きを信用するのは `set` が断片の先頭そのもののときだけ。**
                             # 継続語や `{` を剥がして見つけた `set` は、剥がした側に
                             # `{ if false` のような開き語が混ざっていることがあり、そのときの
@@ -1363,6 +1441,13 @@ ci_workflow_extract() {
                                 setbody = substr(setopt, 2)
                                 # 並びのどこかに `e` があれば errexit の指定
                                 if (setbody ~ /e/) { errexit = apply_errexit(seton, strengthen_base, uncertain, weaken_ok, errexit, set_depth) }
+                                # **定義の本文で見た弱める向きは、関数名に控えておく。**
+                                # 定義しただけでは走らないので上では反映されないが、
+                                # 呼ばれればシェルを共有するので握り潰しは呼び出し元へ漏れる。
+                                # 控えるのは弱める向きだけ（強める向きまで信用すると、
+                                # 呼ばれるとは限らない `set -e` が外側の握り潰しを隠す fail-open）
+                                # 短い綴りで落ちるのは errexit だけ（`pipefail` は長い綴りのみ）
+                                if (set_in_fndef && !seton) { record_fn_weaken(fndef_name_here, setbody ~ /e/, 0, fnweak_e, fnweak_pipe) }
                                 # **末尾が `o` なら次の語が長い綴りの名前**（`-o errexit` / `-euo pipefail`）。
                                 # 短い綴りだけを見ると、1 行でゲートを外したまま「ゲートしている」と読む
                                 # **`o` は並びのどこにあってもよい。** bash は `-oe pipefail` を
@@ -1377,7 +1462,42 @@ ci_workflow_extract() {
                                     if (setname == "errexit") { errexit = apply_errexit(seton, strengthen_base, uncertain, weaken_ok, errexit, set_depth) }
                                     # `pipefail` が立っていればパイプ越しでも失敗が伝わる
                                     else if (setname == "pipefail") { pipefail = set_flag(seton, strengthen_pipe_ok, weaken_ok, pipefail) }
+                                    # 長い綴り（`+o errexit` / `+o pipefail`）も短い綴りと同じように控える
+                                    if (set_in_fndef && !seton) { record_fn_weaken(fndef_name_here, setname == "errexit", setname == "pipefail", fnweak_e, fnweak_pipe) }
                                 }
+                            }
+                        }
+                        # **本文で `set +e` を見た関数が呼ばれたら、その時点で弱めを反映する。**
+                        # 定義しただけでは何も起きないので上では見送っているが、関数は
+                        # シェルを共有するため、呼ばれた瞬間に握り潰しが呼び出し元へ漏れる。
+                        # 追跡しないと `f() { set +e; }` と `f` の 2 行でスイートの失敗を
+                        # 握り潰せる——issue #113 が塞いだ `if [ -n "$CI" ]; then set +e; fi` と
+                        # 同じ規模の抜け道（実 bash と差分照合して実測。fail-open）。
+                        # 反映するのは**弱める向きだけ**で、`set` 本体と同じ非対称の扱いに揃える。
+                        # 除外の条件も `set` と同じ（走らないブロック・子シェル・パイプの構成要素・
+                        # 定義の本文の中では、呼び出しても親のオプションは変わらないか、そもそも走らない）
+                        # **判定は `struct_text` で行う。** `split_commands` は `;` で切るので
+                        # `if …; then f` の断片は `then f` になり、生の本文で先頭の識別子を
+                        # 取ると `then` を関数名と読んで呼び出しを丸ごと取り逃がす
+                        # （`if [ -n "$CI" ]; then f; fi` の 3 行で握り潰しが素通りする。fail-open）
+                        call_probe = struct_text
+                        # `case` のアーム見出しの後ろも命令の位置（`linux) f`）。
+                        # 剥がす綴りは上の `paren_probe` と揃える（`starts_case_arm()` の判定を使い回す）
+                        if (set_arm_here) { sub(/^\(?[^()]*\)[[:space:]]*/, "", call_probe) }
+                        if (!in_fndef_body && dead_depth < 0 && subshell == 0 && !set_forked && !unreachable \
+                            && match(call_probe, /^[A-Za-z_][A-Za-z0-9_]*/)) {
+                            # 先頭の識別子を呼び出し先の名前の候補として取り出す
+                            fncall = substr(call_probe, 1, RLENGTH)
+                            # 名前の後ろに続く部分（引数の有無を見て、語の切れ目かを確かめる）
+                            fncall_rest = substr(call_probe, RLENGTH + 1)
+                            # **語の切れ目のときだけ呼び出しと読む。** `foo=1`（代入）や `foobar`（別の名前）を
+                            # 巻き込むと、走らない握り潰しを反映してゲートしているステップを赤くする
+                            if (fncall_rest == "" || fncall_rest ~ /^[[:space:]]/) {
+                                # errexit を落とした関数なら、`set +e` と同じ扱いで落とす
+                                # （`apply_errexit()` を通すので、同じ階層の `set -e` で打ち消せる）
+                                if (fnweak_e[fncall]) { errexit = apply_errexit(0, 0, uncertain, 1, errexit, depth) }
+                                # pipefail を落とした関数も同じ
+                                if (fnweak_pipe[fncall]) { pipefail = set_flag(0, 0, 1, pipefail) }
                             }
                         }
                         # 空の断片（`;;` や行頭の区切り）は記録しない
@@ -1530,9 +1650,12 @@ ci_workflow_extract() {
                         else if (fn_form == 2) {
                             depth++; uncertain++; uncertain_at[depth] = 1
                             fndef++; fndef_at[depth] = 1
+                            # この階層の本文がどの関数のものかを控える（呼び出しで引くため）
+                            fndef_name[depth] = function_name(struct_text)
                         }
                         # 見出しだけの行は深さを動かさず、次の `{` を関数本体として予約する
-                        else if (fn_form == 1) { pending_fndef = 1 }
+                        # 名前も一緒に控える（次の `{` が本体を開いたときに引き継ぐ）
+                        else if (fn_form == 1) { pending_fndef = 1; pending_fndef_name = function_name(struct_text) }
                         # **ブレースグループ（`cmd || { echo bad; exit 1; }`）も 1 階層開く。**
                         # 閉じ側の `}` だけを数えると深さが 1 つ足りなくなり、以降の断片が
                         # 「最上位」に見える——条件の中でしか走らない呼び出しが実行の証拠に化ける（レビューで実測）
@@ -1544,6 +1667,8 @@ ci_workflow_extract() {
                             if (was_pending_fndef) {
                                 uncertain++; uncertain_at[depth] = 1
                                 fndef++; fndef_at[depth] = 1
+                                # 見出しの行で控えた名前を、本体を開いたこの階層へ引き継ぐ
+                                fndef_name[depth] = pending_fndef_name
                             }
                             # そうでなければ素の grouping（必ず走るので uncertain は増やさない）
                             else { group_start[depth] = nbuf }

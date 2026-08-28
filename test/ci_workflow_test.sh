@@ -1114,6 +1114,206 @@ jobs:
           }
           bash ${SUITE_PATH}"
 
+# --- 定義した関数を「呼んだ」場合（issue #120 (2)） ---------------------------------
+#
+# 上の節は「定義しただけでは走らない」を固定している。その理由付けは**呼ばれた時点で
+# 成り立たなくなる**——関数はシェルを共有するので、本文の `set +e` はそのまま呼び出し元へ
+# 漏れる。呼び出しを追跡しないと **2 行でスイートの失敗を握り潰せる**（issue #113 が塞いだ
+# `if [ -n "$CI" ]; then set +e; fi` と同じ規模の抜け道。fail-open）。
+# 期待値はすべて実 `bash -e` との差分照合で確かめてある。
+# **対にして置く**のが要点で、片方だけだと「呼び出しを一切見ない」実装でも
+# 「常に反映する」実装でも半分が緑になり、検出網として働かない。
+
+# 呼ばれた時点で握り潰しが効く（3 綴りすべてで同じ答えになること）
+assert_not_wired "1 行で定義した関数を呼ぶと本文の set +e が効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          f
+          bash ${SUITE_PATH}"
+
+assert_not_wired "複数行で定義した関数を呼ぶと本文の set +e が効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() {
+            set +e
+          }
+          f
+          bash ${SUITE_PATH}"
+
+assert_not_wired "function 綴りで定義した関数を呼んでも効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          function f { set +e; }
+          f
+          bash ${SUITE_PATH}"
+
+# 長い綴りでも同じ。片方だけ控えると、`+e` を `+o errexit` に書き換えるだけで素通りする
+assert_not_wired "set +o errexit を持つ関数を呼んでも効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +o errexit; }
+          f
+          bash ${SUITE_PATH}"
+
+# 引数付きの呼び出しも呼び出し（`f` だけを呼び出しと読むと 1 語足すだけで素通りする）
+assert_not_wired "引数を付けて呼んでも本文の set +e が効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          f --verbose tmp
+          bash ${SUITE_PATH}"
+
+# 継続語の後ろの呼び出しも呼び出し。`then` を関数名と読むと 3 行で素通りする
+assert_not_wired "then の後ろで呼んでも本文の set +e が効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          if [ -n \"${DOLLAR}CI\" ]; then f; fi
+          bash ${SUITE_PATH}"
+
+# pipefail も同じ扱い（errexit だけ見ると、パイプ越しの失敗が伝わらないまま緑になる）
+assert_not_wired "set +o pipefail を持つ関数を呼ぶとパイプ越しの失敗が伝わらない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          set -eo pipefail
+          f() { set +o pipefail; }
+          f
+          bash ${SUITE_PATH} | cat"
+
+# --- 呼び出しを「見すぎない」側（反映してはいけない綴り） ---------------------------
+#
+# ここが緑でないと、走らない握り潰しを反映して**ゲートしているステップを赤くする**
+# （fail-closed 側の誤報。CI が恒常的に赤くなって検出網ごと信用されなくなる）
+
+# 名前が違えば効かない（前方一致で拾うと、無関係な `foobar` で赤くなる）
+assert_wired "名前の前半だけが一致する呼び出しでは効かない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          foobar || true
+          bash ${SUITE_PATH}"
+
+# 代入は呼び出しではない（`f=1` を呼び出しと読むと、同名の変数を置くだけで赤くなる）
+assert_wired "同じ名前への代入は呼び出しではない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          f=1
+          bash ${SUITE_PATH}"
+
+# 部分シェルの中の呼び出しは親のオプションを変えない（`set` 本体と同じ扱い）
+assert_wired "部分シェルの中で呼んでも親には漏れない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          ( f )
+          bash ${SUITE_PATH}"
+
+# パイプの構成要素も子シェル
+assert_wired "パイプの構成要素として呼んでも親には漏れない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          f | cat
+          bash ${SUITE_PATH}"
+
+# 走らないと分かるブロックの中の呼び出しは反映しない
+assert_wired "if false の中で呼んでも効かない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          if false; then f; fi
+          bash ${SUITE_PATH}"
+
+# 別の関数の本文にある呼び出しは、その関数が呼ばれない限り走らない
+assert_wired "呼ばれない関数の本文にある呼び出しは効かない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          g() { f; }
+          bash ${SUITE_PATH}"
+
+# 呼び出しの後ろの `set -e` は握り潰しを打ち消す（`set +e` を書いた場合と同じ）
+assert_wired "呼び出しの後ろの set -e が打ち消す" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          f
+          set -e
+          bash ${SUITE_PATH}"
+
+# **強める向きは呼び出しでも信用しない。** 実 bash はここでゲートするが、
+# 反映すると「呼ばれるとは限らない関数の `set -e`」が外側の握り潰しを隠せてしまう
+# （fail-open）。`set` 本体で採っている非対称の扱いと揃え、fail-closed 側へ倒す
+assert_not_wired "本文が set -e の関数を呼んでも強める向きは credit しない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          set +e
+          f() { set -e; }
+          f
+          bash ${SUITE_PATH}"
+
 # --- 連鎖の届かない `set`（1 度も走らない） ----------------------------------------
 
 # `true || set +e` の右は走らないので、握り潰しとして数えてはいけない。
