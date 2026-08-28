@@ -1470,6 +1470,33 @@ jobs:
           b() { a; }
           bash ${SUITE_PATH}"
 
+# **長い連鎖でも畳み込みを打ち切らない。** 以前は回り続けないよう周回数に上限（100）を
+# 置いていたが、それでは連鎖が長いだけで**記録済みの `set +e` が黙って落ちる**
+# （解析の都合がそのまま fail-open に化ける。レビューで指摘）。
+# 相互再帰で止まることは「新しく分かったことが無ければ抜ける」条件が保証するので、
+# 上限は要らない。ここでは旧上限を確実に超える長さで固定する
+fn_chain_case() {
+    # `f1 → f2 → … → f400 → set +e` の連鎖を組み立てる
+    local body="" i
+    for i in $(seq 1 399); do
+        body="${body}          f${i}() { f$((i + 1)); }"$'\n'
+    done
+    # 連鎖の末尾だけが実際に弱める
+    body="${body}          f400() { set +e; }"$'\n'
+    # 先頭を呼んでからスイートを走らせる（弱めが伝われば「未配線」になる）
+    body="${body}          f1"$'\n'
+    body="${body}          bash ${SUITE_PATH}"
+    assert_not_wired "旧上限より長い連鎖でも弱めが伝わる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+${body}"
+}
+fn_chain_case
+
 # 呼び先が何も弱めないなら、間接でも効かない
 assert_wired "弱めない関数を挟んだだけでは効かない" "name: ci
 jobs:

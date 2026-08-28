@@ -1017,13 +1017,17 @@ ci_workflow_extract() {
         # 追跡が外れる（レビューで実測。fail-open）。
         # **記録した時点で畳まず、呼び出しに着いた時点で畳み直す**のが要点で、bash の関数定義は
         # 順序が自由（`h` を `g` より先に書ける）ため、記録時に解決すると書く順で答えが変わる。
-        # `guard` は相互再帰（`a() { b; }` / `b() { a; }`）で回り続けないための上限
-        function close_fn_weaken(we, edges,   key, parts, changed, guard) {
-            guard = 0
+        # **回数の上限は置かない。** 相互再帰（`a() { b; }` / `b() { a; }`）でも
+        # 止まることは条件そのものが保証する: この関数は `we[…]` を 1 に**する**だけで
+        # 戻すことがなく、名前の数は有限なので、いつか必ず「新しく分かったことが無い」
+        # 周回に達して `changed` が 0 になる。
+        # 上限を置くと、長い呼び出しの連鎖（`f1 → f2 → … → f101`）で畳み込みが
+        # 途中で打ち切られ、**記録済みの `set +e` が黙って落ちる**（解析の都合が
+        # そのまま fail-open に化ける。レビューで指摘）
+        function close_fn_weaken(we, edges,   key, parts, changed) {
             do {
                 # この周回で新しく分かったことがあるか
                 changed = 0
-                guard++
                 # 記録したすべての「呼び元 → 呼び先」を見る
                 for (key in edges) {
                     # 連想配列の鍵は `呼び元 SUBSEP 呼び先` の形で持っている
@@ -1031,7 +1035,7 @@ ci_workflow_extract() {
                     # 呼び先が弱めるなら、呼び元も呼ばれた時点で弱める
                     if (we[parts[2]] && !we[parts[1]]) { we[parts[1]] = 1; changed = 1 }
                 }
-            } while (changed && guard < 100)
+            } while (changed)
         }
 
         # いまいる階層を内側から外側へたどり、最も近い関数定義の名前を返す（無ければ空文字）。
