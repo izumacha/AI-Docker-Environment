@@ -1551,6 +1551,35 @@ jobs:
           f
           bash ${SUITE_PATH}"
 
+# **再定義は前の本文を置き換える。** 消さないと古い記録が勝ち、正しくゲートしている
+# ステップを「未配線」と誤報して required なジョブを赤くする（レビューで実測。`main` は正しい）
+assert_wired "同じ名前で定義し直せば前の本文は残らない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          f() {
+            :
+          }
+          f
+          bash ${SUITE_PATH}"
+
+# 逆向きも対で固定する（後から弱める本文へ差し替えたら、そちらが効く）
+assert_not_wired "定義し直して弱めるようになれば効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { :; }
+          f() { set +e; }
+          f
+          bash ${SUITE_PATH}"
+
 # 穴の側: **条件の中で戻す**綴りは打ち消さない（走るとは限らないため）。
 # 打ち消すと、実際には握り潰されている呼び出しが「ゲートしている」と読まれる
 assert_not_wired "条件の中でしか戻さない関数は打ち消しにならない" "name: ci

@@ -1363,6 +1363,17 @@ ci_workflow_extract() {
                         fndef_name_here = (fn_form == 2) ? function_name(struct_text) \
                                           : (was_pending_fndef ? pending_fndef_name \
                                              : enclosing_fndef_name(depth, fndef_at, fndef_name))
+                        # **同じ名前で定義し直したら、前の本文で控えた弱めは残らない。**
+                        # `f() { set +e; }` のあとに `f() { :; }` と書けば、呼んでも弱めない。
+                        # 消さないと古い記録が勝ち、正しくゲートしているステップを「未配線」と
+                        # 誤報して required なジョブを赤くする（レビューで実測。`main` は正しい）。
+                        # **本体を開く断片で消す**のが要点で、深さが増えるより前・かつ
+                        # この断片の `set` を記録するより前なので、1 行書きの
+                        # `f() { set +e; }` でも「消してから記録する」順序になる
+                        if ((fn_form == 2 || was_pending_fndef) && fndef_name_here != "") {
+                            fnweak_e[fndef_name_here] = 0
+                            fnweak_pipe[fndef_name_here] = 0
+                        }
                         # 本文の先頭に立ちうる語を**繰り返し**剥がす（`then { set +e; }` のように
                         # 入れ子になるため 1 つでは足りない）。`ci_workflow_runs_script` 側は
                         # これを許してはいけない——`do` の中身が走るかは回数次第のため
