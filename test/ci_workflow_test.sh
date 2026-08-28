@@ -1114,6 +1114,699 @@ jobs:
           }
           bash ${SUITE_PATH}"
 
+# --- 定義した関数を「呼んだ」場合（issue #120 (2)） ---------------------------------
+#
+# 上の節は「定義しただけでは走らない」を固定している。その理由付けは**呼ばれた時点で
+# 成り立たなくなる**——関数はシェルを共有するので、本文の `set +e` はそのまま呼び出し元へ
+# 漏れる。呼び出しを追跡しないと **2 行でスイートの失敗を握り潰せる**（issue #113 が塞いだ
+# `if [ -n "$CI" ]; then set +e; fi` と同じ規模の抜け道。fail-open）。
+# 期待値はすべて実 `bash -e` との差分照合で確かめてある。
+# **対にして置く**のが要点で、片方だけだと「呼び出しを一切見ない」実装でも
+# 「常に反映する」実装でも半分が緑になり、検出網として働かない。
+
+# 呼ばれた時点で握り潰しが効く（3 綴りすべてで同じ答えになること）
+assert_not_wired "1 行で定義した関数を呼ぶと本文の set +e が効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          f
+          bash ${SUITE_PATH}"
+
+assert_not_wired "複数行で定義した関数を呼ぶと本文の set +e が効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() {
+            set +e
+          }
+          f
+          bash ${SUITE_PATH}"
+
+assert_not_wired "function 綴りで定義した関数を呼んでも効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          function f { set +e; }
+          f
+          bash ${SUITE_PATH}"
+
+# 長い綴りでも同じ。片方だけ控えると、`+e` を `+o errexit` に書き換えるだけで素通りする
+assert_not_wired "set +o errexit を持つ関数を呼んでも効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +o errexit; }
+          f
+          bash ${SUITE_PATH}"
+
+# 引数付きの呼び出しも呼び出し（`f` だけを呼び出しと読むと 1 語足すだけで素通りする）
+assert_not_wired "引数を付けて呼んでも本文の set +e が効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          f --verbose tmp
+          bash ${SUITE_PATH}"
+
+# 継続語の後ろの呼び出しも呼び出し。`then` を関数名と読むと 3 行で素通りする
+assert_not_wired "then の後ろで呼んでも本文の set +e が効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          if [ -n \"${DOLLAR}CI\" ]; then f; fi
+          bash ${SUITE_PATH}"
+
+# pipefail も同じ扱い（errexit だけ見ると、パイプ越しの失敗が伝わらないまま緑になる）
+assert_not_wired "set +o pipefail を持つ関数を呼ぶとパイプ越しの失敗が伝わらない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          set -eo pipefail
+          f() { set +o pipefail; }
+          f
+          bash ${SUITE_PATH} | cat"
+
+# --- 呼び出しを「見すぎない」側（反映してはいけない綴り） ---------------------------
+#
+# ここが緑でないと、走らない握り潰しを反映して**ゲートしているステップを赤くする**
+# （fail-closed 側の誤報。CI が恒常的に赤くなって検出網ごと信用されなくなる）
+
+# 名前が違えば効かない（前方一致で拾うと、無関係な `foobar` で赤くなる）
+assert_wired "名前の前半だけが一致する呼び出しでは効かない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          foobar || true
+          bash ${SUITE_PATH}"
+
+# 代入は呼び出しではない（`f=1` を呼び出しと読むと、同名の変数を置くだけで赤くなる）
+assert_wired "同じ名前への代入は呼び出しではない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          f=1
+          bash ${SUITE_PATH}"
+
+# 部分シェルの中の呼び出しは親のオプションを変えない（`set` 本体と同じ扱い）
+assert_wired "部分シェルの中で呼んでも親には漏れない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          ( f )
+          bash ${SUITE_PATH}"
+
+# パイプの構成要素も子シェル
+assert_wired "パイプの構成要素として呼んでも親には漏れない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          f | cat
+          bash ${SUITE_PATH}"
+
+# 走らないと分かるブロックの中の呼び出しは反映しない
+assert_wired "if false の中で呼んでも効かない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          if false; then f; fi
+          bash ${SUITE_PATH}"
+
+# 別の関数の本文にある呼び出しは、その関数が呼ばれない限り走らない
+assert_wired "呼ばれない関数の本文にある呼び出しは効かない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          g() { f; }
+          bash ${SUITE_PATH}"
+
+# 呼び出しの後ろの `set -e` は握り潰しを打ち消す（`set +e` を書いた場合と同じ）
+assert_wired "呼び出しの後ろの set -e が打ち消す" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          f
+          set -e
+          bash ${SUITE_PATH}"
+
+# **強める向きは呼び出しでも信用しない。** 実 bash はここでゲートするが、
+# 反映すると「呼ばれるとは限らない関数の `set -e`」が外側の握り潰しを隠せてしまう
+# （fail-open）。`set` 本体で採っている非対称の扱いと揃え、fail-closed 側へ倒す
+assert_not_wired "本文が set -e の関数を呼んでも強める向きは credit しない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          set +e
+          f() { set -e; }
+          f
+          bash ${SUITE_PATH}"
+
+# --- 呼び出しの綴り（`set` を探すときと同じ飾りを落とす） ---------------------------
+#
+# 飾りの一覧を呼び出し側だけ狭く持つと、**その綴りに書き換えるだけで追跡が外れる**。
+# `{ f; }` は 2 文字の抜け道だった（レビューで実測。fail-open）。
+# 期待値はすべて実 `bash -e` との差分照合で確かめてある。
+
+assert_not_wired "ブレースグループ越しの呼び出しでも効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          { f; }
+          bash ${SUITE_PATH}"
+
+assert_not_wired "! を前置きした呼び出しでも効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          ! f
+          bash ${SUITE_PATH}"
+
+assert_not_wired "eval 越しの呼び出しでも効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          eval f
+          bash ${SUITE_PATH}"
+
+assert_not_wired "time 越しの呼び出しでも効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          time f
+          bash ${SUITE_PATH}"
+
+assert_not_wired "変数代入を前置きした呼び出しでも効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          VERBOSE=1 f
+          bash ${SUITE_PATH}"
+
+# **`command` / `builtin` はシェル関数の探索を飛ばす綴り**なので、落としてはいけない。
+# 落とすと `command f` を関数 f の呼び出しと読み、実際には走らない握り潰しを反映して
+# ゲートしているステップを赤くする（実 bash と差分照合して実測）
+assert_wired "command 経由は関数の呼び出しではない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          command f || true
+          bash ${SUITE_PATH}"
+
+assert_wired "builtin 経由は関数の呼び出しではない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          builtin f || true
+          bash ${SUITE_PATH}"
+
+# --- 間接的な呼び出し（既知の限界。`main` と同じ扱い） -----------------------------
+#
+# **これは「塞げていない」ことを固定する節**。関数を 1 つ挟んだ握り潰し
+# （`f() { set +e; }` / `g() { f; }` / `g`）は実 bash では効くが、ここでは反映しない。
+#
+# 一度は呼び出し関係をたどって伝播させる実装を入れたが、**関数の本文は「弱める／戻す」が
+# 起きた順序で結果が決まる**（`main() { set -e; relax; }` と `f() { g; set -e; }` は
+# 同じ材料でも答えが逆になる）。順序を持たない台帳で近似すると、伝播を許せば握り潰しを
+# 見落とし（fail-open）、伝播を止めれば正しくゲートしているステップを赤くする
+# （fail-closed）——どちらの向きにも実際に外し、レビューで 3 巡続けて回帰を出した。
+# **間接の追跡は順序付きの解析として別途入れる**ことにし（issue #123）、ここでは
+# 現状の答えを固定して、直したときにこの節ごと見直されるようにしておく。
+
+assert_wired "既知の限界: 関数を 1 つ挟んだ呼び出しは追えない（未対応）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          g() { f; }
+          g
+          bash ${SUITE_PATH}"
+
+assert_wired "既知の限界: 関数を 2 つ挟んだ呼び出しは追えない（未対応）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          g() { f; }
+          h() { g; }
+          h
+          bash ${SUITE_PATH}"
+
+# 呼び元を先に書いても答えが変わらない（記録した時点ではなく呼び出しの時点で畳むため）
+assert_wired "既知の限界: 呼び元を先に定義しても間接も追えない（未対応）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          h() { g; }
+          g() { f; }
+          f() { set +e; }
+          h
+          bash ${SUITE_PATH}"
+
+# 締めすぎの側: 間接的にしか繋がっていなくても、**呼ばれなければ**効かない
+assert_wired "間接の連鎖を定義しただけでは効かない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          g() { f; }
+          h() { g; }
+          bash ${SUITE_PATH}"
+
+# 相互再帰でも畳み込みが止まること（止まらないと CI が固まる）
+assert_wired "相互に呼び合う定義でも解析が止まる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          a() { b; }
+          b() { a; }
+          bash ${SUITE_PATH}"
+
+# --- 本文の中で戻している関数（CI スクリプトの定型句） -------------------------------
+#
+# `run_quietly() { set +e; "$@"; set -e; }` は呼んだあとの errexit が**有効なまま**。
+# 台帳へ記録しっぱなしにすると、この定型句があるだけで以降のスイートがすべて
+# 「未配線」と誤報され、**required なジョブが恒常的に赤くなる**（fail-closed だが、
+# 検出網ごと信用されなくなる。レビューで実測）。
+# 打ち消せるのは**同じ階層で落とした分だけ**——条件の中で戻す綴りは打ち消さない。
+
+assert_wired "本文で戻している関数を呼んでもゲートは残る" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          run_quietly() {
+            set +e
+            \"${DOLLAR}@\"
+            set -e
+          }
+          run_quietly echo hi
+          bash ${SUITE_PATH}"
+
+assert_wired "1 行で戻している関数を呼んでもゲートは残る" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; :; set -e; }
+          f
+          bash ${SUITE_PATH}"
+
+assert_wired "長い綴りで戻していても同じ" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +o errexit; :; set -o errexit; }
+          f
+          bash ${SUITE_PATH}"
+
+# **呼び先から伝わってきた弱めも、呼び元の本文が戻していれば効かない。**
+# 伝播が載るのは呼び元を呼ぶ断片で畳み直したときで、そこにはもう本文の `set -e` を
+# 見に行く経路が無い。控えておかないと、戻している関数が「弱める関数」に化けて
+# required なジョブが恒常的に赤くなる（レビューで実測。origin/main は正しく wired）
+assert_wired "呼び先の弱めも呼び元が戻していれば効かない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          g() { set +e; }
+          f() { g; set -e; }
+          f
+          bash ${SUITE_PATH}"
+
+# 見出しが別行の綴りでも打ち消しが成立する（本体の階層の数え方が 1 つずれていた）
+assert_wired "見出しが別行の関数が戻していてもゲートは残る" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f()
+          { set +e; set -e; }
+          f
+          bash ${SUITE_PATH}"
+
+# **再定義は前の本文を置き換える。** 消さないと古い記録が勝ち、正しくゲートしている
+# ステップを「未配線」と誤報して required なジョブを赤くする（レビューで実測。`main` は正しい）
+assert_wired "同じ名前で定義し直せば前の本文は残らない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          f() {
+            :
+          }
+          f
+          bash ${SUITE_PATH}"
+
+# 逆向きも対で固定する（後から弱める本文へ差し替えたら、そちらが効く）
+assert_not_wired "定義し直して弱めるようになれば効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { :; }
+          f() { set +e; }
+          f
+          bash ${SUITE_PATH}"
+
+# 穴の側: **条件の中で戻す**綴りは打ち消さない（走るとは限らないため）。
+# 打ち消すと、実際には握り潰されている呼び出しが「ゲートしている」と読まれる
+assert_not_wired "条件の中でしか戻さない関数は打ち消しにならない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() {
+            set +e
+            if [ -n \"${DOLLAR}FORCE\" ]; then set -e; fi
+          }
+          f
+          bash ${SUITE_PATH}"
+
+# 呼び先が何も弱めないなら、間接でも効かない
+assert_wired "弱めない関数を挟んだだけでは効かない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { echo hi; }
+          g() { f; }
+          g
+          bash ${SUITE_PATH}"
+
+# --- 条件の位置に置いた `set` と呼び出し ---------------------------------------------
+#
+# `if set +e; then …` の `set` は**条件として現在のシェルで走る**ので握り潰しは効く。
+# `struct_text` は `then` / `else` / `do` しか剥がさないため、`if` を剥がす場所が
+# どこにも無く、1 行でゲートを外せた（**main 既存**の fail-open。レビューで検出）。
+# 剥がすのは `set` と呼び出しを探す側だけで、`struct_text` では剥がさない
+# （あちらは `if` が 1 階層開くことを数えるための本文。剥がすと深さの勘定が壊れる）。
+
+assert_not_wired "条件の位置の set +e も効く（if）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          if set +e; then :; fi
+          bash ${SUITE_PATH}"
+
+assert_not_wired "条件の位置の set +e も効く（while）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          while set +e; do break; done
+          bash ${SUITE_PATH}"
+
+assert_not_wired "条件の位置の set +e も効く（until）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          until set +e; do break; done
+          bash ${SUITE_PATH}"
+
+assert_not_wired "条件の位置の set +e も効く（elif）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          if false; then :; elif set +e; then :; fi
+          bash ${SUITE_PATH}"
+
+# 呼び出しも同じ位置に書ける（剥がす一覧を共有していないと 3 トークンで抜けられる）
+assert_not_wired "条件の位置の呼び出しでも本文の set +e が効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          if f; then :; fi
+          bash ${SUITE_PATH}"
+
+assert_not_wired "while の条件で呼んでも本文の set +e が効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          while f; do break; done
+          bash ${SUITE_PATH}"
+
+# 締めすぎの側: 強める向きは条件の位置でも credit しない（条件次第でしか走らない）
+assert_not_wired "条件の位置の set -e は打ち消しに使わない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          set +e
+          if set -e; then :; fi
+          bash ${SUITE_PATH}"
+
+# 締めすぎの側: 条件が `set` でも呼び出しでもない普通の綴りは今までどおり
+assert_wired "普通の条件は握り潰しと読まない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          if [ -n \"${DOLLAR}X\" ]; then :; fi
+          bash ${SUITE_PATH}"
+
+# --- 1 行の POSIX アーム（`(pat)`）の後ろの呼び出し ------------------------------------
+#
+# `starts_case_arm()` は `[^()]*` で測るので、アームの `)` の手前に `(` があると跨げず、
+# **1 行に畳んだ POSIX 綴りだけ**が見出しとして剥がれない。剥がれないと断片の先頭が
+# `case` のまま残り、呼び出し先が `case` と読まれて追跡が外れる
+# （`(` を 1 つ足すだけで塞いだ穴が開き直す。レビューで検出。fail-open）。
+# 同じ綴りを 2 行に分けた場合は元から正しく扱えるので、対で固定する。
+
+assert_not_wired "1 行の POSIX アームの後ろの呼び出しでも効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          case linux in (linux) f ;; esac
+          bash ${SUITE_PATH}"
+
+assert_not_wired "2 行に分けた POSIX アームでも効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          case linux in
+            (linux) f ;;
+          esac
+          bash ${SUITE_PATH}"
+
+# 締めすぎの側: アームが弱めない関数を呼ぶだけなら効かない
+assert_wired "POSIX アームが弱めない関数を呼ぶだけでは効かない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { echo hi; }
+          case linux in (linux) f ;; esac
+          bash ${SUITE_PATH}"
+
+# 締めすぎの側: 主語のコマンド置換を見出しと読んで巻き込まない
+assert_wired "主語のコマンド置換を見出しと読まない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          case ${DOLLAR}(echo linux) in (linux) : ;; esac
+          bash ${SUITE_PATH}"
+
+# **見出しの剥がしは `case` を開く断片だけに掛ける。** アームの**中身**にも掛けると、
+# `[^)]*` が `\$(` を跨いで `f \$(date)` のような呼び出しを丸ごと消してしまい、
+# 弱めが反映されない（握り潰されたスイートが「ゲートしている」と読まれる fail-open。
+# レビューで実測。1 度この形で入れて即座に検出された）
+assert_not_wired "アームの中身の呼び出しは引数のコマンド置換で消えない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          case x in
+            *)
+              f ${DOLLAR}(date)
+              ;;
+          esac
+          bash ${SUITE_PATH}"
+
+# --- 入れ子の 1 行定義 ---------------------------------------------------------------
+#
+# 見出しを 1 つ落としただけでは `{ inner() { set +e` が残り、`set` に届かない
+# （＝存在自体を見落とす。fail-open）。複数行で書いた同じコードは正しく扱えるので、
+# **1 行に畳むだけで穴が開く**形だった。
+
+assert_not_wired "入れ子の 1 行定義でも呼べば set +e が効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          outer() { inner() { set +e; }; inner; }
+          outer
+          bash ${SUITE_PATH}"
+
+# 締めすぎの側: 外側を呼ばなければ、入れ子の中身は 1 度も走らない
+assert_wired "入れ子の 1 行定義も呼ばなければ効かない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          outer() { inner() { set +e; }; inner; }
+          bash ${SUITE_PATH}"
+
 # --- 連鎖の届かない `set`（1 度も走らない） ----------------------------------------
 
 # `true || set +e` の右は走らないので、握り潰しとして数えてはいけない。
@@ -3677,6 +4370,63 @@ if ci_workflow_load "${TMP_DIR}/does-not-exist.yml" "${TMP_DIR}/missing-out" 2> 
 else
     report 0 "存在しないワークフローは読み込み失敗として返る"
 fi
+
+# --- awk プログラムの渡し方（引数長の崖を作り直さない） -----------------------------
+#
+# awk プログラムを**引数**で渡していたころ、Linux の `MAX_ARG_STRLEN`（1 引数 128 KiB。
+# `ARG_MAX` を上げても変わらない固定値）まで残り 11 KiB しかなかった。コメントを
+# 200 行足すだけで `awk: Argument list too long` になり、**解析が丸ごと死ぬ**
+# （実測: 本 PR の追加で 136 KiB に達し、260 表明が一斉に落ちた）。
+# いまは `-f` でファイルから読ませているので上限が無い。引数渡しへ戻すと
+# この崖が復活するため、**上限を超える大きさのプログラムが通ること**で固定する。
+# 「大きい」の基準は上限そのもの（131072）で、実装の都合を書き写さない
+awk_arg_limit_case() {
+    # 上限そのもの（Linux の `MAX_ARG_STRLEN` = 32 ページ × 4096）。**この値から詰め物の量を導く**
+    # のが要点で、行数や行長を直接書くと、片方を削っただけで上限を下回っても
+    # テストは緑のまま通り、**何も検査しなくなったことに誰も気付かない**（レビューで指摘）
+    local arg_limit=131072
+    # 上限を確実に超える詰め物を作る（awk のコメント行なので意味は変えない）
+    local padding
+    padding="$(awk -v want="$((arg_limit + 4096))" 'BEGIN {
+        # 1 行分の長さを決める（コメント行なので中身は何でよい）
+        line = "# "; while (length(line) < 200) { line = line "x" }
+        # 上限を超えるまで行数を積む（行長から必要な本数を割り出す）
+        for (i = 0; i * (length(line) + 1) < want; i++) { print line }
+    }')"
+    # **詰め物が本当に上限を超えているか**をここで確かめる。超えていなければ
+    # このケースは崖を踏まないので、通っても何の証拠にもならない
+    if [ "${#padding}" -le "${arg_limit}" ]; then
+        report_fail "上限を超える大きさの awk プログラムでも走る" \
+            "詰め物が上限（${arg_limit} バイト）を超えていない（${#padding} バイト）。この検査は何も固定していません"
+        return
+    fi
+    # 詰め物を載せた小さなプログラムを、共有の入口経由で走らせる
+    local workflow="${TMP_DIR}/arg-limit.yml"
+    printf '%s\n' "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: bash ${SUITE_PATH}" > "${workflow}"
+    # 詰め物 ＋ 1 行だけの本体。通れば「引数長の上限に縛られていない」ことが示せる
+    local out
+    out="$(ci_workflow_run_with_structure "${workflow}" "${TMP_DIR}/arg-limit" \
+        "${padding}
+        END { print \"reached\" }" 2>&1)" || {
+        report_fail "上限を超える大きさの awk プログラムでも走る" \
+            "解析器がプログラムを受け取れなかった（引数渡しに戻っていると MAX_ARG_STRLEN で落ちる）: ${out}"
+        return
+    }
+    # 本体が実際に走ったことまで確かめる（受け取れても走らなければ意味がない）
+    if [ "${out}" = "reached" ]; then
+        report 0 "上限を超える大きさの awk プログラムでも走る"
+    else
+        report_fail "上限を超える大きさの awk プログラムでも走る" \
+            "プログラムは受け取れたが本体が走っていない（出力: ${out}）"
+    fi
+}
+awk_arg_limit_case
 
 # 集計を出して、失敗が 1 件でもあれば非ゼロで終わる
 harness_summary
