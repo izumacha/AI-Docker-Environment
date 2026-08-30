@@ -1503,6 +1503,26 @@ jobs:
         include:
           - &n "a #b"'
 
+# **続きの行の「閉じ引用符より後ろ」にある引用値でも同じこと。** 後ろは引用の外なので通常の
+# 判定にかける。ここを引用符を落とすだけに留めると、`"b #c"` の中の `#` で行が切れて
+# 後ろの `secrets:` が捨てられ、同じ fail-open が閉じ引用符の後ろで再発する（セルフレビューで実測）
+assert_privilege_classification privileged 'a hash in a later quoted value on a continuation line does not hide a secrets key' \
+'name: X
+permissions: read-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps: [{name: "a
+      ", note: "b #c", secrets: inherit, uses: actions/evil@v1}]'
+
+# **名前が空のプロパティ（素の `&` だけ）をプロパティとして読まないこと。** 読むと後ろの引用が
+# 開いて本物の `, secrets:` を伏せてしまい、read-only へ化ける（隠す向き＝危険側）
+assert_privilege_classification privileged 'a bare ampersand does not open a quoted value that hides a secrets key' \
+'name: X
+permissions: read-all
+jobs:
+  j: {name: & "b, secrets: inherit", runs-on: ubuntu-latest}'
+
 # **プロパティの読み飛ばしを緩めすぎていないこと。** 値の途中に現れた `&` / `!` は
 # ただの文字で、その後ろの引用符は値の開始ではない。ここを開始と認めると、
 # **本物の区切りごと伏せて `secrets:` を見逃す**（いま塞いだのと同じ向きの穴が別経路で開く）

@@ -4028,6 +4028,40 @@ jobs:
     steps: [{name: "a
       ", uses: actions/evil@v1}]  # note: x' 6
 
+# **閉じ引用符より後ろに別の引用値がある形。** 後ろは引用の外＝普通の YAML なので通常の判定に
+# かける。ここを「引用符を落とすだけ」に留めると、`"b #c"` の中の `#` が伏せられず、
+# **同じ行の後ろにある本物の `secrets:` がそこで切り落とされる**（この関数が塞いでいるはずの
+# 穴が、閉じ引用符の後ろで再発する。セルフレビューで実測した **fail-open**）
+assert_structural_line "続きの行の閉じた後ろにある引用値の中の # も伏せられる" \
+    '      , note: b ~c, secrets: inherit, uses: actions/evil@v1}]' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps: [{name: "a
+      ", note: "b #c", secrets: inherit, uses: actions/evil@v1}]' 6
+
+# **プロパティの名前に引用符を含む綴りは、プロパティとして読まないこと。**
+# 読んで綴りをそのまま出力へ送ると、構造行に引用符が残って「構造行に引用符を 1 つも残さない」
+# という FR-8.1 の前提（このファイルの別のケースが固定している）が黙って破れる。
+# PyYAML もこの綴りを受け付けないので、従来どおり引用符を落とす経路へ倒すのが正しい
+assert_structural_line "アンカー名に引用符を含む綴りはプロパティとして読まない" \
+    '      - name: &ab c' \
+    'name: ci
+jobs:
+  j:
+    steps:
+      - name: &a"b c' 5
+
+# **名前が空のプロパティ（素の `&` だけ）も読まないこと。** YAML が受け付けない綴りで、
+# プロパティとして読むと後ろの引用が開いて**本物の `, secrets:` を伏せてしまう**（隠す向き＝危険側）。
+# 伏せなければ読点が構造として残り、特権判定に効く
+assert_structural_line "名前が空のプロパティは読まない" \
+    '  j: {name: & b, secrets: inherit, runs-on: x}' \
+    'name: ci
+jobs:
+  j: {name: & "b, secrets: inherit", runs-on: x}' 3
+
 # 行の**全体**が引用スカラーの中身に当たる（この行では閉じない）場合も、中身なので `#` を伏せる。
 # 閉じる行と閉じない行で扱いが分かれると、間に 1 行挟むだけで穴が戻る
 assert_structural_line "閉じない続きの行でも中身の # は伏せられる" \
@@ -4198,12 +4232,14 @@ jobs:
 # という契約で、規則が壊れると 6 行目で span が閉じたことになり、7 行目に伏せる処理が復活して
 # `p, uses: policy` が `p~ uses: policy` に変わる。
 #
-# **7 行目の期待値は幻の参照 `policy` を含む** — これは続きの行を伏せない設計の帰結（residual）で、
-# 「余分に赤くなる」側。PyYAML はこの入力を
+# **7 行目に幻の参照 `policy` は出ない。** 閉じ引用符より後ろは引用の外＝普通の YAML なので、
+# そこは通常の判定にかける（issue #124）。`x:` の値 `'"'"'p, uses: policy'"'"'` は引用値として伏せられ、
+# 読点が代役へ変わって参照に化けない。PyYAML はこの入力を
 # `{'"'"'name'"'"': "a, '"'"', b, ", '"'"'x'"'"': '"'"'p, uses: policy'"'"', '"'"'uses'"'"': '"'"'actions/evil@v1'"'"'}` と読むので、
-# 本物の参照は `actions/evil@v1` だけ。その参照が同じ行に残っていることも同時に押さえている
+# 本物の参照は `actions/evil@v1` だけ＝**構造行の見え方が PyYAML の読みと一致する**。
+# その本物の参照が同じ行に残っている（伏せすぎていない）ことも同時に押さえている
 assert_structural_line "続きの行の単一引用の脱出表記も終端ではない" \
-    '      , x: p, uses: policy, uses: actions/evil@v1}]' \
+    '      , x: p~ uses: policy, uses: actions/evil@v1}]' \
     'name: ci
 jobs:
   j:
