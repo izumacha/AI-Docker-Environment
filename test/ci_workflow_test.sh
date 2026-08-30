@@ -3958,6 +3958,88 @@ jobs:
     steps:
       - uses: a/b@v1  # v1' 6
 
+# **YAML のノードプロパティ（アンカー `&name`）を挟んでも、引用の中身は伏せられること（issue #124）。**
+# 読み飛ばせていないと引用符の直前が `n` になって値の開始と認められず、`#` が生のまま残る。
+# するとこの行を読む消費側がそこで行を切り、**後ろの本物の `secrets:` を捨てて特権ワークフローを
+# read-only と誤判定する**＝ FR-9.6(b) の SHA ピン強制がそのファイルから丸ごと外れる（**fail-open**）
+assert_structural_line "アンカーを挟んだ引用値の中の # も伏せられる" \
+    '      - name: &n a: ~b' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: &n "a: #b"' 6
+
+# タグ（`!!str`）でも同じこと。プロパティは `&` と `!` の 2 種類あるので、
+# 片方だけを読み飛ばす直し方では綴りを変えるだけで穴が戻る
+assert_structural_line "タグを挟んだ引用値の中の # も伏せられる" \
+    '      - name: !!str a: ~b' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: !!str "a: #b"' 6
+
+# YAML はアンカーとタグを**両方・任意の順で**並べられるので、連続しても読み飛ばせること
+assert_structural_line "アンカーとタグを並べても引用値の中の # は伏せられる" \
+    '      - name: &n !!str a: ~b' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: &n !!str "a: #b"' 6
+
+# **逆向きの守り: 読み飛ばしを緩めすぎないこと。** 値の途中に現れた `&` はただの文字で、
+# その後ろの引用符は値の開始ではない。ここを開始と認めると**本物の区切りごと伏せて**
+# `uses: actions/evil@v1` を見逃す（いま塞いだのと同じ向きの穴が別経路で開く）。
+# 伏せていなければ読点が構造として残り、可変タグは検査対象として見える
+assert_structural_line "素のスカラー途中の & の後ろでは伏せない" \
+    '      - name: a &n b, uses: actions/evil@v1' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: a &n "b, uses: actions/evil@v1"' 6
+
+# **複数行にまたがる引用スカラーの続きの行でも、中身の `#` は伏せること（issue #124）。**
+# 伏せないと消費側がそこで行を切り、後ろの `uses:` / `secrets:` を丸ごと捨てる（**fail-open**）
+assert_structural_line "引用の続きの行でも中身の # は伏せられる" \
+    '      ~b, uses: actions/evil@v1}]' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps: [{name: "a
+      #b", uses: actions/evil@v1}]' 6
+
+# **逆向きの守り: 閉じ引用符より後ろの `#` は本物のコメントなので伏せないこと。**
+# ここまで伏せると、コメントに書いた語が構造として読まれて幻の参照が出る
+# （必須チェックが恒常的に赤くなる形。このファイルが繰り返し避けてきた失敗）
+assert_structural_line "引用の続きの行でも閉じた後ろの # は残る" \
+    '      , uses: actions/evil@v1}]  # note: x' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps: [{name: "a
+      ", uses: actions/evil@v1}]  # note: x' 6
+
+# 行の**全体**が引用スカラーの中身に当たる（この行では閉じない）場合も、中身なので `#` を伏せる。
+# 閉じる行と閉じない行で扱いが分かれると、間に 1 行挟むだけで穴が戻る
+assert_structural_line "閉じない続きの行でも中身の # は伏せられる" \
+    '      ~b' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps: [{name: "a
+      #b
+      ", uses: actions/evil@v1}]' 6
+
 # 伏せるのは区切り文字だけで、引用された値の綴りには触れない（参照を読めなくしないため）
 assert_structural_line "引用された uses: の値はそのまま残る" \
     '      - uses: actions/checkout@v7' \

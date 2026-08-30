@@ -1449,25 +1449,68 @@ jobs:
   j: {name: "a:
     ", secrets: inherit, runs-on: ubuntu-latest}'
 
-# **既知の残件（特権判定側。requirements.md の同項に記載）。** 引用の範囲が行内で確定しない場合
-# ——閉じない引用と、開始と認めず落とした引用符——は中身を伏せないため、値の中の `#` が構造行に
-# 残り、そこで行が切れて後ろの本物の `secrets:` が捨てられる。**これは台帳で唯一の見逃し方向**
-# （そのワークフロー内の可変タグが検査から全部外れる）なので、**main と同じ挙動であっても
-# ケースで固定する**: 広がったときに気付けるようにするのが台帳の役目。
-# 筋の対処は「範囲が確定しない引用を含む行ではコメントとして切らない」（issue #97）
-assert_privilege_classification plain 'KNOWN RESIDUAL: a hash inside an unterminated quote hides a later secrets key' \
+# **かつての残件（issue #124 で解消）。** 引用の範囲が行内で確定しない 2 つの形
+# ——複数行にまたがる引用の続きの行と、ノードプロパティ（アンカー／タグ）を挟んだ引用——は、
+# 以前は中身を伏せられず、値の中の `#` が構造行に残ってそこで行が切れ、**後ろの本物の
+# `secrets:` が捨てられて特権ワークフローが read-only に化けていた**（＝そのワークフロー内の
+# 可変タグが FR-9.6(b) の検査から全部外れる **fail-open**。`&n ` の 3 文字で再現した）。
+# 続きの行は「引用の中身に当たる範囲の `#` だけ」を伏せるようにし、アンカー／タグは
+# 開始位置の判定で読み飛ばすようにして塞いである（`test/lib/ci_workflow.sh`）。
+# **両方向で固定する**: ここが `plain` へ戻ったら穴が再発したということ
+assert_privilege_classification privileged 'a hash inside an unterminated quote no longer hides a later secrets key' \
 'name: X
 permissions: read-all
 jobs:
   j: {name: "a
     #b", secrets: inherit, runs-on: ubuntu-latest}'
 
-# 同じ残件の、**開始と認めず落とした引用符**（アンカーを挟んだ形）版
-assert_privilege_classification plain 'KNOWN RESIDUAL: a hash inside an anchored value hides a later secrets key' \
+# 同じ穴の、**ノードプロパティ（アンカー）を挟んだ形**版
+assert_privilege_classification privileged 'a hash inside an anchored value no longer hides a later secrets key' \
 'name: X
 permissions: read-all
 jobs:
   j: {name: &n "a #b", secrets: inherit, runs-on: ubuntu-latest}'
+
+# タグ（`!!str`）でも同じこと。アンカーだけを読み飛ばす直し方だと、綴りを変えるだけで
+# 穴が戻る（プロパティは `&` と `!` の 2 種類あり、順番も個数も自由）
+assert_privilege_classification privileged 'a hash inside a tagged value does not hide a later secrets key' \
+'name: X
+permissions: read-all
+jobs:
+  j: {name: !!str "a #b", secrets: inherit, runs-on: ubuntu-latest}'
+
+# アンカーとタグを両方並べた形（YAML はどちらの順でも許す）でも塞がっていること
+assert_privilege_classification privileged 'a hash inside a value with both an anchor and a tag does not hide a later secrets key' \
+'name: X
+permissions: read-all
+jobs:
+  j: {name: &n !!str "a #b", secrets: inherit, runs-on: ubuntu-latest}'
+
+# **並びの `-` の直後**に置いたプロパティでも同じこと（フロー形式だけを直すと、
+# ブロック形式で書かれた同じ形が穴として残る）
+assert_privilege_classification privileged 'a hash inside an anchored sequence item does not hide a later secrets key' \
+'name: X
+permissions: read-all
+on:
+  workflow_call:
+jobs:
+  j:
+    uses: ./.github/workflows/x.yml
+    with: {a: 1}
+    secrets: inherit
+    strategy:
+      matrix:
+        include:
+          - &n "a #b"'
+
+# **プロパティの読み飛ばしを緩めすぎていないこと。** 値の途中に現れた `&` / `!` は
+# ただの文字で、その後ろの引用符は値の開始ではない。ここを開始と認めると、
+# **本物の区切りごと伏せて `secrets:` を見逃す**（いま塞いだのと同じ向きの穴が別経路で開く）
+assert_privilege_classification privileged 'an ampersand inside a plain scalar does not open a quoted value' \
+'name: X
+permissions: read-all
+jobs:
+  j: {name: a &n "b, secrets: inherit", runs-on: ubuntu-latest}'
 
 # 継続行の先頭に置いた引用符から始まる形でも、後ろの本物の `secrets:` を見落とさないこと
 # （行頭の引用符を開始と誤読すると、間の区切りごと伏せて特権判定が read-only へ化ける）
@@ -2064,13 +2107,13 @@ jobs:
       - uses: ./local
       # TODO: replace the bespoke script, uses: actions/cache@v4 would do'
 
-# **既知の残件（YAML のアンカー／タグを挟んだ引用値）。**
-# `- name: &n "…"` のようにアンカーを挟むと、引用符の直前が `n` になって開始位置の規則に
-# どれも当たらず、伏せられないまま読点が生きて幻の参照が出る（main も同じ挙動）。
-# **GitHub Actions はワークフローでアンカーを解釈しない**ため実害は極めて小さいが、
-# 残件の台帳を実態と合わせるために固定しておく（挙動が変わったとき気付けるように）
-assert_split_output 'KNOWN RESIDUAL: an anchored quoted value still yields a phantom' \
-"7"$'\t'"policy"$'\t'$'\n'"8"$'\t'"./local"$'\t' \
+# **かつての残件（YAML のアンカー／タグを挟んだ引用値）。issue #124 で解消。**
+# 以前は `- name: &n "…"` のようにアンカーを挟むと引用符の直前が `n` になって開始位置の規則に
+# どれも当たらず、伏せられないまま読点が生きて幻の参照 `policy` が出ていた。
+# プロパティを読み飛ばすようにしたので、引用符が値の開始として認められ、中身の読点が
+# 伏せられて幻が消える（アンカーを挟まない形と同じ結果になる）
+assert_split_output 'an anchored quoted value no longer yields a phantom' \
+"8"$'\t'"./local"$'\t' \
 'name: X
 permissions: write-all
 jobs:
@@ -2079,6 +2122,47 @@ jobs:
     steps:
       - name: &n "compare pinning, uses: policy"
       - uses: ./local'
+
+# タグを挟んだ形でも同じこと（プロパティの 2 種類を両方読み飛ばせているかの確認）
+assert_split_output 'a tagged quoted value does not yield a phantom' \
+"8"$'\t'"./local"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: !!str "compare pinning, uses: policy"
+      - uses: ./local'
+
+# **残件（`uses:` の値そのものにプロパティを付けた形）。main と同じ挙動で、issue #124 の
+# 対象外。** 参照の取り出しは `uses:` の後ろの最初の語を読むので、プロパティを挟むと
+# 参照ではなく `&n` が取れる。**倒れる向きは fail-closed**: `@` を含まない参照は
+# 特権ワークフローでは「版を固定できていない」として必ず失敗するので（`check_uses_line`）、
+# 可変タグが黙って素通りすることはない。塞ぐ価値はあるが、issue #124 が塞いだ
+# 「特権判定が read-only へ化ける」fail-open とは向きが逆なので、同じ差分に混ぜない。
+# **ここで固定しておく**のは、将来この形が「参照なし＝検査対象なし」として
+# 素通りする側へ変わったら気付けるようにするため
+assert_split_output 'KNOWN RESIDUAL: a node property on the uses: value itself is read as the reference' \
+"7"$'\t'"&n"$'\t' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: &n "actions/evil@v1"'
+
+# 上の残件が **fail-closed である**ことを、判定側でも直接固定する
+# （「`&n` が取れる」だけでは、それが違反として報告されるかまでは分からない）
+assert_pin_enforcement enforced 'privileged workflow with a node property on the uses: value' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: &n "actions/evil@v1"'
 
 # **既知の残件（伏せる処理が参照の綴りを変える唯一の形）。**
 # 引用された値そのものが区切り文字を含むと、その値も伏せられる。動的参照を引用符で囲んだ

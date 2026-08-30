@@ -213,7 +213,7 @@ emit_structural_lines() {
         #
         # 引用符そのものは今までどおり落とす（`"permissions":` と `permissions:` を同じ形に
         # 揃える FR-8.1 の前提。脱出表記や入れ子で現れた引用符も同じく落とす）。
-        function mask_quoted_flow_punctuation(src,   out, raw, masked, quote, prev, gap, closed, keyq, seqzone, dashind, in_comment, flowdepth, i, ch, nxt, len) {
+        function mask_quoted_flow_punctuation(src,   out, raw, masked, quote, prev, gap, closed, keyq, seqzone, dashind, in_comment, flowdepth, i, ch, nxt, len, propend) {
             # **引用符を 1 つも含まない行は、そのまま返す。** その場合この関数がやることは
             # 「1 文字ずつ読んで同じ文字を書き戻す」だけで、結果は入力と必ず一致する。
             # ワークフローの行の大半（`runs-on: ubuntu-latest` など）がこれに当たり、
@@ -285,6 +285,43 @@ emit_structural_lines() {
                         # （＝ワークフロー内の可変タグが検査から全部外れる **fail-open**。実測）
                         seqzone = 0; closed = 0; gap = 0
                         continue
+                    }
+                    # **YAML のノードプロパティ（アンカー `&name` / タグ `!tag` `!!str`）を読み飛ばす。**
+                    # これらは鍵と値の**間**に置ける飾りで、値そのものではない。読み飛ばさないと
+                    # 直後の引用符の「直前の文字」がプロパティの末尾（`&n` なら `n`）になり、
+                    # 開始位置の規則（`:` / `-` / フローの区切りの直後）にどれも当たらず開始と
+                    # 認められない。すると値の中の `#` が伏せられないまま構造行に残り、消費側が
+                    # そこで行を切って**後ろの本物の `secrets:` を捨てる**。結果その
+                    # ワークフローが read-only と判定され、**FR-9.6(b) の SHA ピン強制が丸ごと
+                    # 外れる**（issue #124。`&n ` の 3 文字を足すだけで可変タグが素通りする **fail-open**）
+                    if ((ch == "&" || ch == "!") && at_value_start(prev, gap, keyq, dashind, flowdepth)) {
+                        # プロパティの綴りの終わりを探す。YAML ではプロパティは空白で終わり、
+                        # フロー形式の中では区切り（`{` `}` `[` `]` `,`）でも終わる
+                        propend = i
+                        while (propend < len) {
+                            nxt = substr(src, propend + 1, 1)
+                            if (nxt ~ /[[:space:]]/) break
+                            if (flowdepth > 0 && index("{}[],", nxt) > 0) break
+                            propend++
+                        }
+                        # **プロパティと値の間には空白が要る**（YAML の規則。`&n"a"` は正しくない）。
+                        # 空白が続かない形＝値が続かない形（`{name: &n}` の類）なので、
+                        # プロパティとして読まずただの文字として扱う（判断が付かないなら
+                        # 従来の姿へ倒す＝ fail-closed）
+                        if (substr(src, propend + 1, 1) ~ /^[[:space:]]$/) {
+                            # プロパティの綴りは構造でも値でもないので、手を加えずそのまま出力へ送る
+                            out = out substr(src, i, propend - i + 1)
+                            # 行頭の「字下げと `-` だけ」の並びはここで終わり（プロパティはそのどちらでもない）
+                            seqzone = 0
+                            # **`prev` / `keyq` / `dashind` は書き換えない。** プロパティは値ではないので、
+                            # 直後に来る引用符や `{` は「プロパティが無かった場合と同じ位置」に
+                            # 置かれているものとして判定する（これがこの読み飛ばしの目的）
+                            # 直後には必ず空白があるので、開始位置の判定のために立てておく
+                            gap = 1
+                            # 読み終えた位置まで進める（`for` の `i++` で次は上記の空白から再開する）
+                            i = propend
+                            continue
+                        }
                     }
                     # 引用の外の文字は構造かもしれないので、一切手を加えず出力へ送る
                     out = out ch
@@ -395,7 +432,20 @@ emit_structural_lines() {
         # 認識されて**続く行が本文として丸ごと落ちる**（実測: `- name: \"a` / `  b\" note: '"'"'c` /
         # `  run: |` と続く入力で、そのあとの 2 行が構造行から消えた。**fail-open**）。
         # 終端かどうかの規則は `is_escape_at` に集約してあり、伏せる処理側と同じものを使う
-        function open_type_after_continuation(src, qt,   i, ch, len) {
+        #
+        # **併せて、その行を構造行としてどう出すかも決める**（`MASK_CONT_TEXT` へ置く）。
+        # 引用の中身に当たる範囲の `#` だけを伏せるのが要点で、伏せないと消費側が値の中の `#` で
+        # 行を切り、**後ろの本物の `secrets:` を捨てて特権ワークフローを read-only に化けさせる**
+        # （issue #124 の 2 件目。FR-9.6(b) の SHA ピン強制が丸ごと外れる **fail-open**）。
+        # **伏せるのは `#` だけで、フロー形式の区切り（`,` `{` `[`）には触れない。** 続きの行かどうかの
+        # 見立てが外れていた場合、区切りまで伏せると本物の `, secrets:` を隠してしまい、
+        # いま塞いでいるのと同じ向きの穴を別の形で開けることになる。`#` を伏せる向きは
+        # 「行が切れなくなる」＝構造が残る側にしか働かないので、見立てが外れても
+        # 余分に赤くなるだけで見逃しには倒れない。
+        # この非対称のおかげで、読点が生きて幻の参照が出る既知の残件
+        # （`KNOWN RESIDUAL: a quoted scalar spanning lines still yields a phantom`）は
+        # これまでどおりの挙動で残る（意図的。あちらは「余分に赤くなる」側）
+        function open_type_after_continuation(src, qt,   i, ch, len, head, tail) {
             # 行の長さを求めてから 1 文字ずつ見る
             len = length(src)
             for (i = 1; i <= len; i++) {
@@ -411,11 +461,25 @@ emit_structural_lines() {
                 # 引き継ぎが増える側で、引き継ぎは**伏せるのをやめる方向にしか効かない**ため
                 # 見逃しには倒れない（実測でも余分に赤くなるだけだった）
                 if (ch == qt) {
+                    # ここまでが「開いていた引用スカラーの中身」。引用符を落としたうえで
+                    # `#` だけを代役へ置き換える（理由は関数のコメント）
+                    head = strip_quotes_only(substr(src, 1, i - 1))
+                    gsub(/#/, flow_mask, head)
+                    # 閉じ引用符より後ろは普通の YAML。**構造行としては従来どおり引用符を落とすだけ**に
+                    # とどめる（ここまで伏せる範囲を広げると、上に書いた「見立てが外れたときに
+                    # 本物の区切りを隠す」危険を引き受けることになる）
+                    tail = strip_quotes_only(substr(src, i + 1))
+                    # 構造行として出す 1 行を組み立てておく（呼び出し側が使う）
+                    MASK_CONT_TEXT = head tail
+                    # **末尾で開いたままの引用の種類**は、閉じ引用符より後ろを通常の判定にかけて求める
                     mask_quoted_flow_punctuation(substr(src, i + 1))
                     return MASK_OPEN_TYPE
                 }
             }
-            # 閉じなかった＝同じ引用がこの行の末尾でもまだ開いている
+            # 閉じなかった＝行全体が引用スカラーの中身で、同じ引用がこの行の末尾でもまだ開いている。
+            # 中身なので `#` を伏せてよい（この行には構造が 1 文字も含まれない）
+            MASK_CONT_TEXT = strip_quotes_only(src)
+            gsub(/#/, flow_mask, MASK_CONT_TEXT)
             return qt
         }
         # ブロックスカラーの本文の中かどうかと、その開始行の字下げ幅を覚える
@@ -449,10 +513,12 @@ emit_structural_lines() {
             # この行が引用スカラーの続きだったかを控える（下のブロックスカラー判定で使う）
             was_continuation = (open_type != "") ? 1 : 0
             if (open_type != "") {
-                # 続きの行は引用符を落とすだけで出す
-                emitted = strip_quotes_only(line)
-                # この行の末尾で開いたままの引用を控え直す（閉じていれば空文字＝次の行から通常どおり伏せる）
+                # この行の末尾で開いたままの引用を控え直す（閉じていれば空文字＝次の行から通常どおり伏せる）。
+                # 同じ 1 回の走査で、構造行として出す 1 行（引用符を落とし、引用の中身の `#` だけを
+                # 伏せたもの）も `MASK_CONT_TEXT` に用意される
                 open_type = open_type_after_continuation(line, open_type)
+                # 続きの行は上で組み立てたものをそのまま出す
+                emitted = MASK_CONT_TEXT
             } else {
                 # 通常の行は従来どおり伏せる
                 emitted = mask_quoted_flow_punctuation(line)
