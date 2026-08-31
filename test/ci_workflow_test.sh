@@ -3095,6 +3095,23 @@ jobs:
           ;;
           esac"
 
+# アームの**本体の途中**に行末の `;` があっても模様の位置は立たない。
+# 「空の断片＝`;;` の跡」とだけ読むと、行末のただの `;` でも立ってしまい、
+# 続く本物の部分シェルの `(` を模様と読む（`;` 1 文字でこの検査を外せる。レビューで実測）
+assert_not_wired "アーム本体の行末の ; では模様の位置は立たない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case never in
+          a) :;
+          ( : | cat \$(echo /dev/null) )
+          bash ${SUITE_PATH}
+          ;;
+          esac"
+
 # 締めすぎない側: `;;` の**後ろ**は模様の位置なので、そこの丸括弧付き選択肢は今までどおり拾う
 assert_not_wired ";; の後ろの丸括弧付き選択肢アームの set +e は数える" "name: ci
 jobs:
@@ -3105,6 +3122,20 @@ jobs:
         run: |
           case x in
           zzz) : ;;
+          (x|y) set +e ;;
+          esac
+          bash ${SUITE_PATH}"
+
+# 締めすぎない側: `;&`（フォールスルー）の後ろも模様の位置
+assert_not_wired ";& の後ろの丸括弧付き選択肢アームの set +e は数える" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case x in
+          zzz) : ;&
           (x|y) set +e ;;
           esac
           bash ${SUITE_PATH}"
