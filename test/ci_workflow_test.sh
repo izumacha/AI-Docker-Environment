@@ -3354,6 +3354,46 @@ jobs:
           fi }
           bash ${SUITE_PATH}"
 
+# 模様の位置かどうかを見るのは**断片の先頭の閉じ語だけ**。2 つ目以降はもう模様ではない
+# （`esac }` の `}` を模様と読むと階層が戻らず、以降が「まだ関数の本体の中」に見える）
+assert_wired ";; の後ろの esac } は 2 つとも閉じる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { case x in
+          a) : ;; esac }
+          bash ${SUITE_PATH}"
+
+# `set` を記録する階層も「この断片が開き終わった後の深さ」。`case` だけを見ていると
+# `do { set +e; …; set -e; }` で記録側が 1 つ浅くなり、同じ括りの `set -e` が打ち消せない
+assert_wired "ブレースで括った set +e … set -e は打ち消し合う" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          for i in 1; do { set +e; :; set -e; }; done
+          bash ${SUITE_PATH}"
+
+# 関数ごとの台帳もフォークで巻き戻す。子シェルの中で見た `set +e` は呼び出し元へ
+# 漏れないので、控えたままだと呼んだ時点で握り潰しを再現してしまう
+assert_wired "子シェルの中の set +e は関数の台帳にも残さない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f311() {
+          case zz in (zz|yy) set +e ;; esac | cat
+          }
+          f311
+          bash ${SUITE_PATH}"
+
 # **アーム見出しの後ろは命令の位置。** 剥がさないと、アームの中で開いた複合コマンドが
 # 1 つも数えられず、後の `esac` が外側の `case` の階層を閉じてしまう。
 # 「模様を消費したか」を `set_arm_here` で代用すると、外側のアームの中で内側の `case` を

@@ -1345,7 +1345,7 @@ ci_workflow_extract() {
         # **ここでは出力しない**のが要点で、ジョブ単位の無効化キー（`if: false` 等）は
         # YAML のキー順が自由である以上 `steps:` の**後ろ**にも書ける。書いた時点で
         # 出力済みのステップは取り消せないため、ジョブ 1 つ分を溜めてから出す
-        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, closed_any, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, arm_masked, arm_at, arm_expected, case_scope, opens_case, close_probe, close_rest, open_head) {
+        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, closed_any, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, arm_masked, arm_at, arm_expected, case_scope, opens_case, close_probe, close_rest, close_first, open_head, led) {
             # **シェルのオプションはステップごとにリセットする。** ステップは 1 つずつ
             # 別のシェルで走るので、前のステップの `set +e` / `pipefail` は引き継がれない。
             # **控えるのは `set` で明示された分だけ（-1 = 明示なし）。** シェルの既定と突き合わせるのは
@@ -1712,7 +1712,13 @@ ci_workflow_extract() {
                             # 同じアームの後続（1 つ深い）の `set -e` が打ち消せず、
                             # 正しくゲートしているステップを赤くする（複数行で書いた同じアームとも
                             # 答えが食い違う。実 bash と差分照合して実測）
-                            set_depth = depth + ((struct_text ~ /^case([[:space:]]|$)/) ? 1 : 0)
+                            # **この断片が開き終わった後の深さで記録する。** 以前は
+                            # 「`case` を開くなら +1」だけを見ていたが、開き側が 1 断片で
+                            # 複数開けるようになった以上ほかの綴りでも同じずれが起きる
+                            # （`do { set +e; …; set -e; }` は記録側が 1 つ浅くなり、
+                            #   同じ括りの `set -e` が打ち消せず正しくゲートする綴りを赤くする）。
+                            # `fn_body_depth` と同じ数え方に揃える
+                            set_depth = depth + count_opens(open_head, fn_form, (open_head == struct_text))
                             # **関数ごとの台帳で使う階層。** 本体を同じ断片で開く 1 行書き
                             # （`f() { set +e; }`）では深さが増えるのが断片の末尾なので、
                             # 素の `depth` で控えると、続く断片の `set -e`（1 つ深い）と
@@ -1888,8 +1894,13 @@ ci_workflow_extract() {
                         # **`esac` だけは例外**——模様の位置に来た `esac` は空の `case` の終わりで、
                         # 本当に閉じる（`case x in esac` は bash の妥当な綴り）
                         close_probe = text
+                        # 模様の位置かどうかを見るのは**断片の先頭の閉じ語だけ**。
+                        # 2 つ目以降はもう模様ではない（`esac }` の `}` を模様と読むと
+                        # 階層が戻らず、以降が「まだ関数の本体の中」に見える。レビューで実測）
+                        close_first = 1
                         while (close_probe ~ /^(fi|done|esac|\})([[:space:]]|;|$)/ && depth > 0 \
-                               && !(arm_expected && close_probe !~ /^esac([[:space:]]|;|$)/)) {
+                               && !(close_first && arm_expected && close_probe !~ /^esac([[:space:]]|;|$)/)) {
+                            close_first = 0
                             if (uncertain_at[depth]) { uncertain--; uncertain_at[depth] = 0 }
                             if (group_start[depth] >= 1) { closed_group_start = group_start[depth] }
                             if (fndef_at[depth]) { fndef--; fndef_at[depth] = 0 }
@@ -2005,6 +2016,13 @@ ci_workflow_extract() {
                         if (closed_entry_seen && (ops[j] == "|" || ops[j] == "&")) {
                             errexit = closed_entry_e
                             pipefail = closed_entry_p
+                            # **関数ごとの台帳も同じだけ巻き戻す。** 子シェルの中で見た `set +e` は
+                            # 関数を呼んでも呼び出し元へ漏れないので、「この関数は弱める」と
+                            # 控えたままにすると、呼んだ時点で握り潰しを再現してしまう
+                            # （正しくゲートする綴りを赤くする。レビューで実測）。
+                            # 閉じた階層より深いところで控えた分だけを落とす
+                            for (led in fnweak_e_at) { if (fnweak_e_at[led] > depth) { delete fnweak_e[led]; delete fnweak_e_at[led] } }
+                            for (led in fnweak_pipe_at) { if (fnweak_pipe_at[led] > depth) { delete fnweak_pipe[led]; delete fnweak_pipe_at[led] } }
                         }
                         # 閉じたブロックの中で落とした記録は、外へ持ち出さない。
                         # **実際に閉じた断片でだけ見る**のが要点で、無条件に比べると
