@@ -3284,6 +3284,23 @@ jobs:
 # **`case` が断片の先頭に無い綴りでも、アーム模様の `|` はパイプではない。**
 # `^case` で見るとアーム模様をパイプと読み、囲っている階層に子シェルの印を付けて
 # そのアームの `set +e` を丸ごと捨てる（握り潰しが「ゲート」に化ける fail-open）
+# 締めすぎない側: 見送るのは「この断片から**出ていく** `|`」が模様の区切りでありうるときだけ。
+# 入ってくる `|` は前の断片に付いていたもので、`case` の外から来ている以上模様ではない
+# （まとめて見送ると、パイプの右側で `case` を開く綴りで子シェルの印が付かず、
+#   中の `set +e` が親に効いたものとして扱われる）
+assert_wired "パイプの右側で case を開いても子シェルとして扱う" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          echo x | { case zz in
+          zz) set +e ;;
+          esac
+          }
+          bash ${SUITE_PATH}"
+
 assert_not_wired "ブレースの中で開いた case の選択肢アームの set +e は数える" "name: ci
 jobs:
   type-check:

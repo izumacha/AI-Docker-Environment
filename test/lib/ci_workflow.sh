@@ -1070,30 +1070,6 @@ ci_workflow_extract() {
             return 0
         }
 
-        # この断片が**開き側のループで開く階層の数**を、副作用なしで先に数える。
-        # `set` を関数ごとの台帳へ載せるときの階層は「断片の末尾で開き終わった後の深さ」だが、
-        # 開くのは断片の末尾なので、`set` を処理する時点ではまだ増えていない。
-        # 以前は「定義を開く断片なら +1」と決め打ちしていて、**1 断片が 2 つ開く綴り**
-        # （`f() { { set +e; set -e; }; }`）で記録側と打ち消し側の階層が 1 つずれ、
-        # 本文で戻している関数が「弱める関数」として残った（fail-closed。レビューで実測）
-        function count_opens(t, cached_fn_form, use_cached,   n, k, probe, rest) {
-            probe = t; n = 0
-            while (1) {
-                # 1 周目だけ控えてある `fn_form` を使える（本文が `struct_text` そのもののため）
-                k = open_form(probe, cached_fn_form, (use_cached && n == 0))
-                # 何も開かない綴りと、見出しだけの綴り（次の `{` が本体）はここで終わり
-                if (k == 0 || k == 4) { break }
-                n++
-                # 本体が同じ断片の中で続く綴り以外は、そこで終わり
-                if (k != 3 && k != 5) { break }
-                rest = open_rest(probe, k)
-                # 1 文字も減らなければ打ち切る（開き側のループと同じ保険）
-                if (rest == probe) { break }
-                probe = rest
-            }
-            return n
-        }
-
         # `open_form()` が返した形の**開き 1 つ分だけ**を先頭から落として、その後ろを返す。
         # 呼んでよいのは形 3（関数定義）と形 5（ブレース）だけ——**その 2 つだけが
         # 「開いた直後が命令の位置」**だから。条件の位置（`if <条件>` / `for … in <一覧>`）へは
@@ -1205,6 +1181,22 @@ ci_workflow_extract() {
         # （閉じ側の後始末を 2 か所へ増やさないための決め方。issue #121 を悪化させない）
         # 内側から見て最初に見つかる関数定義の**階層**を返す（見つからなければ 0）。
         # `enclosing_fndef_name()` の対で、台帳の記録と打ち消しが同じ階層を指すようにする
+        # 複合コマンドを閉じる語の綴りを返す**唯一の場所**（`function_head_re()` と同じ理由。
+        # この一覧は深さの勘定と `case` の入れ子の勘定の 2 つの走査が読むので、写しを持つと
+        # 片方だけが新しい綴りを知る＝`depth` と `case_depth` がずれる。同ファイルの分析に
+        # よれば、そのずれはアームの `set +e` を捨てる fail-open として現れる）
+        function close_word_re() {
+            return "^(fi|done|esac|\\})([[:space:]]|;|$)"
+        }
+
+        # 先頭の閉じ語 1 つ分（と後ろの `;` / 空白）を落として返す。落とせなければ元のまま返す
+        # ので、呼び出し側は「変化が無ければ打ち切る」で無限ループを避けられる
+        function drop_close_word(t,   s2) {
+            s2 = t
+            sub(/^(fi|done|esac|\})[[:space:]]*;?[[:space:]]*/, "", s2)
+            return s2
+        }
+
         function enclosing_fndef_depth(d, at,   k) {
             for (k = d; k >= 1; k--) { if (at[k]) { return k } }
             return 0
@@ -1526,9 +1518,7 @@ ci_workflow_extract() {
                         #   読めなくなる。どちらもレビューで実測）。
                         # **この断片自身が `case` を開く場合は剥がさない**——剥がすと `case … in a)` を
                         # まとめて落として `case` の階層そのものが開かなくなる。
-                        # **開き側のループと `count_opens()` の両方がこれを読む**ので、
-                        # `set` の処理より前のここで 1 度だけ求める（片方だけ別の本文を見ると
-                        # 台帳の階層と実際の深さがずれる）
+                        # `set` の処理より前のここで 1 度だけ求める（開き側のループが読む）
                         open_head = struct_text
                         if (set_arm_here && !opens_case) { sub(/^\(?[^()]*\)[[:space:]]*/, "", open_head) }
                         # **別の `case` アームへ移ったら、この階層の括りの記録は捨てる。**
@@ -1721,13 +1711,13 @@ ci_workflow_extract() {
                             # 答えが食い違う。実 bash と差分照合して実測）
                             # **数えるのは `case` のアームの分だけ。** アームの本文は次の断片から
                             # 見て 1 つ深いところで走るので +1 が要る。
-                            # **`count_opens()` に置き換えてはいけない**（実測で 2 件の誤報）——
+                            # **「その断片が開く階層の数」に置き換えてはいけない**（実測で 2 件の誤報）——
                             # ブレースグループは**同じシェル**なので `{ set +e; }` の外の `set -e` は
                             # 打ち消せるし、`if set +e; then` の `set` は**条件の位置**＝外側の深さで走る。
                             # どちらも数えると記録側が 1 つ深くなり、閉じた時点で記録が捨てられて
                             # 打ち消せなくなる（正しくゲートする綴りを赤くする）。
                             # 開いた階層の数と `set` が走る階層は別物で、一致するのはアームだけ
-                            set_depth = depth + ((struct_text ~ /^case([[:space:]]|$)/) ? 1 : 0)
+                            set_depth = depth + (opens_case ? 1 : 0)
                             # **関数ごとの台帳で使う階層。** 本体を同じ断片で開く 1 行書き
                             # （`f() { set +e; }`）では深さが増えるのが断片の末尾なので、
                             # 素の `depth` で控えると、続く断片の `set -e`（1 つ深い）と
@@ -1838,7 +1828,7 @@ ci_workflow_extract() {
                         # （握り潰されたスイートが「ゲートしている」と読まれる fail-open。
                         #   レビューで実測）。アームの中身は上の `set_arm_here` と、
                         # 見出しを持たない普通の断片としての扱いで足りる
-                        else if (struct_text ~ /^case([[:space:]]|$)/) {
+                        else if (opens_case) {
                             sub(/^[^)]*\)[[:space:]]*/, "", call_probe)
                         }
                         # **先頭の飾りは `set` を探すときと同じ一覧で落とす。** 落とさないと
@@ -1915,7 +1905,7 @@ ci_workflow_extract() {
                         # 2 つ目以降はもう模様ではない（`esac }` の `}` を模様と読むと
                         # 階層が戻らず、以降が「まだ関数の本体の中」に見える。レビューで実測）
                         close_first = 1
-                        while (close_probe ~ /^(fi|done|esac|\})([[:space:]]|;|$)/ && depth > 0 \
+                        while (close_probe ~ close_word_re() && depth > 0 \
                                && !(close_first && arm_expected && close_probe !~ /^esac([[:space:]]|;|$)/)) {
                             close_first = 0
                             if (uncertain_at[depth]) { uncertain--; uncertain_at[depth] = 0 }
@@ -1934,8 +1924,7 @@ ci_workflow_extract() {
                             # 子シェル判定が外れる（正しくゲートする綴りを赤くする）
                             depth--; closed_any = 1
                             # 閉じた語の分だけ進める。**1 文字も減らなければ打ち切る**（無限ループ避け）
-                            close_rest = close_probe
-                            sub(/^(fi|done|esac|\})[[:space:]]*;?[[:space:]]*/, "", close_rest)
+                            close_rest = drop_close_word(close_probe)
                             if (close_rest == close_probe) { break }
                             close_probe = close_rest
                         }
@@ -2146,10 +2135,9 @@ ci_workflow_extract() {
                         # ——どちらも断片の先頭にあるとは限らないため `^esac` だけでは足りず、
                         # 断片に含まれる閉じ語をたどった結果で数える
                         esac_probe = text
-                        while (esac_probe ~ /^(fi|done|esac|\})([[:space:]]|;|$)/) {
+                        while (esac_probe ~ close_word_re()) {
                             if (esac_probe ~ /^esac([[:space:]]|;|$)/ && case_depth > 0) { case_depth-- }
-                            esac_rest = esac_probe
-                            sub(/^(fi|done|esac|\})[[:space:]]*;?[[:space:]]*/, "", esac_rest)
+                            esac_rest = drop_close_word(esac_probe)
                             if (esac_rest == esac_probe) { break }
                             esac_probe = esac_rest
                         }
@@ -2297,8 +2285,14 @@ ci_workflow_extract() {
                         # 子シェルの印を付けてしまう（そのアームの `set +e` が丸ごと捨てられ、
                         # 握り潰されたスイートが「ゲートしている」と読まれる fail-open。レビューで実測）。
                         # 開き側のループを通った後なので、`case_depth` はこの断片の分まで数え終えている
+                        # **見送るのは「この断片から出ていく `|`」が模様の区切りでありうるときだけ。**
+                        # 入ってくる `|`（`pipe_in`）は**前の**断片に付いていたもので、`case` の
+                        # 外から来ている以上アーム模様の区切りではありえない。`case_depth == 0` と
+                        # まとめて見ると `echo x | { case zz in …` のように「パイプの右側で
+                        # `case` を開く」綴りまで見送ってしまい、子シェルの中の `set +e` を
+                        # 親に効いたものとして扱う（正しくゲートする綴りを赤くする。レビューで実測）
                         if (depth > depth_before && (pipe_in || ops[j] == "|") \
-                            && case_depth == 0 \
+                            && case_before == 0 && !(ops[j] == "|" && case_depth > 0) \
                             && !subshell_at[depth_before + 1]) {
                             subshell_at[depth_before + 1] = 1; subshell++
                         }
