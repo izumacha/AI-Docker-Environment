@@ -1202,6 +1202,18 @@ ci_workflow_extract() {
         # （閉じ側の後始末を 2 か所へ増やさないための決め方。issue #121 を悪化させない）
         # 内側から見て最初に見つかる関数定義の**階層**を返す（見つからなければ 0）。
         # `enclosing_fndef_name()` の対で、台帳の記録と打ち消しが同じ階層を指すようにする
+        # 先頭のアーム見出し（`y)` / `(y)` / `y|z)`）を落として、その後ろ（＝命令の位置）を返す。
+        # **位置は伏せた写しで測り、切るのは生の本文**——`starts_case_arm()` と同じ規則で、
+        # 揃えないと引用の中の `)`（`"a)b") …`）で剥がす量がずれ、残りが分類できなくなって
+        # アームの中の複合コマンドが 1 つも数えられない（後の `done` が `case` の階層を閉じ、
+        # 一致しないアームの中身が最上位に上がる fail-open。レビューで実測）。
+        # 長さは `mask_quoted()` が保つので、伏せた写しで測った桁をそのまま使える
+        function drop_arm_head(t,   masked) {
+            masked = mask_quoted(t)
+            if (!match(masked, /^\(?[^()]*\)[[:space:]]*/)) { return t }
+            return substr(t, RLENGTH + 1)
+        }
+
         # 複合コマンドを閉じる語の綴りを返す**唯一の場所**（`function_head_re()` と同じ理由。
         # この一覧は深さの勘定と `case` の入れ子の勘定の 2 つの走査が読むので、写しを持つと
         # 片方だけが新しい綴りを知る＝`depth` と `case_depth` がずれる。同ファイルの分析に
@@ -1552,7 +1564,7 @@ ci_workflow_extract() {
                         # まとめて落として `case` の階層そのものが開かなくなる。
                         # `set` の処理より前のここで 1 度だけ求める（開き側のループが読む）
                         open_head = struct_text
-                        if (set_arm_here && !opens_case) { sub(/^\(?[^()]*\)[[:space:]]*/, "", open_head) }
+                        if (set_arm_here && !opens_case) { open_head = drop_arm_head(open_head) }
                         # **別の `case` アームへ移ったら、この階層の括りの記録は捨てる。**
                         # アーム同士は排他なので、`*)` の `set -e` は `linux*)` の `set +e` を
                         # 打ち消さない（`else` / `elif` と同じ理屈。複数行で書いたときは
@@ -1844,7 +1856,7 @@ ci_workflow_extract() {
                         call_probe = (fn_form == 2) ? function_body_rest(struct_text) : struct_text
                         # `case` のアーム見出しの後ろも命令の位置（`linux) f`）。
                         # 剥がす綴りは上の `paren_probe` と揃える（`starts_case_arm()` の判定を使い回す）
-                        if (set_arm_here) { sub(/^\(?[^()]*\)[[:space:]]*/, "", call_probe) }
+                        if (set_arm_here) { call_probe = drop_arm_head(call_probe) }
                         # **1 行の POSIX 綴り（`case X in (linux) f`）は `starts_case_arm()` に当たらない。**
                         # あの判定は `[^()]*` で測るので、アームの `)` の手前に `(` があると跨げず、
                         # 断片の先頭が `case` のまま残る＝呼び出し先が `case` と読まれて追跡が外れる
@@ -2160,14 +2172,17 @@ ci_workflow_extract() {
                         #   綴りを赤くする。レビューで実測）。開く側は開き側のループが数える
                         # ——どちらも断片の先頭にあるとは限らないため `^esac` だけでは足りず、
                         # 断片に含まれる閉じ語をたどった結果で数える
-                        # **模様の位置の判定は閉じ側の走査と揃える。** 揃えないと、模様の中の
+                        # **模様の位置の判定は閉じ側の走査と揃える**（`prev_op` はこの断片の処理中に
+                        # 自分の区切りへ更新されるので、こちらでは控えてある `pipe_in` を読む。
+                        # 素直に `prev_op` と書くと「前が `|`」ではなく「後ろが `|`」を意味し、
+                        # `esac | cat` で `case_depth` だけが残る。レビューで実測）。 揃えないと、模様の中の
                         # `esac`（`(done|esac|zz)`）で `case_depth` だけが減り、以降 `case_scope` が
                         # 偽になって本物のアームの `set` が見つからなくなる（fail-open。レビューで実測）
                         esac_probe = text
                         esac_first = 1
                         while (esac_probe ~ close_word_re() \
                                && !(esac_first && arm_expected \
-                                    && (esac_probe !~ /^esac([[:space:]]|;|$)/ || prev_op == "|"))) {
+                                    && (esac_probe !~ /^esac([[:space:]]|;|$)/ || pipe_in))) {
                             esac_first = 0
                             if (esac_probe ~ /^esac([[:space:]]|;|$)/ && case_depth > 0) { case_depth-- }
                             esac_rest = drop_close_word(esac_probe)

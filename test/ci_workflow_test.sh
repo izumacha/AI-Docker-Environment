@@ -3337,6 +3337,39 @@ jobs:
           f
           bash ${SUITE_PATH}"
 
+# `case_depth` の走査の模様位置ガードは、控えてある `pipe_in` を読む。`prev_op` は
+# この断片の処理中に自分の区切りへ更新されるので、素直に書くと「前が `|`」ではなく
+# 「後ろが `|`」を意味し、`esac | cat` で `case_depth` だけが残る
+assert_wired "esac にパイプが付いても case の入れ子は戻る" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case zz in
+          a) : ;;
+          esac | cat
+          echo x | while read -r l; do set +e; done
+          bash ${SUITE_PATH}"
+
+# アーム見出しを剥がす位置は**伏せた写しで測る**（切るのは生の本文）。揃えないと
+# 引用の中の `)` で剥がす量がずれ、アームの中の複合コマンドが 1 つも数えられず、
+# 後の `done` が `case` の階層を閉じて一致しないアームの中身が最上位に上がる
+assert_not_wired "引用の中に ) を含むアーム見出しでも本文を数える" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case never in
+          \"a)b\") for i in 1; do
+          :
+          done
+          bash ${SUITE_PATH} ;;
+          esac"
+
 # 模様の**途中**に来た `esac` は模様であって閉じ語ではない（先頭に来たものだけが
 # 空の `case` の終わり）。深さの走査と `case_depth` の走査の**両方**を揃えないと、
 # 片方だけが数えて `case_scope` が偽になり、本物のアームの `set` が見つからなくなる
