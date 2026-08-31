@@ -2836,6 +2836,259 @@ unrelated:
     steps:
       - run: bash ${SUITE_PATH}"
 
+# --- 1 行に畳んでも答えが変わらないこと（issue #123）--------------------------------
+#
+# issue #123 の 5 件は「**複数行で書けば正しいのに、1 行に畳むと答えが変わる**」形に
+# 集約される。アーム見出し・複合コマンドの開き／閉じ・パイプの子シェル判定が
+# 同じ断片に同居したときの扱いが根で、向きは fail-closed（正しくゲートしている
+# ステップを赤くする）と fail-open（握り潰されたスイートを緑で通す）の両方があった。
+# 期待値はすべて実 `bash -eo pipefail` との差分照合で確かめてある。
+
+# (1) 複合コマンドが**パイプの左側**にあると、子シェルの印が一度も付かなかった。
+# 開き側の判定は「複合を開く断片に `|` が付いているとき」しか成立せず、
+# `split_commands` は `|` を `done` / `fi` / `}` の断片に付けるため（fail-closed）
+assert_wired "パイプの左のループの set +e は親へ漏れない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          while read -r l; do set +e; done < /dev/null | cat
+          bash ${SUITE_PATH}"
+
+assert_wired "パイプの左の if の set +e は親へ漏れない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          if true; then set +e; fi | cat
+          bash ${SUITE_PATH}"
+
+assert_wired "パイプの左のブレースグループの set +e は親へ漏れない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          { set +e; } | cat
+          bash ${SUITE_PATH}"
+
+# 締めすぎない側: `||` / `&&` / `;` はフォークしないので、握り潰しはそのまま親へ漏れる
+# （実 bash で確認済み。巻き戻す対象を広げると、本物の握り潰しを見逃す fail-open になる）
+assert_not_wired "|| で閉じたブレースグループの set +e は親へ漏れる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          { set +e; } || true
+          bash ${SUITE_PATH}"
+
+assert_not_wired "; で閉じたブレースグループの set +e は親へ漏れる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          { set +e; } ; true
+          bash ${SUITE_PATH}"
+
+# (2) 1 断片が `{` と `(` を同時に開くと、`(` の階層が開かなかった。
+# 内側の `)` が閉じた時点で子シェルの印が外れ、残りの `set +e` が親に効いたものとして
+# 扱われていた（fail-closed）
+assert_wired "1 断片で { と ( を同時に開いても深さが合う" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          echo x | { (
+          :
+          ) ; set +e ; }
+          bash ${SUITE_PATH}"
+
+# (3) 1 行に畳んだ `if true; then …` の本体が実行の証拠にならなかった。
+# 断片が `then bash x` になり、コマンドの開始位置の綴りに当たらないため（fail-closed）。
+# 3 行に分けた同じコードは以前から `wired` で、**畳んだだけで答えが変わっていた**
+assert_wired "1 行の if true の本体は実行の証拠になる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          if true; then bash ${SUITE_PATH}; fi"
+
+assert_wired "1 行の while true の本体も実行の証拠になる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          while true; do bash ${SUITE_PATH}; break; done"
+
+# 締めすぎない側: `then` を許したことで**条件の位置**まで通してはいけない。
+# `if bash x; then …` の呼び出しは落ちても `set -e` を発動させず job も止めない
+assert_not_wired "条件の位置に置いた呼び出しは実行の証拠にならない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          if bash ${SUITE_PATH}; then echo ok; fi"
+
+# 締めすぎない側: 走らないと分かる分岐の本体も通してはいけない
+assert_not_wired "1 行の if false の本体は実行の証拠にならない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          if false; then bash ${SUITE_PATH}; fi"
+
+# 締めすぎない側: 条件を読まないと決まらない分岐の本体も通してはいけない
+assert_not_wired "1 行の条件付き分岐の本体は実行の証拠にならない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          if [ -n \"${DOLLAR}CI\" ]; then bash ${SUITE_PATH}; fi"
+
+# 締めすぎない側: `case` のアームは**模様が一致するか読めない**ので、1 行書きでも
+# 実行の証拠にしない（複数行で書いた同じコードも従来どおり `not-wired`）。
+# issue #123 (3) はこれも `wired` にすべきと書いているが、それは
+# `case ${DOLLAR}X in (linux) bash …` を「必ず走る」と読むことになり fail-open
+assert_not_wired "1 行の case アームの本体は実行の証拠にならない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case linux in (linux) bash ${SUITE_PATH} ;; esac"
+
+# (4) 1 行の `case x in (a|b) …` が幻の部分シェルを開き、その断片の `set +e` が
+# すべて「子シェルの中」として捨てられていた（fail-open）
+assert_not_wired "1 行の丸括弧付き選択肢アームの set +e は数える" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case x in (x|y) set +e ;; esac
+          bash ${SUITE_PATH}"
+
+assert_not_wired "主語がコマンド置換でも選択肢アームの set +e は数える" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case ${DOLLAR}(uname) in (Linux|Darwin) set +e ;; esac
+          bash ${SUITE_PATH}"
+
+# 締めすぎない側: アームの**中身**に置いた本物の部分シェルは今までどおり子シェル
+assert_wired "選択肢アームの中の部分シェルの set +e は漏れない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case x in (x|y) ( set +e | cat ) ;; esac
+          bash ${SUITE_PATH}"
+
+# (5) 1 断片が 2 つ開く関数定義で、閉じ側が関数の階層を食っていた。
+# **呼ばれていない関数の本文の残りが最上位のコードとして読まれる**ため、
+# 実際のコマンド一覧から外したスイートでも、呼ばれない関数の中に名前を書くだけで
+# 「配線されている」と報告できた（fail-open。`ci_coverage_test.sh` に直接効く）
+assert_not_wired "入れ子の 1 行定義の後ろの呼び出しは走らない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { g() { : ; }; bash ${SUITE_PATH}; }"
+
+assert_not_wired "本文に if を挟んだ 1 行定義の後ろの呼び出しは走らない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { if true; then :; fi; bash ${SUITE_PATH}; }"
+
+assert_not_wired "本文にループを挟んだ 1 行定義の後ろの呼び出しは走らない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { for x in a; do :; done; bash ${SUITE_PATH}; }"
+
+assert_not_wired "本文にブレースを挟んだ 1 行定義の後ろの呼び出しは走らない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { { :; }; bash ${SUITE_PATH}; }"
+
+# **呼んだ場合も入れ子でない定義と同じ答えになること。** 呼び出しの本文を実行の証拠に
+# しないのは「間接的な呼び出し（既知の限界）」の節で固定済みの fail-closed な扱いで、
+# 素の `f() { bash x; }` ＋ `f` も `not-wired` になる。修正前の入れ子の綴りは
+# ここだけ `wired` を返していたが、それは呼び出しを追えていたからではなく
+# **階層が 1 つ足りず本文が最上位のコードに見えていた**ためで、
+# 「呼ばない」ケースと答えが同じになっていた（＝呼ぶ／呼ばないを区別できていなかった）
+assert_not_wired "入れ子の 1 行定義でも、呼び出しの扱いは素の定義と同じ" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { g() { : ; }; bash ${SUITE_PATH}; }
+          f"
+
+assert_not_wired "素の 1 行定義を呼んだ場合（比較用の基準）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { bash ${SUITE_PATH}; }
+          f"
+
+# 締めすぎない側: 定義の**後ろ**の最上位のコードは今までどおり最上位として読む
+assert_wired "入れ子の 1 行定義の次の行の呼び出しは最上位" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { g() { : ; }; : ; }
+          bash ${SUITE_PATH}"
+
 # --- 言及と実行の区別 -------------------------------------------------------------
 
 assert_not_wired "echo の中の言及" "name: ci

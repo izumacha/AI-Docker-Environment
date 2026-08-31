@@ -1036,6 +1036,58 @@ ci_workflow_extract() {
             return 0
         }
 
+        # その断片の**先頭**が複合コマンドを 1 つ開く綴りかを分類する。
+        # **0 = 開かない / 1 = 必ず走る条件（`if true` / `while true`）/
+        #   2 = 走るか分からない制御構造（条件・ループ・`case`）/ 3 = 関数定義（本体を同じ断片で開く）/
+        #   4 = 関数の見出しだけ（`{` は次の行）/ 5 = ブレースグループ**。
+        # **分類を関数に切り出したのは、同じ断片から開きを 2 つ以上取り出すため**（issue #123 (5)）。
+        # 開き側の判定が `if` / `else if` の連鎖として 1 か所に埋まっていた頃は 1 断片で 1 つしか
+        # 開けず、`f() { g() { : ; }; …` のように本体が同じ断片でもう 1 つ開く綴りで階層が
+        # 1 つ足りなくなっていた（続く `}` が関数の階層を閉じ、**呼ばれていない関数の本文の残りが
+        # 最上位のコード**として読まれる fail-open）。
+        # **綴りの一覧はここが唯一の源で、関数定義の綴りだけは `function_form()` へ委ねる**
+        # （`function_head_re()` の一覧を写さないため。写すと必ず片方が漏れる、が同ファイルの教訓）
+        function open_form(t,   ff) {
+            # **「必ず走る」条件を先に見る。** `if true` は下の一般形にも当たるので、
+            # 順序を逆にすると本体が「走るか分からない」側に落ちて、正しくゲートしている
+            # 呼び出しが実行の証拠から外れる
+            if (t ~ /^(if|while)[[:space:]]+(true|:)([[:space:]]|;|$)/) { return 1 }
+            # 条件・ループ・`case` は、条件や対象を読まないと本体が走るか決まらない
+            if (t ~ /^(if|while|until|for|case|select)([[:space:]]|$)/) { return 2 }
+            # 関数定義の綴りは `function_form()` が唯一の判定（3 綴りの一覧を写さない）
+            ff = function_form(t)
+            # 本体を同じ断片で開く綴り（`f() { …`）
+            if (ff == 2) { return 3 }
+            # 見出しだけの綴り（`f()` で行が終わり、次の `{` が本体）
+            if (ff == 1) { return 4 }
+            # 素のブレースグループ（`{ cmd; }`）
+            if (t ~ /^\{([[:space:]]|$)/) { return 5 }
+            # どれでもなければ複合コマンドは開かない
+            return 0
+        }
+
+        # `open_form()` が返した形の**開き 1 つ分だけ**を先頭から落として、その後ろを返す。
+        # 呼んでよいのは形 3（関数定義）と形 5（ブレース）だけ——**その 2 つだけが
+        # 「開いた直後が命令の位置」**だから。条件の位置（`if <条件>` / `for … in <一覧>`）へは
+        # 辿らない（そこに複合を書く綴りは `split_commands` が `;` で切った先にしか現れず、
+        # 推測で辿ると条件そのものを本体と取り違える）。
+        # **`function_body_rest()` は使えない。** あちらは入れ子の見出しを**まとめて**落として
+        # 最奥の命令を返す（`set` と呼び出しの探索が求める形）ので、途中の階層を数える
+        # この用途では 1 つずつ落とす必要がある
+        function open_rest(t, form,   s) {
+            s = t
+            # 関数定義なら、まず見出しを落とす（綴りは `function_head_re()` が唯一の源）
+            if (form == 3) {
+                if (match(s, function_head_re())) { s = substr(s, RLENGTH + 1) }
+                # 見出しと `{` の間の空白を落とす
+                sub(/^[[:space:]]*/, "", s)
+            }
+            # ここで先頭にあるのは本体（形 3）か素の（形 5）ブレースなので、それを落とす
+            sub(/^\{[[:space:]]*/, "", s)
+            # 残りが次の命令の位置
+            return s
+        }
+
         # 関数定義の見出しの綴り（`function f` / `function f()` / `f()`）を返す**唯一の場所**。
         # 上の注記のとおり、この一覧を 2 か所に分けて持つと必ず片方が漏れる。
         # 形（`function_form`）・名前（`function_name`）・本体の切り出し（`function_body_rest`）が
@@ -1265,7 +1317,7 @@ ci_workflow_extract() {
         # **ここでは出力しない**のが要点で、ジョブ単位の無効化キー（`if: false` 等）は
         # YAML のキー順が自由である以上 `steps:` の**後ろ**にも書ける。書いた時点で
         # 出力済みのステップは取り消せないため、ジョブ 1 つ分を溜めてから出す
-        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, closed_any, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok) {
+        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, closed_any, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen) {
             # **シェルのオプションはステップごとにリセットする。** ステップは 1 つずつ
             # 別のシェルで走るので、前のステップの `set +e` / `pipefail` は引き継がれない。
             # **控えるのは `set` で明示された分だけ（-1 = 明示なし）。** シェルの既定と突き合わせるのは
@@ -1392,6 +1444,19 @@ ci_workflow_extract() {
                         # 読むと、生きている括りの記録を捨てて正しくゲートしているステップを赤くする
                         # この断片で実際に階層を閉じたか（下の記録の捨て方に使う）
                         closed_any = 0
+                        # **この断片に入る前のオプションを控える。** 下でこの断片が階層を開いたら
+                        # その階層の「入口の姿」として記録し、フォークして閉じたときに巻き戻す
+                        # （issue #123 (1)）。断片の**末尾**で開く一方 `set` は断片の**途中**で
+                        # 効くので、開いた時点の `errexit` を控えると `{ set +e; } | cat` の
+                        # ように同じ断片で弱めてから開く綴りを巻き戻せない
+                        errexit_before = errexit
+                        pipefail_before = pipefail
+                        # フォークして閉じた階層の「入口の姿」。**別に旗を持つ**のが要点で、
+                        # `errexit` / `pipefail` は「明示されていない」を表す `-1` を正当な値として
+                        # 取るため、値そのものを「閉じていない」の目印には使えない
+                        closed_entry_seen = 0
+                        closed_entry_e = 0
+                        closed_entry_p = 0
                         # 関数定義かどうかは同じ断片の中で変わらないので 1 度だけ求める
                         # （`function_form()` は正規表現を組み立てるので呼び直すと無駄が大きい）
                         fn_form = function_form(struct_text)
@@ -1755,6 +1820,9 @@ ci_workflow_extract() {
                             true_at[depth] = 0
                             if (subshell_at[depth]) { subshell--; subshell_at[depth] = 0 }
                             group_start[depth] = -1
+                            # 巻き戻し先はこの断片が閉じた**一番外側**の階層の入口（下の説明を参照）。
+                            # 閉じる順は内側からなので、上書きし続ければ最後に残るのが一番外側
+                            closed_entry_e = entry_errexit[depth]; closed_entry_p = entry_pipefail[depth]; closed_entry_seen = 1
                             depth--; closed_any = 1
                         }
                         # **括弧は釣り合いで測る。** 閉じ側が断片の**先頭**に来るとは限らず、
@@ -1776,8 +1844,18 @@ ci_workflow_extract() {
                         # 釣り合いが崩れて幻の階層が開き、以降その断片の `set` がすべて
                         # 「部分シェルの中」として無視され、`esac` は本物の階層ではなく
                         # 幻の方を閉じる（以降の呼び出しが「未配線」に化ける。実測）
-                        else if (case_depth > 0 && ops[j] == "|" && paren_probe ~ /^\([^()]*$/) {
-                            sub(/^\(/, "", paren_probe)
+                        # **この断片自身が `case` を開く場合も含める**（issue #123 (4)。fail-open）。
+                        # 深さも `case_depth` も増えるのは断片の末尾なので、1 行書きの
+                        # `case x in (x|y) set +e ;; esac` を処理している最中はまだ 0 のままで、
+                        # `case_depth > 0` だけを条件にすると当たらない（`set_arm_here` /
+                        # `set_masked` が既に補償しているのと同じ off-by-one）。
+                        # **`(` が先頭にあるとは限らない**のも同じ理由——1 行書きでは
+                        # `case x in (x` のように `case … in ` の前置きが手前に付く。
+                        # 閉じられていない**最後の** `(` を 1 つだけ落とす
+                        # （伏せた写しで位置を測る。引用の中の `(` を数えないため。長さは保たれる）
+                        else if ((case_depth > 0 || struct_text ~ /^case([[:space:]]|$)/) \
+                                 && ops[j] == "|" && match(mask_quoted(paren_probe), /\([^()]*$/)) {
+                            paren_probe = substr(paren_probe, 1, RSTART - 1) substr(paren_probe, RSTART + 1)
                         }
                         paren = paren_delta(paren_probe)
                         if (paren < 0) {
@@ -1789,8 +1867,27 @@ ci_workflow_extract() {
                                 true_at[depth] = 0
                                 if (subshell_at[depth]) { subshell--; subshell_at[depth] = 0 }
                                 group_start[depth] = -1
+                                # 括弧で閉じた分も同じ（一番外側が最後に残る）
+                                closed_entry_e = entry_errexit[depth]; closed_entry_p = entry_pipefail[depth]; closed_entry_seen = 1
                                 depth--; closed_any = 1
                             }
+                        }
+                        # **フォークして閉じた複合コマンドの中の `set` は親へ漏れない。**
+                        # `while …; do set +e; done | cat` / `{ set +e; } | cat` / `… &` は
+                        # どれも子シェルで走るので、閉じた時点で入口のオプションへ巻き戻す
+                        # （issue #123 (1)）。開き側の子シェル判定は**複合を開く断片に `|` が
+                        # 付いているとき**しか成立せず、複合がパイプの**左側**にあると一度も
+                        # 真にならないため、そこでしか効かない `set +e` を親に効いたものとして
+                        # 扱い、正しくゲートしているステップを「未配線」と誤報して赤くしていた。
+                        # **`||` / `&&` / `;` はフォークしない**（実 bash と差分照合して実測。
+                        # `{ set +e; } || true` の握り潰しは親へ漏る）ので、対象は `|` と `&` だけ。
+                        # 「閉じた断片に付いた区切りは中身に掛かる」という `closed_group_start` と
+                        # 同じ考え方を、区切りではなくオプションへ当てたもの
+                        if (closed_entry_seen && (ops[j] == "|" || ops[j] == "&")) {
+                            errexit = closed_entry_e
+                            pipefail = closed_entry_p
+                            # 巻き戻した以上、その中で落とした括りの記録も持ち出さない
+                            weak_depth = -1
                         }
                         # 閉じたブロックの中で落とした記録は、外へ持ち出さない。
                         # **実際に閉じた断片でだけ見る**のが要点で、無条件に比べると
@@ -1821,7 +1918,17 @@ ci_workflow_extract() {
                         # ジョブの控えへ積む。**判定に要る材料（直後の区切り・`set` の明示・深さ）ごと**渡し、
                         # ゲートかどうかの結論はジョブが確定するときに出す
                         nbuf++
-                        buf[nbuf] = step_id "\t" ops[j] "\t" ((dead_depth >= 0 || unreachable) ? 0 : errexit) "\t" pipefail "\t" uncertain "\t" text
+                        # **控えるのは命令の位置から見た本文**（`struct_text`）で、生の `text` ではない
+                        # （issue #123 (3)）。`split_commands` は `;` で切るので `if true; then bash x; fi`
+                        # の断片は `then bash x` になり、`ci_workflow_runs_script` の綴り
+                        # （`CI_WORKFLOW_COMMAND_START` に錨を張る）に当たらない。同じ意味を
+                        # 3 行に分けて書くと `then` が独立した断片になって当たるので、
+                        # **1 行に畳んだだけで答えが変わっていた**（fail-closed）。
+                        # `then` / `else` / `do` を許すのは安全である——本体が走るか分からない綴りは
+                        # `uncertain`（5 列目）が、走らないと分かる綴りは `dead_depth` が既に落としており、
+                        # 条件の位置に置いた呼び出し（`if bash x; then …`）は `if` が剥がれないので
+                        # そのまま当たらない
+                        buf[nbuf] = step_id "\t" ops[j] "\t" ((dead_depth >= 0 || unreachable) ? 0 : errexit) "\t" pipefail "\t" uncertain "\t" struct_text
                         # 偽と分かる条件のブロックに入るところを覚える（この深さより深い間は無効）
                         # **連鎖が続くなら条件は 1 語だけではない。** `split_commands` は `&&` / `||` で
                         # 切るので、`if false || true; then` の断片は `if false` になる。素直に
@@ -1869,68 +1976,114 @@ ci_workflow_extract() {
                         # 切るので `if true && [ -z "$SKIP" ]; then` の断片は `if true` になる。
                         # 素直に「必ず走る」と読むと、2 トークン足すだけで走るとは限らない本体が
                         # 「最上位で確実に走る」に化ける（実 bash と差分照合して実測。fail-open）
-                        if (struct_text ~ /^(if|while)[[:space:]]+(true|:)([[:space:]]|;|$)/ \
-                            && ops[j] != "&&" && ops[j] != "||") {
-                            depth++; true_at[depth] = 1
-                            # **必ず走る入れ子なので grouping と同じ扱い。** 開始位置を控えないと、
-                            # 閉じた `fi` / `done` に付いた `|| true` が中身へ伝わらず、
-                            # 握り潰された実行が「ゲートしている」と読まれる
-                            group_start[depth] = nbuf
-                        }
-                        else if (struct_text ~ /^(if|while|until|for|case|select)([[:space:]]|$)/) {
-                            depth++; uncertain++; uncertain_at[depth] = 1
-                            # **閉じた `fi` / `done` に付いた区切りは中身すべてに掛かる。**
-                            # grouping と同じで、控えないと `fi || true` が本体へ伝わらず、
-                            # 握り潰された実行が「ゲートしている」と読まれる（実測）
-                            group_start[depth] = nbuf
-                        }
-                        # bash の `function name { … }` 形式（`()` を伴わない綴り）も 1 階層開く
-                        else if (fn_form == 2) {
-                            depth++; uncertain++; uncertain_at[depth] = 1
-                            fndef++; fndef_at[depth] = 1
-                            # この階層の本文がどの関数のものかを控える（呼び出しで引くため）
-                            fndef_name[depth] = function_name(struct_text)
-                        }
-                        # 見出しだけの行は深さを動かさず、次の `{` を関数本体として予約する
-                        # 名前も一緒に控える（次の `{` が本体を開いたときに引き継ぐ）
-                        else if (fn_form == 1) { pending_fndef = 1; pending_fndef_name = function_name(struct_text) }
-                        # **ブレースグループ（`cmd || { echo bad; exit 1; }`）も 1 階層開く。**
-                        # 閉じ側の `}` だけを数えると深さが 1 つ足りなくなり、以降の断片が
-                        # 「最上位」に見える——条件の中でしか走らない呼び出しが実行の証拠に化ける（レビューで実測）
-                        # grouping（`{ … }` / `( … )`）は必ず走るので uncertain は増やさない。
-                        # ただし**閉じたところに付く区切りは中身にも掛かる**ので、開始位置を控える
-                        else if (struct_text ~ /^\{([[:space:]]|$)/) {
-                            depth++
-                            # 直前が関数の見出しなら、この `{` が本体の開き（走るとは限らない）
-                            if (was_pending_fndef) {
-                                uncertain++; uncertain_at[depth] = 1
-                                fndef++; fndef_at[depth] = 1
-                                # 見出しの行で控えた名前を、本体を開いたこの階層へ引き継ぐ
-                                fndef_name[depth] = pending_fndef_name
+                        # **1 つの断片が複合コマンドを 2 つ以上開くことがある**（issue #123 (5)）。
+                        # `f() { g() { : ; }; bash x; }` のように本体が同じ断片でもう 1 つ開く綴りは
+                        # 1 つしか数えないと階層が足りず、続く `}` が**関数の**階層を閉じてしまう
+                        # ＝呼ばれていない関数の本文の残りが最上位のコードとして読まれる（fail-open）。
+                        # これは `ci_coverage_test.sh` の「全スイートが実行されるか」に直接効き、
+                        # 実際のコマンド一覧から外したスイートでも、**呼ばれない関数の中に名前を書くだけで**
+                        # 「配線されている」と報告できてしまう（本ライブラリが塞ぐと宣言している
+                        # *absence == pass* の形そのもの）。
+                        # 辿るのは「開いた直後が命令の位置」になる綴り（関数の本体・ブレース）だけで、
+                        # 条件の位置（`if <条件>`）では止める（`open_rest()` の説明を参照）
+                        open_probe = struct_text
+                        # 断片の**先頭**の開きかどうか（見出しと結び付く `{` は先頭の 1 つだけ）
+                        first_open = 1
+                        # この断片で開いた階層に印を付けて回るための走査位置
+                        od = depth_before
+                        while (1) {
+                            # いま先頭にある綴りが何を開くかを分類する
+                            open_kind = open_form(open_probe)
+                            # 必ず走る条件（`if true` / `while true`）。**連鎖に守られていればその限りではない**
+                            # ——`split_commands` は `&&` で切るので `if true && [ -z "$SKIP" ]; then` の
+                            # 断片は `if true` になる。素直に「必ず走る」と読むと、2 トークン足すだけで
+                            # 走るとは限らない本体が「最上位で確実に走る」に化ける（fail-open。実測）
+                            if (open_kind == 1 && ops[j] != "&&" && ops[j] != "||") {
+                                depth++; true_at[depth] = 1
+                                # **必ず走る入れ子なので grouping と同じ扱い。** 開始位置を控えないと、
+                                # 閉じた `fi` / `done` に付いた `|| true` が中身へ伝わらず、
+                                # 握り潰された実行が「ゲートしている」と読まれる
+                                group_start[depth] = nbuf
                             }
-                            # そうでなければ素の grouping（必ず走るので uncertain は増やさない）
-                            else { group_start[depth] = nbuf }
+                            # 走るか分からない制御構造（連鎖に守られた `if true` もここへ落ちる）
+                            else if (open_kind == 1 || open_kind == 2) {
+                                depth++; uncertain++; uncertain_at[depth] = 1
+                                # **閉じた `fi` / `done` に付いた区切りは中身すべてに掛かる。**
+                                # grouping と同じで、控えないと `fi || true` が本体へ伝わらず、
+                                # 握り潰された実行が「ゲートしている」と読まれる（実測）
+                                group_start[depth] = nbuf
+                            }
+                            # 関数定義（`f() { …` / `function f { …`）も 1 階層開く
+                            else if (open_kind == 3) {
+                                depth++; uncertain++; uncertain_at[depth] = 1
+                                fndef++; fndef_at[depth] = 1
+                                # この階層の本文がどの関数のものかを控える（呼び出しで引くため）
+                                fndef_name[depth] = function_name(open_probe)
+                            }
+                            # 見出しだけの綴りは深さを動かさず、次の `{` を関数本体として予約する
+                            # 名前も一緒に控える（次の `{` が本体を開いたときに引き継ぐ）
+                            else if (open_kind == 4) {
+                                pending_fndef = 1; pending_fndef_name = function_name(open_probe)
+                            }
+                            # **ブレースグループ（`cmd || { echo bad; exit 1; }`）も 1 階層開く。**
+                            # 閉じ側の `}` だけを数えると深さが 1 つ足りなくなり、以降の断片が
+                            # 「最上位」に見える——条件の中でしか走らない呼び出しが実行の証拠に化ける（レビューで実測）
+                            else if (open_kind == 5) {
+                                depth++
+                                # 直前が関数の見出しなら、この `{` が本体の開き（走るとは限らない）。
+                                # **断片の先頭の `{` に限る**のが要点で、2 つ目以降は本体の中の
+                                # 素のグループであり、見出しとは結び付かない
+                                if (first_open && was_pending_fndef) {
+                                    uncertain++; uncertain_at[depth] = 1
+                                    fndef++; fndef_at[depth] = 1
+                                    # 見出しの行で控えた名前を、本体を開いたこの階層へ引き継ぐ
+                                    fndef_name[depth] = pending_fndef_name
+                                }
+                                # そうでなければ素の grouping（必ず走るので uncertain は増やさない）
+                                else { group_start[depth] = nbuf }
+                            }
+                            # この周回で開いた階層に、**断片に入る前の**オプションを控える
+                            # （下の「フォークした複合の巻き戻し」で使う）
+                            while (od < depth) { od++; entry_errexit[od] = errexit_before; entry_pipefail[od] = pipefail_before }
+                            # 本体が同じ断片の中で続く綴り以外は、ここで終わり
+                            if (open_kind != 3 && open_kind != 5) { break }
+                            # 開き 1 つ分を落として、次の命令の位置へ進む
+                            open_rest_probe = open_rest(open_probe, open_kind)
+                            # **1 文字も減らなければ打ち切る**（無限ループ避け。綴りを足したときの保険）
+                            if (open_rest_probe == open_probe) { break }
+                            open_probe = open_rest_probe
+                            first_open = 0
+                        }
+                        # 部分シェルの開き分（釣り合いの正側）を足す。
+                        # **部分シェルであることを階層ごとに覚える**（中の `set` を外へ持ち出さない）
+                        # **上の連鎖から切り離してある**のが要点（issue #123 (2)）。以前はパイプの
+                        # 子シェル判定の `else` に束縛されており、`echo x | { (` のように
+                        # 1 断片が `{` と `(` を同時に開くとパイプの中でだけ `(` の階層が開かず、
+                        # 後の `)` が**ブレースの**階層を閉じて以降の深さが 1 つずれていた
+                        if (paren > 0) {
+                            for (closing = 0; closing < paren; closing++) {
+                                depth++; group_start[depth] = nbuf
+                                subshell_at[depth] = 1; subshell++
+                            }
+                            # 括弧で開いた階層にも同じ控えを残す
+                            while (od < depth) { od++; entry_errexit[od] = errexit_before; entry_pipefail[od] = pipefail_before }
                         }
                         # **パイプの構成要素として開いた複合コマンドは子シェルで走る。**
                         # `echo x | while read -r l; do set +e; done` の `set +e` は親へ漏れないので、
                         # 印を付けないと「走るかもしれない握り潰し」として反映し、
                         # 実際にはゲートしているステップを「未配線」と誤報して赤くする
                         # （`( … )` は釣り合いで拾えるが、パイプはこの経路でしか分からない）
+                        # **印を付けるのはこの断片が開いた一番外側の階層**（`depth` ではない）。
+                        # `echo x | { ( : ) ; set +e ; }` では内側の `(` が先に閉じて `subshell` が
+                        # 0 に戻るため、内側だけに印を付けると残りの `set +e` が親に効いたものとして
+                        # 扱われる（issue #123 (2)）
                         # **`case` の中と `case` を開く断片では見送る。** アーム模様の `|`
                         # （`a|b)`）は選択肢の区切りであってパイプではなく、`split_commands` は
                         # そこでも切るため、区別が付かない（見送る側は従来どおりの扱いに戻るだけ）
                         if (depth > depth_before && (pipe_in || ops[j] == "|") \
                             && case_before == 0 && struct_text !~ /^case([[:space:]]|$)/ \
-                            && !subshell_at[depth]) {
-                            subshell_at[depth] = 1; subshell++
-                        }
-                        # 部分シェルの開き分（釣り合いの正側）を足す。
-                        # **部分シェルであることを階層ごとに覚える**（中の `set` を外へ持ち出さない）
-                        else if (paren > 0) {
-                            for (closing = 0; closing < paren; closing++) {
-                                depth++; group_start[depth] = nbuf
-                                subshell_at[depth] = 1; subshell++
-                            }
+                            && !subshell_at[depth_before + 1]) {
+                            subshell_at[depth_before + 1] = 1; subshell++
                         }
                     }
                 }
