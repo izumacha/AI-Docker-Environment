@@ -3367,16 +3367,66 @@ jobs:
           a) : ;; esac }
           bash ${SUITE_PATH}"
 
-# `set` を記録する階層も「この断片が開き終わった後の深さ」。`case` だけを見ていると
-# `do { set +e; …; set -e; }` で記録側が 1 つ浅くなり、同じ括りの `set -e` が打ち消せない
-assert_wired "ブレースで括った set +e … set -e は打ち消し合う" "name: ci
+# `case` の入れ子は `depth` とは独立に数える。閉じ側のループは `depth > 0` で止まるので、
+# 「階層は別の綴りが先に閉じてしまい `esac` が深さ 0 で来る」場合に数え損ねると、
+# 以降ずっと「`case` の中」に見えてパイプの子シェル判定が外れる
+assert_wired "深さ 0 で来た esac も case の入れ子を戻す" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
     steps:
       - name: subject
         run: |
-          for i in 1; do { set +e; :; set -e; }; done
+          case zz in
+          zz) ! if false; then :; fi ;;
+          esac
+          echo x | while read -r l; do set +e; done
+          bash ${SUITE_PATH}"
+
+# 模様が `|` で複数の選択肢に切られていれば、その間ずっと模様の位置。
+# 1 つ目しか守らないと、選択肢を 1 つ増やすだけで `case` の階層が畳まれる
+assert_wired "2 つ目の選択肢に来た閉じ語も模様として読む" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case zz in
+          a|done|zz) : ;;
+          esac
+          echo x | while read -r l; do set +e; done
+          bash ${SUITE_PATH}"
+
+# `set` を記録する階層に数えるのは **`case` のアームの分だけ**。開いた階層の数
+# （`count_opens()`）に置き換えると、**ブレースグループは同じシェル**なのに
+# `{ set +e; }` の外の `set -e` が打ち消せなくなり、**`if set +e; then` の `set` は
+# 条件の位置＝外側の深さで走る**のに 1 つ深く記録される（どちらも正しくゲートする
+# 綴りを赤くする。レビューで実測）。この 2 つを対で固定する
+assert_wired "ブレースグループの外の set -e は打ち消せる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          for i in 1 2; do
+          { set +e; }
+          set -e
+          done
+          bash ${SUITE_PATH}"
+
+assert_wired "条件の位置の set +e も外側の set -e で打ち消せる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          for i in 1 2; do
+          if set +e; then :; fi
+          set -e
+          done
           bash ${SUITE_PATH}"
 
 # 関数ごとの台帳もフォークで巻き戻す。子シェルの中で見た `set +e` は呼び出し元へ
