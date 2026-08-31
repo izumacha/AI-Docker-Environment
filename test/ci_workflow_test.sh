@@ -2877,6 +2877,38 @@ jobs:
           { set +e; } | cat
           bash ${SUITE_PATH}"
 
+# 締めすぎない側（fail-closed の防止）: 巻き戻すのは**子シェルの中で変わった分だけ**で、
+# 外側の階層で落とした `set +e` の記録は生きている。括りの途中にフォークする複合が
+# 挟まるだけで `set -e` が打ち消せなくなると、正しくゲートしているステップが
+# 恒常的に赤くなる（レビューで実測）
+assert_wired "括りの途中にフォークが挟まっても set -e は打ち消せる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          for f in a; do
+          set +e
+          { :; } | cat
+          set -e
+          done
+          bash ${SUITE_PATH}"
+
+assert_wired "括りの途中の if のフォークでも set -e は打ち消せる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          for f in a; do
+          set +e
+          if true; then :; fi | cat
+          set -e
+          done
+          bash ${SUITE_PATH}"
+
 # 締めすぎない側: `||` / `&&` / `;` はフォークしないので、握り潰しはそのまま親へ漏れる
 # （実 bash で確認済み。巻き戻す対象を広げると、本物の握り潰しを見逃す fail-open になる）
 assert_not_wired "|| で閉じたブレースグループの set +e は親へ漏れる" "name: ci
@@ -3011,6 +3043,25 @@ jobs:
         run: |
           case x in (x|y) ( set +e | cat ) ;; esac
           bash ${SUITE_PATH}"
+
+# 締めすぎない側（fail-open の防止）: アーム模様の補償で**本物の**部分シェルを食わないこと。
+# 「閉じられていない最後の `(`」まで広げると `time ( : | cat )` の `(` が落ち、
+# 階層が開かないまま続く `)` がアームの階層を閉じて、**一致しないアームの中身が
+# 最上位のコード**として読まれる（レビューで実測。まさに *absence == pass* の形）。
+# アーム模様が現れるのは `in` の直後か断片の先頭だけなので、そこに限る
+assert_not_wired "case の中の前置き付き部分シェルはアーム模様と混ぜない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case never in
+          a)
+          time ( : | cat \$(date) )
+          bash ${SUITE_PATH}
+          ;;
+          esac"
 
 # (5) 1 断片が 2 つ開く関数定義で、閉じ側が関数の階層を食っていた。
 # **呼ばれていない関数の本文の残りが最上位のコードとして読まれる**ため、
