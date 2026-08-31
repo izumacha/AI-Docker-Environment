@@ -1197,11 +1197,6 @@ ci_workflow_extract() {
             if (want_pipe && wp[name] && wp_at[name] == at) { wp[name] = 0 }
         }
 
-        # いまいる階層を内側から外側へたどり、最も近い関数定義の名前を返す（無ければ空文字）。
-        # `fndef_at[]` が立っている階層だけを見るので、閉じた階層に残った名前は拾わない
-        # （閉じ側の後始末を 2 か所へ増やさないための決め方。issue #121 を悪化させない）
-        # 内側から見て最初に見つかる関数定義の**階層**を返す（見つからなければ 0）。
-        # `enclosing_fndef_name()` の対で、台帳の記録と打ち消しが同じ階層を指すようにする
         # 先頭のアーム見出し（`y)` / `(y)` / `y|z)`）を落として、その後ろ（＝命令の位置）を返す。
         # **位置は伏せた写しで測り、切るのは生の本文**——`starts_case_arm()` と同じ規則で、
         # 揃えないと引用の中の `)`（`"a)b") …`）で剥がす量がずれ、残りが分類できなくなって
@@ -1212,6 +1207,24 @@ ci_workflow_extract() {
             masked = mask_quoted(t)
             if (!match(masked, /^\(?[^()]*\)[[:space:]]*/)) { return t }
             return substr(t, RLENGTH + 1)
+        }
+
+        # この断片が、**自分で開いた `case` の模様まで読み切ったか**を返す。
+        # `set_arm_here` で代用してはいけない——あれは「**囲っている** `case` のアーム見出しで
+        # 始まるか」で、`a) case $Y in` のように外側のアームの中で内側の `case` を開く綴りで
+        # 真になるのに、内側の模様はまだ来ていない。逆に「断片が `in` で終わるか」で見ると、
+        # 1 行書きで模様が `|` に切られた `case X in (aa|done|cc)` を取りこぼし、
+        # 模様の途中の閉じ語（`done`）が `case` の階層を閉じてしまう
+        # （一致しないアームの中身が最上位に上がる fail-open。どちらもレビューで実測）。
+        # 判定は `case … in ` の**後ろ**にアーム見出しを閉じる `)` があるか（伏せた写しで測る）
+        function case_arm_consumed(t,   masked, rest) {
+            masked = mask_quoted(t)
+            # そもそも `case … in` を含まなければ、模様の話ではない
+            if (!match(masked, /(^|[[:space:]])case[[:space:]].*[[:space:]]in[[:space:]]*/)) { return 0 }
+            # `in` の後ろが模様の位置
+            rest = substr(masked, RSTART + RLENGTH)
+            # 見出しを閉じる `)` まで来ていれば、この断片で模様は消費済み
+            return (rest ~ /^\(?[^()]*\)([[:space:]]|;|$)/)
         }
 
         # 複合コマンドを閉じる語の綴りを返す**唯一の場所**（`function_head_re()` と同じ理由。
@@ -1243,6 +1256,9 @@ ci_workflow_extract() {
             return 0
         }
 
+        # いまいる階層を内側から外側へたどり、最も近い関数定義の名前を返す（無ければ空文字）。
+        # `fndef_at[]` が立っている階層だけを見るので、閉じた階層に残った名前は拾わない
+        # （閉じ側の後始末を 2 か所へ増やさないための決め方。issue #121 を悪化させない）
         function enclosing_fndef_name(d, at, names,   k) {
             # 内側（深い方）から順に見て、最初に見つかった定義の名前を返す
             for (k = d; k >= 1; k--) { if (at[k]) { return names[k] } }
@@ -1985,7 +2001,7 @@ ci_workflow_extract() {
                         # 上で求めた判定を使い回す（`starts_case_arm()` は伏せ処理を伴うので、
                         # 同じ断片で 2 度呼ばない。剥がす綴りも `starts_case_arm()` と揃える）
                         if (set_arm_here) {
-                            sub(/^\(?[^()]*\)/, "", paren_probe)
+                            paren_probe = drop_arm_head(paren_probe)
                         }
                         # **アーム模様が `|` で切られた前半の `(` は部分シェルの開きではない。**
                         # `split_commands` は `(a|q)` を `(a` と `q)` に切るので、素直に数えると
@@ -2361,7 +2377,7 @@ ci_workflow_extract() {
                         # 閉じ語として扱ってはいけない（1 つ目しか守らないと、選択肢を 1 つ
                         # 増やすだけで `case` の階層が畳まれる。レビューで実測）。
                         # 見出しを閉じる `)` が来た断片（`set_arm_here`）で降ろす
-                        arm_expected = (case_depth > case_before && struct_text ~ /[[:space:]]in[[:space:]]*$/) \
+                        arm_expected = (case_depth > case_before && !case_arm_consumed(struct_text)) \
                                        || (arm_expected && !set_arm_here && ops[j] == "|")
                     }
                 }

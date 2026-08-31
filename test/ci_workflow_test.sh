@@ -3370,6 +3370,37 @@ jobs:
           bash ${SUITE_PATH} ;;
           esac"
 
+# 模様の位置は「この断片が**自分で開いた** `case` の模様を読み切ったか」で決める。
+# 「断片が `in` で終わるか」で見ると、1 行書きで模様が `|` に切られた形を取りこぼし、
+# 模様の途中の閉じ語（`done`）が `case` の階層を閉じてしまう
+assert_not_wired "1 行書きの (aa|done|cc) 模様でも閉じ語は模様" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case never in (aa|done|cc) : ;;
+          xx)
+          bash ${SUITE_PATH}
+          ;;
+          esac"
+
+# 括弧の勘定側のアーム見出し剥がしも伏せた写しで測る（3 か所すべて同じ規則に揃える）。
+# 揃えないと引用の中の `)` で剥がす量がずれ、残りの `)` が開いていない階層を閉じる
+assert_not_wired "引用の中の ) を含む模様でも括弧の勘定が合う" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case never in
+          \"a)b\"\"c)d\") ( : )
+          bash ${SUITE_PATH}
+          ;;
+          esac"
+
 # 模様の**途中**に来た `esac` は模様であって閉じ語ではない（先頭に来たものだけが
 # 空の `case` の終わり）。深さの走査と `case_depth` の走査の**両方**を揃えないと、
 # 片方だけが数えて `case_scope` が偽になり、本物のアームの `set` が見つからなくなる
