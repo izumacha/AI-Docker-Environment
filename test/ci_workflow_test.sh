@@ -3416,6 +3416,47 @@ jobs:
           done
           bash ${SUITE_PATH}"
 
+# 同じ 2 つを**関数の本文**でも固定する（台帳側の階層は別の変数で数えているので、
+# 片方だけ直すともう片方が黙って残る。実際この対が無かったために 1 巡見落とした）。
+# 台帳の階層は「その関数の本体の階層」であって `set` が走る階層ではない
+assert_wired "関数の本文でもブレースグループの外の set -e は打ち消せる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() {
+          { set +e; }
+          set -e
+          }
+          f
+          bash ${SUITE_PATH}"
+
+assert_wired "関数の本文でも条件の位置の set +e を打ち消せる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { if set +e; then :; fi; set -e; }
+          f
+          bash ${SUITE_PATH}"
+
+# 最上位で定義した関数の台帳は、無関係な複合コマンドがフォークして閉じても消えない
+assert_not_wired "最上位の定義の台帳はフォークで消えない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          quiet() { set +e; }
+          for f in a b; do echo \"${DOLLAR}f\"; done | sort
+          quiet
+          bash ${SUITE_PATH}"
+
 assert_wired "条件の位置の set +e も外側の set -e で打ち消せる" "name: ci
 jobs:
   type-check:
@@ -3429,9 +3470,14 @@ jobs:
           done
           bash ${SUITE_PATH}"
 
-# 関数ごとの台帳もフォークで巻き戻す。子シェルの中で見た `set +e` は呼び出し元へ
-# 漏れないので、控えたままだと呼んだ時点で握り潰しを再現してしまう
-assert_wired "子シェルの中の set +e は関数の台帳にも残さない" "name: ci
+# **既知の締めすぎ（fail-closed）。** 関数の本文で子シェルの中に置いた `set +e` は、
+# 呼んでも呼び出し元へ漏れない（フォークするため）のに台帳へ残るので、呼び出しの時点で
+# 弱めたものとして扱われる。**巻き戻しを「閉じた階層より深い記録を落とす」形にすると
+# 直るが、それは fail-open を開く**——最上位で定義した関数（本文は深さ 1）が、無関係な
+# 複合コマンドが深さ 0 でフォークして閉じただけで台帳から消え、握り潰されたスイートが
+# 「ゲートしている」と読まれる（レビューで実測）。階層の数値だけでは「この複合の中で
+# 控えたか」を区別できないので、区別できる印を持たせるまでは締めすぎ側で固定する
+assert_not_wired "子シェルの中の set +e も関数の台帳には残る（既知の締めすぎ）" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest

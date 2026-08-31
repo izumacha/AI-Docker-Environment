@@ -1203,6 +1203,13 @@ ci_workflow_extract() {
         # いまいる階層を内側から外側へたどり、最も近い関数定義の名前を返す（無ければ空文字）。
         # `fndef_at[]` が立っている階層だけを見るので、閉じた階層に残った名前は拾わない
         # （閉じ側の後始末を 2 か所へ増やさないための決め方。issue #121 を悪化させない）
+        # 内側から見て最初に見つかる関数定義の**階層**を返す（見つからなければ 0）。
+        # `enclosing_fndef_name()` の対で、台帳の記録と打ち消しが同じ階層を指すようにする
+        function enclosing_fndef_depth(d, at,   k) {
+            for (k = d; k >= 1; k--) { if (at[k]) { return k } }
+            return 0
+        }
+
         function enclosing_fndef_name(d, at, names,   k) {
             # 内側（深い方）から順に見て、最初に見つかった定義の名前を返す
             for (k = d; k >= 1; k--) { if (at[k]) { return names[k] } }
@@ -1345,7 +1352,7 @@ ci_workflow_extract() {
         # **ここでは出力しない**のが要点で、ジョブ単位の無効化キー（`if: false` 等）は
         # YAML のキー順が自由である以上 `steps:` の**後ろ**にも書ける。書いた時点で
         # 出力済みのステップは取り消せないため、ジョブ 1 つ分を溜めてから出す
-        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, closed_any, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, arm_masked, arm_at, arm_expected, case_scope, opens_case, close_probe, close_rest, close_first, open_head, led, drop, ndrop, di, esac_probe, esac_rest) {
+        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, closed_any, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, arm_masked, arm_at, arm_expected, case_scope, opens_case, close_probe, close_rest, close_first, open_head, esac_probe, esac_rest) {
             # **シェルのオプションはステップごとにリセットする。** ステップは 1 つずつ
             # 別のシェルで走るので、前のステップの `set +e` / `pipefail` は引き継がれない。
             # **控えるのは `set` で明示された分だけ（-1 = 明示なし）。** シェルの既定と突き合わせるのは
@@ -1729,7 +1736,15 @@ ci_workflow_extract() {
                             # 本体の階層が開くのは断片の末尾なので、`fn_form` だけを見ると
                             # 1 つ浅く控えてしまい、続く `set -e` と階層が一致せず打ち消せない
                             # （`f()` 改行 `{ set +e; set -e; }` が「弱める関数」に化ける。レビューで実測）
-                            fn_body_depth = depth + count_opens(open_head, fn_form, (open_head == struct_text))
+                            # **台帳の階層は「その関数の本体の階層」**であって、`set` が走る階層ではない。
+                            # 定義を開く断片ではその 1 つ下が本体（開くのは断片の末尾）。それ以外の
+                            # 断片では、囲っている定義の階層まで戻して数える——`set` が走る深さで
+                            # 控えると、`f() {` 改行 `{ set +e; }` 改行 `set -e` のように本文の中で
+                            # ブレースを挟むだけで記録側と打ち消し側の階層が食い違い、本文で戻して
+                            # いる関数が「弱める関数」として残る（正しくゲートする綴りを赤くする。
+                            # ブレースグループは同じシェルなので bash では打ち消せる。レビューで実測）
+                            fn_body_depth = (fn_form == 2 || was_pending_fndef) ? depth + 1 \
+                                                                                : enclosing_fndef_depth(depth, fndef_at)
                             # 台帳の打ち消しを認めてよい綴りか。強める向きを信用する条件から
                             # 「定義の外であること」だけを外したもの——ここは定義の**中**の話で、
                             # 見ているのは「この関数を呼んだあと errexit が有効か」だから
@@ -2017,18 +2032,15 @@ ci_workflow_extract() {
                         if (closed_entry_seen && (ops[j] == "|" || ops[j] == "&")) {
                             errexit = closed_entry_e
                             pipefail = closed_entry_p
-                            # **関数ごとの台帳も同じだけ巻き戻す。** 子シェルの中で見た `set +e` は
-                            # 関数を呼んでも呼び出し元へ漏れないので、「この関数は弱める」と
-                            # 控えたままにすると、呼んだ時点で握り潰しを再現してしまう
-                            # （正しくゲートする綴りを赤くする。レビューで実測）。
-                            # 閉じた階層より深いところで控えた分だけを落とす
-                            # **走査しながら消さない**（POSIX の awk では未定義）。落とす鍵を先に集める
-                            ndrop = 0
-                            for (led in fnweak_e_at) { if (fnweak_e_at[led] > depth) { drop[++ndrop] = led } }
-                            for (di = 1; di <= ndrop; di++) { delete fnweak_e[drop[di]]; delete fnweak_e_at[drop[di]]; delete drop[di] }
-                            ndrop = 0
-                            for (led in fnweak_pipe_at) { if (fnweak_pipe_at[led] > depth) { drop[++ndrop] = led } }
-                            for (di = 1; di <= ndrop; di++) { delete fnweak_pipe[drop[di]]; delete fnweak_pipe_at[drop[di]]; delete drop[di] }
+                            # **関数ごとの台帳はここでは触らない。** 「閉じた階層より深いところで
+                            # 控えた分」を落とす形にすると、**最上位で定義した関数**（本文は深さ 1）が、
+                            # 無関係な複合コマンドが深さ 0 でフォークして閉じただけで消える
+                            # ——`quiet() { set +e; }` の後ろに `… done | sort` が 1 行あるだけで
+                            # 握り潰しの記録が失われ、握り潰されたスイートが「ゲートしている」と
+                            # 読まれる（fail-open。レビューで実測）。階層の数値だけでは
+                            # 「この複合の中で控えたか」を区別できないため、区別できる印を
+                            # 持たせるまでは触らない（子シェルの中の `set +e` を関数の台帳へ
+                            # 残してしまう側は fail-closed なので、そちらへ倒す）
                         }
                         # 閉じたブロックの中で落とした記録は、外へ持ち出さない。
                         # **実際に閉じた断片でだけ見る**のが要点で、無条件に比べると
