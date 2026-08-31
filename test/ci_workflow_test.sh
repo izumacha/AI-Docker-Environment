@@ -3126,6 +3126,36 @@ jobs:
           esac
           bash ${SUITE_PATH}"
 
+# 模様まで同じ断片に載っている 1 行書きでは、**次**の断片は模様の位置ではない。
+# 立てたままにすると、その先頭の `(`（本物の部分シェル）を模様と読んで落とす
+assert_not_wired "模様を消費した断片の次は模様の位置ではない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case never in a) echo m | ( : | cat \$(date) )
+          bash ${SUITE_PATH}
+          ;;
+          esac"
+
+# `case` は断片の先頭にあるとは限らない（開き側のループが本体の中でも開く）。
+# `^case` だけで入れ子を数えると、アーム見出しの `)` が部分シェルの閉じとして
+# 数えられ、囲っている関数の階層まで巻き戻る（呼ばれない関数の中身が最上位に上がる）
+assert_not_wired "関数の本体の中で開いた case もアーム見出しを読む" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { case x in
+          a) : ;;
+          esac
+          bash ${SUITE_PATH}
+          }"
+
 # 締めすぎない側: `;&`（フォールスルー）の後ろも模様の位置
 assert_not_wired ";& の後ろの丸括弧付き選択肢アームの set +e は数える" "name: ci
 jobs:

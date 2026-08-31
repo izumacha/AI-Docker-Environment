@@ -1321,7 +1321,7 @@ ci_workflow_extract() {
         # **ここでは出力しない**のが要点で、ジョブ単位の無効化キー（`if: false` 等）は
         # YAML のキー順が自由である以上 `steps:` の**後ろ**にも書ける。書いた時点で
         # 出力済みのステップは取り消せないため、ジョブ 1 つ分を溜めてから出す
-        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, closed_any, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, arm_masked, arm_at, arm_expected, case_scope) {
+        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, closed_any, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, arm_masked, arm_at, arm_expected, case_scope, opens_case) {
             # **シェルのオプションはステップごとにリセットする。** ステップは 1 つずつ
             # 別のシェルで走るので、前のステップの `set +e` / `pipefail` は引き継がれない。
             # **控えるのは `set` で明示された分だけ（-1 = 明示なし）。** シェルの既定と突き合わせるのは
@@ -1481,7 +1481,12 @@ ci_workflow_extract() {
                         # 割れ、片方だけを直したときに残りが黙って別の答えを返す
                         # （`starts_case_arm()` を 1 つへ寄せたのと同じ理由。同ファイルの
                         #   コメントは、そのとき 3 か所のうち 1 か所が引用の扱いを食い違わせていたと記録している）
-                        case_scope = (case_depth > 0 || struct_text ~ /^case([[:space:]]|$)/)
+                        # **この断片が `case` を開くか。** 同じ問いが 4 か所（この下の `case_scope`・
+                        # アーム模様の位置・`case_depth` の勘定）に要るので 1 つの名前へ寄せる
+                        # ——写しを持つと片方だけを直したときに答えが割れる（実際、この写しの
+                        # ずれがそのまま 2 件の fail-open になっていた。レビューで実測）
+                        opens_case = (struct_text ~ /^case([[:space:]]|$)/)
+                        case_scope = (case_depth > 0 || opens_case)
                         set_arm_here = (case_scope && subshell == 0 && starts_case_arm(struct_text))
                         # **別の `case` アームへ移ったら、この階層の括りの記録は捨てる。**
                         # アーム同士は排他なので、`*)` の `set -e` は `linux*)` の `set +e` を
@@ -2019,9 +2024,17 @@ ci_workflow_extract() {
                         # **次の断片がアーム模様の位置か**を控える（上の括弧の勘定が読む）。
                         # `case … in` の直後だけが立ち、コマンドを 1 つ通れば降りる
                         # （`;;` の跡は上の空の断片で立て直す）
-                        arm_expected = (struct_text ~ /^case([[:space:]]|$)/)
-                        if (struct_text ~ /^case([[:space:]]|$)/) { case_depth++ }
-                        else if (text ~ /^esac([[:space:]]|;|$)/ && case_depth > 0) { case_depth-- }
+                        # **次の断片がアーム模様の位置か。** `case … in` の直後だけが立つ。
+                        # **その断片が模様まで載せていたら立てない**——1 行書きの
+                        # `case never in a) echo m | ( : | …` では模様は既に消費済みで、
+                        # 次の断片の先頭の `(` は本物の部分シェル。立てたままにすると
+                        # それを模様と読んで落とし、一致しないアームの中身が最上位に上がる
+                        # （fail-open。レビューで実測）
+                        arm_expected = (opens_case && !set_arm_here)
+                        # `esac` は入れ子を 1 つ閉じる（開く側は下の開き側のループが数える
+                        # ——`f() { case x in` のように `case` が断片の先頭に無い綴りでも
+                        # 階層は開くので、`^case` で数えると勘定が合わない。レビューで実測）
+                        if (text ~ /^esac([[:space:]]|;|$)/ && case_depth > 0) { case_depth-- }
                         # **「必ず走る入れ子」と「走るか分からない入れ子」を分ける。**
                         # `( … )` / `{ … }` の grouping と `if true` / `while true` の本体は必ず走るので、
                         # 中の `set +e` は効くし、中の呼び出しは実行の証拠になる。
@@ -2069,6 +2082,9 @@ ci_workflow_extract() {
                             # 走るか分からない制御構造（連鎖に守られた `if true` もここへ落ちる）
                             else if (open_kind == 1 || open_kind == 2) {
                                 depth++; uncertain++; uncertain_at[depth] = 1
+                                # **`case` の入れ子はここで数える。** 断片の先頭とは限らない
+                                # （`f() { case x in` のように本体の中で開くことがある）
+                                if (open_probe ~ /^case([[:space:]]|$)/) { case_depth++ }
                                 # **閉じた `fi` / `done` に付いた区切りは中身すべてに掛かる。**
                                 # grouping と同じで、控えないと `fi || true` が本体へ伝わらず、
                                 # 握り潰された実行が「ゲートしている」と読まれる（実測）
