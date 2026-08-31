@@ -3445,6 +3445,43 @@ jobs:
           bash ${SUITE_PATH} ;;
           esac"
 
+# `case_scope` をこの断片が開く `case` まで広げた副作用を固定する 3 件。
+# **入ってきた `|` が模様の区切りなのは模様の位置にいたときだけ**——本物のパイプで
+# 入ってきた断片がたまたまアーム見出しを含む場合まで見送ると、子シェルの `set +e` を
+# 親に効いたものとして扱う
+assert_wired "本物のパイプの右側の case アームの set +e は漏れない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          echo x | { case zz in zz) set +e ;; esac; }
+          bash ${SUITE_PATH}"
+
+# アームの `set` を記録する階層は「`case` までに開いた分」。頭一致で +1 に決め打ちすると、
+# `case` の前に別の開きがある綴りで記録側が浅くなり、同じアームの `set -e` が打ち消せない
+assert_wired "ブレースの中の case アームでも set -e で打ち消せる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          { case x in a) set +e ; set -e ;; esac; }
+          bash ${SUITE_PATH}"
+
+assert_wired "関数の中の case アームでも set -e で打ち消せる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { case x in a) set +e ; set -e ;; esac; }
+          f
+          bash ${SUITE_PATH}"
+
 # 模様の**途中**に来た `esac` は模様であって閉じ語ではない（先頭に来たものだけが
 # 空の `case` の終わり）。深さの走査と `case_depth` の走査の**両方**を揃えないと、
 # 片方だけが数えて `case_scope` が偽になり、本物のアームの `set` が見つからなくなる
