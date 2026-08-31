@@ -1197,8 +1197,16 @@ ci_workflow_extract() {
             return s2
         }
 
-        function enclosing_fndef_depth(d, at,   k) {
-            for (k = d; k >= 1; k--) { if (at[k]) { return k } }
+        # 内側から見て、**走るかどうかがそこで決まる**一番内側の階層を返す（無ければ 0）。
+        # 関数の台帳で「同じところで落として戻したか」を測るのに使う。
+        # **素の深さでは測れない**（ブレースグループや `if true` の本体は同じシェルで必ず走るので、
+        # そこで戻した `set -e` は本文で戻したのと同じ）。**関数の階層まで一気に畳んでもいけない**
+        # ——`f() { set +e; if [ -n "$X" ]; then set -e; fi; }` の `set -e` は条件次第でしか
+        # 走らないのに打ち消しが成立し、握り潰された関数が「戻している」と読まれる
+        # （fail-open。レビューで実測）。そこで**走るか分からない階層（`uncertain_at`）と
+        # 関数定義の階層（`fndef_at`）で止まり、必ず走る階層は透かす**
+        function enclosing_scope_depth(d, unc_at, fn_at,   k) {
+            for (k = d; k >= 1; k--) { if (unc_at[k] || fn_at[k]) { return k } }
             return 0
         }
 
@@ -1734,7 +1742,7 @@ ci_workflow_extract() {
                             # いる関数が「弱める関数」として残る（正しくゲートする綴りを赤くする。
                             # ブレースグループは同じシェルなので bash では打ち消せる。レビューで実測）
                             fn_body_depth = (fn_form == 2 || was_pending_fndef) ? depth + 1 \
-                                                                                : enclosing_fndef_depth(depth, fndef_at)
+                                                                                : enclosing_scope_depth(depth, uncertain_at, fndef_at)
                             # 台帳の打ち消しを認めてよい綴りか。強める向きを信用する条件から
                             # 「定義の外であること」だけを外したもの——ここは定義の**中**の話で、
                             # 見ているのは「この関数を呼んだあと errexit が有効か」だから

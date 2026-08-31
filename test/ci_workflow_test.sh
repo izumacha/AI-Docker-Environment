@@ -3461,6 +3461,26 @@ jobs:
           f
           bash ${SUITE_PATH}"
 
+# 締めすぎない側の裏返し（fail-open の防止）: 本文の中でも**走るとは限らない**階層の
+# `set -e` は打ち消しにならない。台帳の階層を関数の階層まで一気に畳むと、
+# `if [ -n "$X" ]; then set -e; fi` の 4 行で握り潰された関数が「戻している」に化ける
+assert_not_wired "条件の中の set -e は関数の握り潰しを打ち消さない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          set -e
+          f() {
+          set +e
+          if [ -n \"${DOLLAR}MAYBE\" ]; then
+          set -e
+          fi
+          }
+          f
+          bash ${SUITE_PATH}"
+
 # 最上位で定義した関数の台帳は、無関係な複合コマンドがフォークして閉じても消えない
 assert_not_wired "最上位の定義の台帳はフォークで消えない" "name: ci
 jobs:
