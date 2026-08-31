@@ -1078,6 +1078,30 @@ ci_workflow_extract() {
         # **`function_body_rest()` は使えない。** あちらは入れ子の見出しを**まとめて**落として
         # 最奥の命令を返す（`set` と呼び出しの探索が求める形）ので、途中の階層を数える
         # この用途では 1 つずつ落とす必要がある
+        # この断片が**開き側のループで開く階層の数**を、副作用なしで先に数える。
+        # `set` を関数ごとの台帳へ載せるときの階層は「断片の末尾で開き終わった後の深さ」だが、
+        # 開くのは断片の末尾なので、`set` を処理する時点ではまだ増えていない。
+        # 以前は「定義を開く断片なら +1」と決め打ちしていて、**1 断片が 2 つ開く綴り**
+        # （`f() { { set +e; set -e; }; }`）で記録側と打ち消し側の階層が 1 つずれ、
+        # 本文で戻している関数が「弱める関数」として残った（fail-closed。レビューで実測）
+        function count_opens(t, cached_fn_form, use_cached,   n, k, probe, rest) {
+            probe = t; n = 0
+            while (1) {
+                # 1 周目だけ控えてある `fn_form` を使える（本文が `struct_text` そのもののため）
+                k = open_form(probe, cached_fn_form, (use_cached && n == 0))
+                # 何も開かない綴りと、見出しだけの綴り（次の `{` が本体）はここで終わり
+                if (k == 0 || k == 4) { break }
+                n++
+                # 本体が同じ断片の中で続く綴り以外は、そこで終わり
+                if (k != 3 && k != 5) { break }
+                rest = open_rest(probe, k)
+                # 1 文字も減らなければ打ち切る（開き側のループと同じ保険）
+                if (rest == probe) { break }
+                probe = rest
+            }
+            return n
+        }
+
         function open_rest(t, form,   s) {
             s = t
             # 関数定義なら、まず見出しを落とす（綴りは `function_head_re()` が唯一の源）
@@ -1685,7 +1709,7 @@ ci_workflow_extract() {
                             # 本体の階層が開くのは断片の末尾なので、`fn_form` だけを見ると
                             # 1 つ浅く控えてしまい、続く `set -e` と階層が一致せず打ち消せない
                             # （`f()` 改行 `{ set +e; set -e; }` が「弱める関数」に化ける。レビューで実測）
-                            fn_body_depth = depth + ((fn_form == 2 || was_pending_fndef) ? 1 : 0)
+                            fn_body_depth = depth + count_opens(struct_text, fn_form, 1)
                             # 台帳の打ち消しを認めてよい綴りか。強める向きを信用する条件から
                             # 「定義の外であること」だけを外したもの——ここは定義の**中**の話で、
                             # 見ているのは「この関数を呼んだあと errexit が有効か」だから
@@ -2101,7 +2125,13 @@ ci_workflow_extract() {
                                 depth++; uncertain++; uncertain_at[depth] = 1
                                 fndef++; fndef_at[depth] = 1
                                 # この階層の本文がどの関数のものかを控える（呼び出しで引くため）
-                                fndef_name[depth] = function_name(open_probe)
+                                # **1 つの断片の中で入れ子に定義した関数は、外側の名前で台帳に載せる。**
+                                # `set` を探す側は `function_body_rest()` が最奥の本文まで一気に
+                                # 落とした結果を**外側の定義の断片で**読むので、内側の名前で控えると
+                                # 記録した名前と参照する名前が食い違い、呼んでも反映されない
+                                # （fail-open。レビューで実測）
+                                fndef_name[depth] = first_open ? function_name(open_probe) \
+                                                               : enclosing_fndef_name(depth - 1, fndef_at, fndef_name)
                             }
                             # 見出しだけの綴りは深さを動かさず、次の `{` を関数本体として予約する
                             # 名前も一緒に控える（次の `{` が本体を開いたときに引き継ぐ）
@@ -2165,8 +2195,14 @@ ci_workflow_extract() {
                         # **`case` の中と `case` を開く断片では見送る。** アーム模様の `|`
                         # （`a|b)`）は選択肢の区切りであってパイプではなく、`split_commands` は
                         # そこでも切るため、区別が付かない（見送る側は従来どおりの扱いに戻るだけ）
+                        # **`case` の中か、この断片が `case` を開いたかは `case_depth` で見る。**
+                        # `^case` で見ると、`{ case zz in (zz|yy) …` のように `case` が断片の
+                        # 先頭に無い綴りでアーム模様の `|` をパイプと読み、囲っている階層に
+                        # 子シェルの印を付けてしまう（そのアームの `set +e` が丸ごと捨てられ、
+                        # 握り潰されたスイートが「ゲートしている」と読まれる fail-open。レビューで実測）。
+                        # 開き側のループを通った後なので、`case_depth` はこの断片の分まで数え終えている
                         if (depth > depth_before && (pipe_in || ops[j] == "|") \
-                            && case_before == 0 && struct_text !~ /^case([[:space:]]|$)/ \
+                            && case_depth == 0 \
                             && !subshell_at[depth_before + 1]) {
                             subshell_at[depth_before + 1] = 1; subshell++
                         }

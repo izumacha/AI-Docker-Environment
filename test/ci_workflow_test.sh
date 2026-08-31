@@ -3280,6 +3280,48 @@ jobs:
           f() { bash ${SUITE_PATH}; }
           f"
 
+# 1 断片が 2 つ以上開けるようになった副作用を固定する 3 件（いずれもレビューで実測）。
+# **`case` が断片の先頭に無い綴りでも、アーム模様の `|` はパイプではない。**
+# `^case` で見るとアーム模様をパイプと読み、囲っている階層に子シェルの印を付けて
+# そのアームの `set +e` を丸ごと捨てる（握り潰しが「ゲート」に化ける fail-open）
+assert_not_wired "ブレースの中で開いた case の選択肢アームの set +e は数える" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          { case zz in (zz|yy) : ; set +e ;; esac; }
+          bash ${SUITE_PATH}"
+
+# **1 断片の中で入れ子に定義した関数は、外側の名前で台帳に載せる。**
+# `set` を探す側は最奥の本文まで一気に落とした結果を外側の定義の断片で読むので、
+# 内側の名前で控えると記録と参照の名前が食い違い、呼んでも反映されない
+assert_not_wired "入れ子の 1 行定義の本文の set +e も、呼べば効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          g() { f() { set -e; set +e; }; f; }
+          g
+          bash ${SUITE_PATH}"
+
+# **台帳の階層は「断片の末尾で開き終わった後の深さ」**。「定義を開く断片なら +1」と
+# 決め打ちすると、1 断片が 2 つ開く綴りで記録側と打ち消し側が 1 つずれ、
+# 本文で戻している関数が「弱める関数」として残る（正しくゲートする綴りを赤くする）
+assert_wired "本体がブレースで囲まれていても set -e で打ち消せる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { { set +e; set -e; }; }
+          f
+          bash ${SUITE_PATH}"
+
 # 締めすぎない側: 定義の**後ろ**の最上位のコードは今までどおり最上位として読む
 assert_wired "入れ子の 1 行定義の次の行の呼び出しは最上位" "name: ci
 jobs:
