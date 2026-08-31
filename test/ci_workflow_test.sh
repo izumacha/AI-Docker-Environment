@@ -3401,6 +3401,50 @@ jobs:
           ;;
           esac"
 
+# アーム見出しを剥がすかどうかも「この断片が（先頭とは限らず）`case` を開くか」で見る。
+# 先頭一致だと `{ case never in match) …` で前置きごと模様と読み、`case … in match)` を
+# 丸ごと落として階層が 1 つも開かない
+assert_not_wired "ブレースの中の 1 行 case でもアームの中身は最上位ではない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          { case never in match) :
+          bash ${SUITE_PATH}
+          ;;
+          esac; }"
+
+# 模様を読み切ったかは **`case` の後ろの最初の `in`** で測る。1 本の貪欲な正規表現だと
+# アームの本体にある裸の `in` に引っ張られ、消費済みの模様を「まだ来ていない」と読む
+assert_not_wired "アームの本体に裸の in があっても模様は消費済み" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case never in match) echo hello in
+          ( : | cat \$(date) )
+          bash ${SUITE_PATH}
+          ;;
+          esac"
+
+# アームの終端として認める空の断片は `;;` と `;&` だけ。`|&` も空の断片を残すが
+# あれはパイプであって終端ではない（認めるとアームの本体の途中で模様の位置が立つ）
+assert_not_wired "|& はアームの終端ではない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case never in
+          match) echo x |& ( : | cat \$(date) )
+          bash ${SUITE_PATH} ;;
+          esac"
+
 # 模様の**途中**に来た `esac` は模様であって閉じ語ではない（先頭に来たものだけが
 # 空の `case` の終わり）。深さの走査と `case_depth` の走査の**両方**を揃えないと、
 # 片方だけが数えて `case_scope` が偽になり、本物のアームの `set` が見つからなくなる
