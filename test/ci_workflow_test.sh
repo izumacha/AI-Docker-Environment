@@ -3301,6 +3301,57 @@ jobs:
           }
           bash ${SUITE_PATH}"
 
+# 模様が `|` で切られた断片が**入ってくるパイプ**も持つ場合。入ってくる `|` は前の断片の
+# ものなので、出ていく `|` が模様の区切りでも子シェルの印は付ける
+assert_wired "パイプの右側の case で模様が切られていても子シェル" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          echo x | { case zz in zz|yy) set +e ;; esac; }
+          bash ${SUITE_PATH}"
+
+# `case_scope` は「先頭が `case` か」ではなく「この断片が `case` を開くか」で見る。
+# 先頭一致だけだと `{ case zz in (zz` / `f() { case zz in (zz` でアーム模様の `(` が
+# 本物の部分シェルとして数えられ、そのアームの `set +e` が捨てられる
+assert_not_wired "ブレースの中の case の丸括弧付き選択肢アーム（同一断片）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          { case zz in (zz|yy) set +e ;; esac; }
+          bash ${SUITE_PATH}"
+
+assert_not_wired "関数の中の case の丸括弧付き選択肢アーム（同一断片）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { case zz in (zz|yy) set +e ;; esac; }
+          f
+          bash ${SUITE_PATH}"
+
+# 模様の**途中**に来た `esac` は模様であって閉じ語ではない（先頭に来たものだけが
+# 空の `case` の終わり）。深さの走査と `case_depth` の走査の**両方**を揃えないと、
+# 片方だけが数えて `case_scope` が偽になり、本物のアームの `set` が見つからなくなる
+assert_not_wired "模様の途中の esac は閉じ語ではない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case zz in
+          (done|esac|zz) set +e ;;
+          esac
+          bash ${SUITE_PATH}"
+
 assert_not_wired "ブレースの中で開いた case の選択肢アームの set +e は数える" "name: ci
 jobs:
   type-check:

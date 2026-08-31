@@ -1070,6 +1070,27 @@ ci_workflow_extract() {
             return 0
         }
 
+        # この断片が**開き側のループで `case` を開くか**を、副作用なしで先に答える。
+        # `^case` の頭一致では足りない——ループは `{ case zz in …` や `f() { case zz in …` の
+        # ように先頭でない `case` も開くのに、頭一致だけで `case_scope` を決めると
+        # アーム模様の `(` が本物の部分シェルとして数えられ、そのアームの `set +e` が
+        # 捨てられる（fail-open。レビューで実測）。辿り方は開き側のループと同じ
+        function walk_opens_case(t, cached_fn_form, use_cached,   n, k, probe, rest) {
+            probe = t; n = 0
+            while (1) {
+                k = open_form(probe, cached_fn_form, (use_cached && n == 0))
+                # `case` を開く形に当たったらそこで確定
+                if (k == 2 && probe ~ /^case([[:space:]]|$)/) { return 1 }
+                # 本体が同じ断片の中で続く綴り以外は、そこで終わり
+                if (k != 3 && k != 5) { return 0 }
+                n++
+                rest = open_rest(probe, k)
+                # 1 文字も減らなければ打ち切る（開き側のループと同じ保険）
+                if (rest == probe) { return 0 }
+                probe = rest
+            }
+        }
+
         # `open_form()` が返した形の**開き 1 つ分だけ**を先頭から落として、その後ろを返す。
         # 呼んでよいのは形 3（関数定義）と形 5（ブレース）だけ——**その 2 つだけが
         # 「開いた直後が命令の位置」**だから。条件の位置（`if <条件>` / `for … in <一覧>`）へは
@@ -1352,7 +1373,7 @@ ci_workflow_extract() {
         # **ここでは出力しない**のが要点で、ジョブ単位の無効化キー（`if: false` 等）は
         # YAML のキー順が自由である以上 `steps:` の**後ろ**にも書ける。書いた時点で
         # 出力済みのステップは取り消せないため、ジョブ 1 つ分を溜めてから出す
-        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, closed_any, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, arm_masked, arm_at, arm_expected, case_scope, opens_case, close_probe, close_rest, close_first, open_head, esac_probe, esac_rest) {
+        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, closed_any, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, arm_masked, arm_at, arm_expected, case_scope, opens_case, close_probe, close_rest, close_first, open_head, esac_probe, esac_rest, esac_first) {
             # **シェルのオプションはステップごとにリセットする。** ステップは 1 つずつ
             # 別のシェルで走るので、前のステップの `set +e` / `pipefail` は引き継がれない。
             # **控えるのは `set` で明示された分だけ（-1 = 明示なし）。** シェルの既定と突き合わせるのは
@@ -1517,7 +1538,10 @@ ci_workflow_extract() {
                         # ——写しを持つと片方だけを直したときに答えが割れる（実際、この写しの
                         # ずれがそのまま 2 件の fail-open になっていた。レビューで実測）
                         opens_case = (struct_text ~ /^case([[:space:]]|$)/)
-                        case_scope = (case_depth > 0 || opens_case)
+                        # **`case_scope` は「先頭が `case` か」ではなく「この断片が `case` を開くか」で見る**
+                        # （`opens_case` は先頭一致で、`open_head` の剥がし方と `set_depth` の
+                        #   ためにそのまま残してある。両者を混ぜると `{ case …` を取りこぼす）
+                        case_scope = (case_depth > 0 || walk_opens_case(struct_text, fn_form, 1))
                         set_arm_here = (case_scope && subshell == 0 && starts_case_arm(struct_text))
                         # **アーム見出しの後ろは命令の位置。** 剥がさないと、アームの中で開いた
                         # 複合コマンド（`a) for i in 1; do …` / `a) case $Y in`）が 1 つも数えられず、
@@ -1914,7 +1938,8 @@ ci_workflow_extract() {
                         # 階層が戻らず、以降が「まだ関数の本体の中」に見える。レビューで実測）
                         close_first = 1
                         while (close_probe ~ close_word_re() && depth > 0 \
-                               && !(close_first && arm_expected && close_probe !~ /^esac([[:space:]]|;|$)/)) {
+                               && !(close_first && arm_expected \
+                                    && (close_probe !~ /^esac([[:space:]]|;|$)/ || prev_op == "|"))) {
                             close_first = 0
                             if (uncertain_at[depth]) { uncertain--; uncertain_at[depth] = 0 }
                             if (group_start[depth] >= 1) { closed_group_start = group_start[depth] }
@@ -2125,16 +2150,9 @@ ci_workflow_extract() {
                         case_before = case_depth
                         # 開き側はこの断片の後ろから効く（`if` 自身は外側の階層にある）
                         # `case` の入れ子を数えておく（上のパターン判定に使う）
-                        # **次の断片がアーム模様の位置か**を控える（上の括弧の勘定が読む）。
-                        # `case … in` の直後だけが立ち、コマンドを 1 つ通れば降りる
-                        # （`;;` の跡は上の空の断片で立て直す）。
-                        # **その断片が模様まで載せていたら立てない**——1 行書きの
-                        # `case never in a) echo m | ( : | …` では模様は既に消費済みで、
-                        # 次の断片の先頭の `(` は本物の部分シェル。立てたままにすると
-                        # それを模様と読んで落とし、一致しないアームの中身が最上位に上がる
-                        # （fail-open。レビューで実測）
-                        # （代入は開き側のループの後——`case` は断片の先頭にあるとは限らず、
-                        #   開いたかどうかはループを通らないと分からない）
+                        # （アーム模様の位置＝`arm_expected` の代入は開き側のループの後にある。
+                        #   `case` は断片の先頭にあるとは限らず、開いたかどうかは
+                        #   ループを通らないと分からないため）
                         # **`case` の入れ子は `depth` とは独立に数える。** 閉じ側のループは
                         # `depth > 0` で止まるので、その中で数えると「階層は別の綴りが先に
                         # 閉じてしまい `esac` が深さ 0 で来る」場合に数え損ね、以降ずっと
@@ -2142,8 +2160,15 @@ ci_workflow_extract() {
                         #   綴りを赤くする。レビューで実測）。開く側は開き側のループが数える
                         # ——どちらも断片の先頭にあるとは限らないため `^esac` だけでは足りず、
                         # 断片に含まれる閉じ語をたどった結果で数える
+                        # **模様の位置の判定は閉じ側の走査と揃える。** 揃えないと、模様の中の
+                        # `esac`（`(done|esac|zz)`）で `case_depth` だけが減り、以降 `case_scope` が
+                        # 偽になって本物のアームの `set` が見つからなくなる（fail-open。レビューで実測）
                         esac_probe = text
-                        while (esac_probe ~ close_word_re()) {
+                        esac_first = 1
+                        while (esac_probe ~ close_word_re() \
+                               && !(esac_first && arm_expected \
+                                    && (esac_probe !~ /^esac([[:space:]]|;|$)/ || prev_op == "|"))) {
+                            esac_first = 0
                             if (esac_probe ~ /^esac([[:space:]]|;|$)/ && case_depth > 0) { case_depth-- }
                             esac_rest = drop_close_word(esac_probe)
                             if (esac_rest == esac_probe) { break }
@@ -2300,7 +2325,7 @@ ci_workflow_extract() {
                         # `case` を開く」綴りまで見送ってしまい、子シェルの中の `set +e` を
                         # 親に効いたものとして扱う（正しくゲートする綴りを赤くする。レビューで実測）
                         if (depth > depth_before && (pipe_in || ops[j] == "|") \
-                            && case_before == 0 && !(ops[j] == "|" && case_depth > 0) \
+                            && case_before == 0 && !(ops[j] == "|" && case_depth > 0 && !pipe_in) \
                             && !subshell_at[depth_before + 1]) {
                             subshell_at[depth_before + 1] = 1; subshell++
                         }
