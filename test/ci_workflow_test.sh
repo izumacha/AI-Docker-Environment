@@ -3322,6 +3322,53 @@ jobs:
           f
           bash ${SUITE_PATH}"
 
+# 台帳の名前は「`set` を探す側がどの名前に帰属させるか」に合わせる。断片の先頭が
+# 定義でないとき（`{ f() { …`）まで外側の名前へ寄せると名無しになり、
+# 記録そのものが落ちて握り潰しが見えなくなる
+assert_not_wired "ブレースの中で開いた定義の本文の set +e も、呼べば効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          { f() {
+          set +e
+          bash ${SUITE_PATH}
+          }
+          }
+          f
+          bash ${SUITE_PATH}"
+
+# **閉じ語も 1 断片に 2 つ以上載る。** 開き側が複数開けるのに閉じ側が 1 つしか
+# 閉じないと、以降が「まだ関数の本体の中」に見えて正しくゲートする綴りを赤くする
+assert_wired "1 断片に閉じ語が 2 つ載っても深さが戻る" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { if :; then
+          :
+          fi }
+          bash ${SUITE_PATH}"
+
+# アーム模様の位置も「この断片で `case` の入れ子が増えたか」で見る。
+# `^case` で見ると `{ case x in` の次の行の `(x|y)` を模様と読めず、
+# 幻の部分シェルが開いてアームの `set +e` が捨てられる
+assert_not_wired "ブレースの中で開いた case の次行の選択肢アームも読む" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          { case x in
+          (x|y) set +e ;;
+          esac; }
+          bash ${SUITE_PATH}"
+
 # 締めすぎない側: 定義の**後ろ**の最上位のコードは今までどおり最上位として読む
 assert_wired "入れ子の 1 行定義の次の行の呼び出しは最上位" "name: ci
 jobs:

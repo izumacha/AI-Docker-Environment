@@ -1070,14 +1070,6 @@ ci_workflow_extract() {
             return 0
         }
 
-        # `open_form()` が返した形の**開き 1 つ分だけ**を先頭から落として、その後ろを返す。
-        # 呼んでよいのは形 3（関数定義）と形 5（ブレース）だけ——**その 2 つだけが
-        # 「開いた直後が命令の位置」**だから。条件の位置（`if <条件>` / `for … in <一覧>`）へは
-        # 辿らない（そこに複合を書く綴りは `split_commands` が `;` で切った先にしか現れず、
-        # 推測で辿ると条件そのものを本体と取り違える）。
-        # **`function_body_rest()` は使えない。** あちらは入れ子の見出しを**まとめて**落として
-        # 最奥の命令を返す（`set` と呼び出しの探索が求める形）ので、途中の階層を数える
-        # この用途では 1 つずつ落とす必要がある
         # この断片が**開き側のループで開く階層の数**を、副作用なしで先に数える。
         # `set` を関数ごとの台帳へ載せるときの階層は「断片の末尾で開き終わった後の深さ」だが、
         # 開くのは断片の末尾なので、`set` を処理する時点ではまだ増えていない。
@@ -1102,6 +1094,14 @@ ci_workflow_extract() {
             return n
         }
 
+        # `open_form()` が返した形の**開き 1 つ分だけ**を先頭から落として、その後ろを返す。
+        # 呼んでよいのは形 3（関数定義）と形 5（ブレース）だけ——**その 2 つだけが
+        # 「開いた直後が命令の位置」**だから。条件の位置（`if <条件>` / `for … in <一覧>`）へは
+        # 辿らない（そこに複合を書く綴りは `split_commands` が `;` で切った先にしか現れず、
+        # 推測で辿ると条件そのものを本体と取り違える）。
+        # **`function_body_rest()` は使えない。** あちらは入れ子の見出しを**まとめて**落として
+        # 最奥の命令を返す（`set` と呼び出しの探索が求める形）ので、途中の階層を数える
+        # この用途では 1 つずつ落とす必要がある
         function open_rest(t, form,   s) {
             s = t
             # 関数定義なら、まず見出しを落とす（綴りは `function_head_re()` が唯一の源）
@@ -1345,7 +1345,7 @@ ci_workflow_extract() {
         # **ここでは出力しない**のが要点で、ジョブ単位の無効化キー（`if: false` 等）は
         # YAML のキー順が自由である以上 `steps:` の**後ろ**にも書ける。書いた時点で
         # 出力済みのステップは取り消せないため、ジョブ 1 つ分を溜めてから出す
-        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, closed_any, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, arm_masked, arm_at, arm_expected, case_scope, opens_case) {
+        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, closed_any, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, arm_masked, arm_at, arm_expected, case_scope, opens_case, close_probe, close_rest) {
             # **シェルのオプションはステップごとにリセットする。** ステップは 1 つずつ
             # 別のシェルで走るので、前のステップの `set +e` / `pipefail` は引き継がれない。
             # **控えるのは `set` で明示された分だけ（-1 = 明示なし）。** シェルの既定と突き合わせるのは
@@ -1864,7 +1864,13 @@ ci_workflow_extract() {
                         # 閉じ側。**その階層が「走るか分からない」側だったかを覚えておき**、
                         # 対応する分だけ戻す（`uncertain_at[]` が階層ごとの印）
                         closed_group_start = -1
-                        if (text ~ /^(fi|done|esac|\})([[:space:]]|;|$)/ && depth > 0) {
+                        # **閉じ語も 1 断片に 2 つ以上載る。** 開き側が 1 断片で複数開けるように
+                        # なった以上、閉じ側も同じだけ閉じられないと深さが戻らない
+                        # （`f() { if :; then` … `fi }` は bash では 2 つ閉じる。1 つしか
+                        #   閉じないと以降が「まだ関数の本体の中」に見え、正しくゲートしている
+                        #   呼び出しを「未配線」と誤報する。レビューで実測）
+                        close_probe = text
+                        while (close_probe ~ /^(fi|done|esac|\})([[:space:]]|;|$)/ && depth > 0) {
                             if (uncertain_at[depth]) { uncertain--; uncertain_at[depth] = 0 }
                             if (group_start[depth] >= 1) { closed_group_start = group_start[depth] }
                             if (fndef_at[depth]) { fndef--; fndef_at[depth] = 0 }
@@ -1875,6 +1881,11 @@ ci_workflow_extract() {
                             # 閉じる順は内側からなので、上書きし続ければ最後に残るのが一番外側
                             closed_entry_e = entry_errexit[depth]; closed_entry_p = entry_pipefail[depth]; closed_entry_seen = 1
                             depth--; closed_any = 1
+                            # 閉じた語の分だけ進める。**1 文字も減らなければ打ち切る**（無限ループ避け）
+                            close_rest = close_probe
+                            sub(/^(fi|done|esac|\})[[:space:]]*;?[[:space:]]*/, "", close_rest)
+                            if (close_rest == close_probe) { break }
+                            close_probe = close_rest
                         }
                         # **括弧は釣り合いで測る。** 閉じ側が断片の**先頭**に来るとは限らず、
                         # `( cd /tmp; echo hi )` のように末尾で閉じる書き方だと深さが戻らない
@@ -1927,7 +1938,7 @@ ci_workflow_extract() {
                             if (match(arm_masked, /\([^()]*$/)) {
                                 arm_at = RSTART
                                 if ((arm_at == 1 && arm_expected) \
-                                    || substr(arm_masked, 1, arm_at - 1) ~ /^case[[:space:]].*[[:space:]]in[[:space:]]*$/) {
+                                    || substr(arm_masked, 1, arm_at - 1) ~ /(^|[[:space:]])case[[:space:]].*[[:space:]]in[[:space:]]*$/) {
                                     paren_probe = substr(paren_probe, 1, arm_at - 1) substr(paren_probe, arm_at + 1)
                                 }
                             }
@@ -2010,6 +2021,10 @@ ci_workflow_extract() {
                         # 「最上位で確実に走る」**として記録される:
                         #     ( if false; then bash x; fi )   → 「配線されている」
                         # 剥がさなければ `then bash x` のまま当たらないので、生の本文が受け皿になっている。
+                        # **受け皿が効くのは畳んだ綴りだけ**——同じコードを複数行で書くと本文の断片が
+                        # `bash x` で始まるので、控える本文がどちらでも綴りに当たる（`( if false; then`
+                        # 改行 `bash x` 改行 `fi )` は `main` でも「配線されている」。この差分の外にある
+                        # 既存の穴で、塞ぐには開き側が `(` や実行ラッパの後ろの制御構造を読めるようにする必要がある）。
                         # `CI_WORKFLOW_COMMAND_START` の説明にある「条件やループの本体に置いた
                         # 呼び出しがゲートになるかは、その本体が何をするかを読まないと決まらない
                         # ——読めない以上は主張しない（fail-closed）」は、この受け皿のことでもある。
@@ -2060,7 +2075,8 @@ ci_workflow_extract() {
                         # 次の断片の先頭の `(` は本物の部分シェル。立てたままにすると
                         # それを模様と読んで落とし、一致しないアームの中身が最上位に上がる
                         # （fail-open。レビューで実測）
-                        arm_expected = (opens_case && !set_arm_here)
+                        # （代入は開き側のループの後——`case` は断片の先頭にあるとは限らず、
+                        #   開いたかどうかはループを通らないと分からない）
                         # `esac` は入れ子を 1 つ閉じる（開く側は下の開き側のループが数える
                         # ——`f() { case x in` のように `case` が断片の先頭に無い綴りでも
                         # 階層は開くので、`^case` で数えると勘定が合わない。レビューで実測）
@@ -2130,8 +2146,16 @@ ci_workflow_extract() {
                                 # 落とした結果を**外側の定義の断片で**読むので、内側の名前で控えると
                                 # 記録した名前と参照する名前が食い違い、呼んでも反映されない
                                 # （fail-open。レビューで実測）
-                                fndef_name[depth] = first_open ? function_name(open_probe) \
-                                                               : enclosing_fndef_name(depth - 1, fndef_at, fndef_name)
+                                # **台帳の名前は「`set` を探す側がどの名前に帰属させるか」に合わせる。**
+                                # 断片の先頭が定義なら `function_body_rest()` が入れ子の見出しを
+                                # まとめて落として最奥の本文を返す＝見つかる `set` は**先頭の**定義の
+                                # ものとして扱われるので、その断片で開くどの階層も先頭の名前で載せる
+                                # （内側の名前で控えると記録と参照が食い違い、呼んでも反映されない）。
+                                # 先頭が定義でなければ（`{ f() { …`）その経路は働かないので、
+                                # 各階層は自分の名前で載せる（外側の名前へ寄せると名無しになり、
+                                # 台帳への記録そのものが落ちる。どちらもレビューで実測）
+                                fndef_name[depth] = (fn_form == 2) ? function_name(struct_text) \
+                                                                   : function_name(open_probe)
                             }
                             # 見出しだけの綴りは深さを動かさず、次の `{` を関数本体として予約する
                             # 名前も一緒に控える（次の `{` が本体を開いたときに引き継ぐ）
@@ -2206,6 +2230,13 @@ ci_workflow_extract() {
                             && !subshell_at[depth_before + 1]) {
                             subshell_at[depth_before + 1] = 1; subshell++
                         }
+                        # **次の断片がアーム模様の位置か**を控える（上の括弧の勘定が読む）。
+                        # `case` を開いた断片の直後だけが立ち、その断片が模様まで載せていれば立てない。
+                        # **`^case` ではなく「この断片で `case` の入れ子が増えたか」で見る**——
+                        # `{ case x in` のように `case` が先頭に無い綴りでも階層は開くので、
+                        # 先頭で見ると次の行の `(x|y)` を模様と読めず、幻の部分シェルが開いて
+                        # アームの `set +e` が捨てられる（fail-open。レビューで実測）
+                        arm_expected = (case_depth > case_before && !set_arm_here)
                     }
                 }
             }
