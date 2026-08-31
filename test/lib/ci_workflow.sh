@@ -1880,6 +1880,12 @@ ci_workflow_extract() {
                             # 巻き戻し先はこの断片が閉じた**一番外側**の階層の入口（下の説明を参照）。
                             # 閉じる順は内側からなので、上書きし続ければ最後に残るのが一番外側
                             closed_entry_e = entry_errexit[depth]; closed_entry_p = entry_pipefail[depth]; closed_entry_seen = 1
+                            # **`case` の入れ子もここで数える。** 閉じ側が 1 断片で複数閉じられる
+                            # 以上、`esac` が断片の先頭にあるとは限らない（`fi esac`）。
+                            # `^esac` だけを見ると `depth` は正しく戻るのに `case_depth` だけが
+                            # 残り、以降の最上位のコードが「`case` の中」に見えてパイプの
+                            # 子シェル判定が外れる（正しくゲートする綴りを赤くする）
+                            if (close_probe ~ /^esac([[:space:]]|;|$)/ && case_depth > 0) { case_depth-- }
                             depth--; closed_any = 1
                             # 閉じた語の分だけ進める。**1 文字も減らなければ打ち切る**（無限ループ避け）
                             close_rest = close_probe
@@ -2077,10 +2083,8 @@ ci_workflow_extract() {
                         # （fail-open。レビューで実測）
                         # （代入は開き側のループの後——`case` は断片の先頭にあるとは限らず、
                         #   開いたかどうかはループを通らないと分からない）
-                        # `esac` は入れ子を 1 つ閉じる（開く側は下の開き側のループが数える
-                        # ——`f() { case x in` のように `case` が断片の先頭に無い綴りでも
-                        # 階層は開くので、`^case` で数えると勘定が合わない。レビューで実測）
-                        if (text ~ /^esac([[:space:]]|;|$)/ && case_depth > 0) { case_depth-- }
+                        # （`case` の入れ子は、開く側は下の開き側のループが、閉じる側は上の
+                        #   閉じ側のループが数える——どちらも断片の先頭にあるとは限らないため）
                         # **「必ず走る入れ子」と「走るか分からない入れ子」を分ける。**
                         # `( … )` / `{ … }` の grouping と `if true` / `while true` の本体は必ず走るので、
                         # 中の `set +e` は効くし、中の呼び出しは実行の証拠になる。

@@ -3354,6 +3354,24 @@ jobs:
           fi }
           bash ${SUITE_PATH}"
 
+# `case` の入れ子も閉じ側のループで数える。`^esac` だけを見ると `depth` は正しく戻るのに
+# `case_depth` だけが残り、以降の最上位のコードが「`case` の中」に見えて
+# パイプの子シェル判定が外れる（握り潰しでないものを握り潰しと読み、赤くする）
+assert_wired "1 断片の 2 つ目の esac も case の入れ子を戻す" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case a in
+          a)
+          if :; then
+          :
+          fi esac
+          echo x | while read -r l; do set +e; done
+          bash ${SUITE_PATH}"
+
 # アーム模様の位置も「この断片で `case` の入れ子が増えたか」で見る。
 # `^case` で見ると `{ case x in` の次の行の `(x|y)` を模様と読めず、
 # 幻の部分シェルが開いてアームの `set +e` が捨てられる
