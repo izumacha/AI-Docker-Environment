@@ -2946,10 +2946,16 @@ jobs:
           ) ; set +e ; }
           bash ${SUITE_PATH}"
 
-# (3) 1 行に畳んだ `if true; then …` の本体が実行の証拠にならなかった。
-# 断片が `then bash x` になり、コマンドの開始位置の綴りに当たらないため（fail-closed）。
-# 3 行に分けた同じコードは以前から `wired` で、**畳んだだけで答えが変わっていた**
-assert_wired "1 行の if true の本体は実行の証拠になる" "name: ci
+# (3) 1 行に畳んだ `if true; then …` の本体は、**意図的に**実行の証拠にしない。
+# issue #123 (3) はこれを直すよう求めており、控える本文を継続語を剥がした側
+# （`struct_text`）にすれば確かに直る。**だが同じ変更で fail-open が丸ごと開く**——
+# 開き側が読めない語で始まる断片（`( if false`・`time if …`・`eval if …`）では
+# 制御構造が分類されず `uncertain` も `dead_depth` も立たないため、1 度も走らない
+# 本体が「最上位で確実に走る」として記録される（下の 4 ケースで固定。実測で
+# `( if false; then bash x; fi )` が「配線されている」に化けた）。
+# 生の本文を控えていれば `then bash x` のまま綴りに当たらず、受け皿になる。
+# **畳んだ綴りを拾うのは、開き側が同じ語を読めるようになってから**
+assert_not_wired "1 行の if true の本体は実行の証拠にしない（fail-closed 側の受け皿）" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -2958,7 +2964,7 @@ jobs:
         run: |
           if true; then bash ${SUITE_PATH}; fi"
 
-assert_wired "1 行の while true の本体も実行の証拠になる" "name: ci
+assert_not_wired "1 行の while true の本体も実行の証拠にしない" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -2966,6 +2972,44 @@ jobs:
       - name: subject
         run: |
           while true; do bash ${SUITE_PATH}; break; done"
+
+# 上の受け皿が外れると一斉に穴になる 4 形。**開き側が読めない語で始まる断片**の後ろの
+# 継続語を命令の位置として扱うと、走らない本体が最上位の実行として記録される
+assert_not_wired "部分シェルの中の偽と分かる分岐の本体" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ( if false; then bash ${SUITE_PATH}; fi )"
+
+assert_not_wired "部分シェルの中の条件付き分岐の本体" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ( if [ -n \"${DOLLAR}X\" ]; then bash ${SUITE_PATH}; fi )"
+
+assert_not_wired "部分シェルの中のループの本体" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ( for f in a; do bash ${SUITE_PATH}; done )"
+
+assert_not_wired "実行ラッパの後ろに置いた偽と分かる分岐の本体" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          time if false; then bash ${SUITE_PATH}; fi"
 
 # 締めすぎない側: `then` を許したことで**条件の位置**まで通してはいけない。
 # `if bash x; then …` の呼び出しは落ちても `set -e` を発動させず job も止めない

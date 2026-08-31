@@ -1975,17 +1975,24 @@ ci_workflow_extract() {
                         # ジョブの控えへ積む。**判定に要る材料（直後の区切り・`set` の明示・深さ）ごと**渡し、
                         # ゲートかどうかの結論はジョブが確定するときに出す
                         nbuf++
-                        # **控えるのは命令の位置から見た本文**（`struct_text`）で、生の `text` ではない
-                        # （issue #123 (3)）。`split_commands` は `;` で切るので `if true; then bash x; fi`
-                        # の断片は `then bash x` になり、`ci_workflow_runs_script` の綴り
-                        # （`CI_WORKFLOW_COMMAND_START` に錨を張る）に当たらない。同じ意味を
-                        # 3 行に分けて書くと `then` が独立した断片になって当たるので、
-                        # **1 行に畳んだだけで答えが変わっていた**（fail-closed）。
-                        # `then` / `else` / `do` を許すのは安全である——本体が走るか分からない綴りは
-                        # `uncertain`（5 列目）が、走らないと分かる綴りは `dead_depth` が既に落としており、
-                        # 条件の位置に置いた呼び出し（`if bash x; then …`）は `if` が剥がれないので
-                        # そのまま当たらない
-                        buf[nbuf] = step_id "\t" ops[j] "\t" ((dead_depth >= 0 || unreachable) ? 0 : errexit) "\t" pipefail "\t" uncertain "\t" struct_text
+                        # **控えるのは生の本文（`text`）で、継続語を剥がした `struct_text` ではない。**
+                        # issue #123 (3) は「1 行に畳んだ `if true; then bash x; fi` も実行の証拠に
+                        # すべき」と言い（断片が `then bash x` になり `CI_WORKFLOW_COMMAND_START` に
+                        # 当たらないため）、実際 `struct_text` を控えればその 1 件は直る。
+                        # **だが同じ変更で fail-open が丸ごと開く**（実測）——`open_form()` が読めない
+                        # 語で始まる断片（`( if false`、`time if …`、`eval if …`、`! if …`）では
+                        # 制御構造そのものが分類されず、`uncertain` も `dead_depth` も立たない。
+                        # そこへ継続語を剥がした本文を控えると、**1 度も走らない本体が
+                        # 「最上位で確実に走る」**として記録される:
+                        #     ( if false; then bash x; fi )   → 「配線されている」
+                        # 剥がさなければ `then bash x` のまま当たらないので、生の本文が受け皿になっている。
+                        # `CI_WORKFLOW_COMMAND_START` の説明にある「条件やループの本体に置いた
+                        # 呼び出しがゲートになるかは、その本体が何をするかを読まないと決まらない
+                        # ——読めない以上は主張しない（fail-closed）」は、この受け皿のことでもある。
+                        # **畳んだ綴りを拾いたいなら、先に開き側が同じ語を読めるようにすること**
+                        # （`( … )` の中や実行ラッパの後ろの制御構造を分類できるようにする）。
+                        # 順序を逆にすると、直る 1 件と引き換えに上の 4 形が一斉に穴になる
+                        buf[nbuf] = step_id "\t" ops[j] "\t" ((dead_depth >= 0 || unreachable) ? 0 : errexit) "\t" pipefail "\t" uncertain "\t" text
                         # 偽と分かる条件のブロックに入るところを覚える（この深さより深い間は無効）
                         # **連鎖が続くなら条件は 1 語だけではない。** `split_commands` は `&&` / `||` で
                         # 切るので、`if false || true; then` の断片は `if false` になる。素直に
@@ -2023,8 +2030,7 @@ ci_workflow_extract() {
                         # `case` の入れ子を数えておく（上のパターン判定に使う）
                         # **次の断片がアーム模様の位置か**を控える（上の括弧の勘定が読む）。
                         # `case … in` の直後だけが立ち、コマンドを 1 つ通れば降りる
-                        # （`;;` の跡は上の空の断片で立て直す）
-                        # **次の断片がアーム模様の位置か。** `case … in` の直後だけが立つ。
+                        # （`;;` の跡は上の空の断片で立て直す）。
                         # **その断片が模様まで載せていたら立てない**——1 行書きの
                         # `case never in a) echo m | ( : | …` では模様は既に消費済みで、
                         # 次の断片の先頭の `(` は本物の部分シェル。立てたままにすると
