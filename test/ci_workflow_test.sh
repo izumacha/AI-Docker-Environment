@@ -3354,6 +3354,67 @@ jobs:
           fi }
           bash ${SUITE_PATH}"
 
+# **アーム見出しの後ろは命令の位置。** 剥がさないと、アームの中で開いた複合コマンドが
+# 1 つも数えられず、後の `esac` が外側の `case` の階層を閉じてしまう。
+# 「模様を消費したか」を `set_arm_here` で代用すると、外側のアームの中で内側の `case` を
+# 開く綴りで真になり、内側の模様（`(p|q)`）を読めずアームの `set +e` が捨てられる
+assert_not_wired "外側のアームの中で開いた case の選択肢アームも読む" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case ${DOLLAR}X in
+          a) case ${DOLLAR}Y in
+          (p|q) set +e ;;
+          esac ;;
+          esac
+          bash ${SUITE_PATH}"
+
+# アームの中で開いたループも数える（数えないと `done` が `case` の階層を閉じ、
+# 一致しないアームの中身が最上位のコードとして読まれる）
+assert_not_wired "アームの中で開いたループの後ろの呼び出しは最上位ではない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case never in
+          a) for i in 1; do :; done
+          bash ${SUITE_PATH}
+          ;;
+          esac"
+
+# **模様の位置では閉じ語も模様。** `done|other)` の `done` は模様であって
+# `do … done` の閉じではない。閉じ扱いすると `case` の階層をそこで畳み、
+# 直前のアームで見た `set +e` まで巻き戻される
+assert_not_wired "模様の位置の done は閉じ語ではない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case ${DOLLAR}X in
+          a) set +e ;;
+          done|other) : ;;
+          esac
+          bash ${SUITE_PATH}"
+
+# 締めすぎない側: 模様の位置に来た `esac` は空の `case` の終わりで、本当に閉じる
+assert_wired "模様の位置の esac は空の case を閉じる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case ${DOLLAR}X in
+          esac
+          bash ${SUITE_PATH}"
+
 # `case` の入れ子も閉じ側のループで数える。`^esac` だけを見ると `depth` は正しく戻るのに
 # `case_depth` だけが残り、以降の最上位のコードが「`case` の中」に見えて
 # パイプの子シェル判定が外れる（握り潰しでないものを握り潰しと読み、赤くする）
