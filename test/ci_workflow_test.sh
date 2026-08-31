@@ -3063,6 +3063,52 @@ jobs:
           ;;
           esac"
 
+# 同上。**断片の先頭にある `(` でも本物の部分シェルはある**ので、位置（`case … in` の
+# 直後か `;;` の直後か）で判断する。「先頭なら模様」「括弧の後ろが 1 語なら模様」の
+# どちらも `( :` に当たってしまい、一致しないアームの中身を最上位に引き上げる
+assert_not_wired "アーム本体の先頭に置いた部分シェルもアーム模様と混ぜない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case never in
+          a)
+          ( : | cat \$(date) )
+          bash ${SUITE_PATH}
+          ;;
+          esac"
+
+# 引用の中の `)` で釣り合いを測ると、本物の部分シェルの `(` を模様と読んでしまう
+assert_not_wired "引用の中の ) を含む部分シェルもアーム模様と混ぜない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case never in
+          a)
+          ( echo \"x)y\" | cat \$(date) )
+          bash ${SUITE_PATH}
+          ;;
+          esac"
+
+# 締めすぎない側: `;;` の**後ろ**は模様の位置なので、そこの丸括弧付き選択肢は今までどおり拾う
+assert_not_wired ";; の後ろの丸括弧付き選択肢アームの set +e は数える" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case x in
+          zzz) : ;;
+          (x|y) set +e ;;
+          esac
+          bash ${SUITE_PATH}"
+
 # (5) 1 断片が 2 つ開く関数定義で、閉じ側が関数の階層を食っていた。
 # **呼ばれていない関数の本文の残りが最上位のコードとして読まれる**ため、
 # 実際のコマンド一覧から外したスイートでも、呼ばれない関数の中に名前を書くだけで
