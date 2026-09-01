@@ -2836,6 +2836,1045 @@ unrelated:
     steps:
       - run: bash ${SUITE_PATH}"
 
+# --- 1 行に畳んでも答えが変わらないこと（issue #123）--------------------------------
+#
+# issue #123 の 5 件は「**複数行で書けば正しいのに、1 行に畳むと答えが変わる**」形に
+# 集約される。アーム見出し・複合コマンドの開き／閉じ・パイプの子シェル判定が
+# 同じ断片に同居したときの扱いが根で、向きは fail-closed（正しくゲートしている
+# ステップを赤くする）と fail-open（握り潰されたスイートを緑で通す）の両方があった。
+# 期待値はすべて実 `bash -eo pipefail` との差分照合で確かめてある。
+
+# (1) 複合コマンドが**パイプの左側**にあると、子シェルの印が一度も付かなかった。
+# 開き側の判定は「複合を開く断片に `|` が付いているとき」しか成立せず、
+# `split_commands` は `|` を `done` / `fi` / `}` の断片に付けるため（fail-closed）
+assert_wired "パイプの左のループの set +e は親へ漏れない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          while read -r l; do set +e; done < /dev/null | cat
+          bash ${SUITE_PATH}"
+
+assert_wired "パイプの左の if の set +e は親へ漏れない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          if true; then set +e; fi | cat
+          bash ${SUITE_PATH}"
+
+assert_wired "パイプの左のブレースグループの set +e は親へ漏れない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          { set +e; } | cat
+          bash ${SUITE_PATH}"
+
+# 締めすぎない側（fail-closed の防止）: 巻き戻すのは**子シェルの中で変わった分だけ**で、
+# 外側の階層で落とした `set +e` の記録は生きている。括りの途中にフォークする複合が
+# 挟まるだけで `set -e` が打ち消せなくなると、正しくゲートしているステップが
+# 恒常的に赤くなる（レビューで実測）
+assert_wired "括りの途中にフォークが挟まっても set -e は打ち消せる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          for f in a; do
+          set +e
+          { :; } | cat
+          set -e
+          done
+          bash ${SUITE_PATH}"
+
+assert_wired "括りの途中の if のフォークでも set -e は打ち消せる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          for f in a; do
+          set +e
+          if true; then :; fi | cat
+          set -e
+          done
+          bash ${SUITE_PATH}"
+
+# 締めすぎない側: `||` / `&&` / `;` はフォークしないので、握り潰しはそのまま親へ漏れる
+# （実 bash で確認済み。巻き戻す対象を広げると、本物の握り潰しを見逃す fail-open になる）
+assert_not_wired "|| で閉じたブレースグループの set +e は親へ漏れる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          { set +e; } || true
+          bash ${SUITE_PATH}"
+
+assert_not_wired "; で閉じたブレースグループの set +e は親へ漏れる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          { set +e; } ; true
+          bash ${SUITE_PATH}"
+
+# (2) 1 断片が `{` と `(` を同時に開くと、`(` の階層が開かなかった。
+# 内側の `)` が閉じた時点で子シェルの印が外れ、残りの `set +e` が親に効いたものとして
+# 扱われていた（fail-closed）
+assert_wired "1 断片で { と ( を同時に開いても深さが合う" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          echo x | { (
+          :
+          ) ; set +e ; }
+          bash ${SUITE_PATH}"
+
+# (3) 1 行に畳んだ `if true; then …` の本体は、**意図的に**実行の証拠にしない。
+# issue #123 (3) はこれを直すよう求めており、控える本文を継続語を剥がした側
+# （`struct_text`）にすれば確かに直る。**だが同じ変更で fail-open が丸ごと開く**——
+# 開き側が読めない語で始まる断片（`( if false`・`time if …`・`eval if …`）では
+# 制御構造が分類されず `uncertain` も `dead_depth` も立たないため、1 度も走らない
+# 本体が「最上位で確実に走る」として記録される（下の 4 ケースで固定。実測で
+# `( if false; then bash x; fi )` が「配線されている」に化けた）。
+# 生の本文を控えていれば `then bash x` のまま綴りに当たらず、受け皿になる。
+# **畳んだ綴りを拾うのは、開き側が同じ語を読めるようになってから**
+assert_not_wired "1 行の if true の本体は実行の証拠にしない（fail-closed 側の受け皿）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          if true; then bash ${SUITE_PATH}; fi"
+
+assert_not_wired "1 行の while true の本体も実行の証拠にしない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          while true; do bash ${SUITE_PATH}; break; done"
+
+# 上の受け皿が外れると一斉に穴になる 4 形。**開き側が読めない語で始まる断片**の後ろの
+# 継続語を命令の位置として扱うと、走らない本体が最上位の実行として記録される
+assert_not_wired "部分シェルの中の偽と分かる分岐の本体" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ( if false; then bash ${SUITE_PATH}; fi )"
+
+assert_not_wired "部分シェルの中の条件付き分岐の本体" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ( if [ -n \"${DOLLAR}X\" ]; then bash ${SUITE_PATH}; fi )"
+
+assert_not_wired "部分シェルの中のループの本体" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ( for f in a; do bash ${SUITE_PATH}; done )"
+
+assert_not_wired "実行ラッパの後ろに置いた偽と分かる分岐の本体" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          time if false; then bash ${SUITE_PATH}; fi"
+
+# 締めすぎない側: `then` を許したことで**条件の位置**まで通してはいけない。
+# `if bash x; then …` の呼び出しは落ちても `set -e` を発動させず job も止めない
+assert_not_wired "条件の位置に置いた呼び出しは実行の証拠にならない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          if bash ${SUITE_PATH}; then echo ok; fi"
+
+# 締めすぎない側: 走らないと分かる分岐の本体も通してはいけない
+assert_not_wired "1 行の if false の本体は実行の証拠にならない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          if false; then bash ${SUITE_PATH}; fi"
+
+# 締めすぎない側: 条件を読まないと決まらない分岐の本体も通してはいけない
+assert_not_wired "1 行の条件付き分岐の本体は実行の証拠にならない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          if [ -n \"${DOLLAR}CI\" ]; then bash ${SUITE_PATH}; fi"
+
+# 締めすぎない側: `case` のアームは**模様が一致するか読めない**ので、1 行書きでも
+# 実行の証拠にしない（複数行で書いた同じコードも従来どおり `not-wired`）。
+# issue #123 (3) はこれも `wired` にすべきと書いているが、それは
+# `case ${DOLLAR}X in (linux) bash …` を「必ず走る」と読むことになり fail-open
+assert_not_wired "1 行の case アームの本体は実行の証拠にならない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case linux in (linux) bash ${SUITE_PATH} ;; esac"
+
+# (4) 1 行の `case x in (a|b) …` が幻の部分シェルを開き、その断片の `set +e` が
+# すべて「子シェルの中」として捨てられていた（fail-open）
+assert_not_wired "1 行の丸括弧付き選択肢アームの set +e は数える" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case x in (x|y) set +e ;; esac
+          bash ${SUITE_PATH}"
+
+assert_not_wired "主語がコマンド置換でも選択肢アームの set +e は数える" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case ${DOLLAR}(uname) in (Linux|Darwin) set +e ;; esac
+          bash ${SUITE_PATH}"
+
+# 締めすぎない側: アームの**中身**に置いた本物の部分シェルは今までどおり子シェル
+assert_wired "選択肢アームの中の部分シェルの set +e は漏れない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case x in (x|y) ( set +e | cat ) ;; esac
+          bash ${SUITE_PATH}"
+
+# 締めすぎない側（fail-open の防止）: アーム模様の補償で**本物の**部分シェルを食わないこと。
+# 「閉じられていない最後の `(`」まで広げると `time ( : | cat )` の `(` が落ち、
+# 階層が開かないまま続く `)` がアームの階層を閉じて、**一致しないアームの中身が
+# 最上位のコード**として読まれる（レビューで実測。まさに *absence == pass* の形）。
+# アーム模様が現れるのは `in` の直後か断片の先頭だけなので、そこに限る
+assert_not_wired "case の中の前置き付き部分シェルはアーム模様と混ぜない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case never in
+          a)
+          time ( : | cat \$(date) )
+          bash ${SUITE_PATH}
+          ;;
+          esac"
+
+# 同上。**断片の先頭にある `(` でも本物の部分シェルはある**ので、位置（`case … in` の
+# 直後か `;;` の直後か）で判断する。「先頭なら模様」「括弧の後ろが 1 語なら模様」の
+# どちらも `( :` に当たってしまい、一致しないアームの中身を最上位に引き上げる
+assert_not_wired "アーム本体の先頭に置いた部分シェルもアーム模様と混ぜない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case never in
+          a)
+          ( : | cat \$(date) )
+          bash ${SUITE_PATH}
+          ;;
+          esac"
+
+# 引用の中の `)` で釣り合いを測ると、本物の部分シェルの `(` を模様と読んでしまう
+assert_not_wired "引用の中の ) を含む部分シェルもアーム模様と混ぜない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case never in
+          a)
+          ( echo \"x)y\" | cat \$(date) )
+          bash ${SUITE_PATH}
+          ;;
+          esac"
+
+# アームの**本体の途中**に行末の `;` があっても模様の位置は立たない。
+# 「空の断片＝`;;` の跡」とだけ読むと、行末のただの `;` でも立ってしまい、
+# 続く本物の部分シェルの `(` を模様と読む（`;` 1 文字でこの検査を外せる。レビューで実測）
+assert_not_wired "アーム本体の行末の ; では模様の位置は立たない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case never in
+          a) :;
+          ( : | cat \$(echo /dev/null) )
+          bash ${SUITE_PATH}
+          ;;
+          esac"
+
+# 締めすぎない側: `;;` の**後ろ**は模様の位置なので、そこの丸括弧付き選択肢は今までどおり拾う
+assert_not_wired ";; の後ろの丸括弧付き選択肢アームの set +e は数える" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case x in
+          zzz) : ;;
+          (x|y) set +e ;;
+          esac
+          bash ${SUITE_PATH}"
+
+# 模様まで同じ断片に載っている 1 行書きでは、**次**の断片は模様の位置ではない。
+# 立てたままにすると、その先頭の `(`（本物の部分シェル）を模様と読んで落とす
+assert_not_wired "模様を消費した断片の次は模様の位置ではない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case never in a) echo m | ( : | cat \$(date) )
+          bash ${SUITE_PATH}
+          ;;
+          esac"
+
+# `case` は断片の先頭にあるとは限らない（開き側のループが本体の中でも開く）。
+# `^case` だけで入れ子を数えると、アーム見出しの `)` が部分シェルの閉じとして
+# 数えられ、囲っている関数の階層まで巻き戻る（呼ばれない関数の中身が最上位に上がる）
+assert_not_wired "関数の本体の中で開いた case もアーム見出しを読む" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { case x in
+          a) : ;;
+          esac
+          bash ${SUITE_PATH}
+          }"
+
+# 締めすぎない側: `;&`（フォールスルー）の後ろも模様の位置
+assert_not_wired ";& の後ろの丸括弧付き選択肢アームの set +e は数える" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case x in
+          zzz) : ;&
+          (x|y) set +e ;;
+          esac
+          bash ${SUITE_PATH}"
+
+# (5) 1 断片が 2 つ開く関数定義で、閉じ側が関数の階層を食っていた。
+# **呼ばれていない関数の本文の残りが最上位のコードとして読まれる**ため、
+# 実際のコマンド一覧から外したスイートでも、呼ばれない関数の中に名前を書くだけで
+# 「配線されている」と報告できた（fail-open。`ci_coverage_test.sh` に直接効く）
+assert_not_wired "入れ子の 1 行定義の後ろの呼び出しは走らない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { g() { : ; }; bash ${SUITE_PATH}; }"
+
+assert_not_wired "本文に if を挟んだ 1 行定義の後ろの呼び出しは走らない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { if true; then :; fi; bash ${SUITE_PATH}; }"
+
+assert_not_wired "本文にループを挟んだ 1 行定義の後ろの呼び出しは走らない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { for x in a; do :; done; bash ${SUITE_PATH}; }"
+
+assert_not_wired "本文にブレースを挟んだ 1 行定義の後ろの呼び出しは走らない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { { :; }; bash ${SUITE_PATH}; }"
+
+# **呼んだ場合も入れ子でない定義と同じ答えになること。** 呼び出しの本文を実行の証拠に
+# しないのは「間接的な呼び出し（既知の限界）」の節で固定済みの fail-closed な扱いで、
+# 素の `f() { bash x; }` ＋ `f` も `not-wired` になる。修正前の入れ子の綴りは
+# ここだけ `wired` を返していたが、それは呼び出しを追えていたからではなく
+# **階層が 1 つ足りず本文が最上位のコードに見えていた**ためで、
+# 「呼ばない」ケースと答えが同じになっていた（＝呼ぶ／呼ばないを区別できていなかった）
+assert_not_wired "入れ子の 1 行定義でも、呼び出しの扱いは素の定義と同じ" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { g() { : ; }; bash ${SUITE_PATH}; }
+          f"
+
+assert_not_wired "素の 1 行定義を呼んだ場合（比較用の基準）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { bash ${SUITE_PATH}; }
+          f"
+
+# 1 断片が 2 つ以上開けるようになった副作用を固定する 3 件（いずれもレビューで実測）。
+# **`case` が断片の先頭に無い綴りでも、アーム模様の `|` はパイプではない。**
+# `^case` で見るとアーム模様をパイプと読み、囲っている階層に子シェルの印を付けて
+# そのアームの `set +e` を丸ごと捨てる（握り潰しが「ゲート」に化ける fail-open）
+# 締めすぎない側: 見送るのは「この断片から**出ていく** `|`」が模様の区切りでありうるときだけ。
+# 入ってくる `|` は前の断片に付いていたもので、`case` の外から来ている以上模様ではない
+# （まとめて見送ると、パイプの右側で `case` を開く綴りで子シェルの印が付かず、
+#   中の `set +e` が親に効いたものとして扱われる）
+assert_wired "パイプの右側で case を開いても子シェルとして扱う" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          echo x | { case zz in
+          zz) set +e ;;
+          esac
+          }
+          bash ${SUITE_PATH}"
+
+# 模様が `|` で切られた断片が**入ってくるパイプ**も持つ場合。入ってくる `|` は前の断片の
+# ものなので、出ていく `|` が模様の区切りでも子シェルの印は付ける
+assert_wired "パイプの右側の case で模様が切られていても子シェル" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          echo x | { case zz in zz|yy) set +e ;; esac; }
+          bash ${SUITE_PATH}"
+
+# `case_scope` は「先頭が `case` か」ではなく「この断片が `case` を開くか」で見る。
+# 先頭一致だけだと `{ case zz in (zz` / `f() { case zz in (zz` でアーム模様の `(` が
+# 本物の部分シェルとして数えられ、そのアームの `set +e` が捨てられる
+assert_not_wired "ブレースの中の case の丸括弧付き選択肢アーム（同一断片）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          { case zz in (zz|yy) set +e ;; esac; }
+          bash ${SUITE_PATH}"
+
+assert_not_wired "関数の中の case の丸括弧付き選択肢アーム（同一断片）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { case zz in (zz|yy) set +e ;; esac; }
+          f
+          bash ${SUITE_PATH}"
+
+# `case_depth` の走査の模様位置ガードは、控えてある `pipe_in` を読む。`prev_op` は
+# この断片の処理中に自分の区切りへ更新されるので、素直に書くと「前が `|`」ではなく
+# 「後ろが `|`」を意味し、`esac | cat` で `case_depth` だけが残る
+assert_wired "esac にパイプが付いても case の入れ子は戻る" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case zz in
+          a) : ;;
+          esac | cat
+          echo x | while read -r l; do set +e; done
+          bash ${SUITE_PATH}"
+
+# アーム見出しを剥がす位置は**伏せた写しで測る**（切るのは生の本文）。揃えないと
+# 引用の中の `)` で剥がす量がずれ、アームの中の複合コマンドが 1 つも数えられず、
+# 後の `done` が `case` の階層を閉じて一致しないアームの中身が最上位に上がる
+assert_not_wired "引用の中に ) を含むアーム見出しでも本文を数える" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case never in
+          \"a)b\") for i in 1; do
+          :
+          done
+          bash ${SUITE_PATH} ;;
+          esac"
+
+# 模様の位置は「この断片が**自分で開いた** `case` の模様を読み切ったか」で決める。
+# 「断片が `in` で終わるか」で見ると、1 行書きで模様が `|` に切られた形を取りこぼし、
+# 模様の途中の閉じ語（`done`）が `case` の階層を閉じてしまう
+assert_not_wired "1 行書きの (aa|done|cc) 模様でも閉じ語は模様" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case never in (aa|done|cc) : ;;
+          xx)
+          bash ${SUITE_PATH}
+          ;;
+          esac"
+
+# 括弧の勘定側のアーム見出し剥がしも伏せた写しで測る（3 か所すべて同じ規則に揃える）。
+# 揃えないと引用の中の `)` で剥がす量がずれ、残りの `)` が開いていない階層を閉じる
+assert_not_wired "引用の中の ) を含む模様でも括弧の勘定が合う" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case never in
+          \"a)b\"\"c)d\") ( : )
+          bash ${SUITE_PATH}
+          ;;
+          esac"
+
+# アーム見出しを剥がすかどうかも「この断片が（先頭とは限らず）`case` を開くか」で見る。
+# 先頭一致だと `{ case never in match) …` で前置きごと模様と読み、`case … in match)` を
+# 丸ごと落として階層が 1 つも開かない
+assert_not_wired "ブレースの中の 1 行 case でもアームの中身は最上位ではない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          { case never in match) :
+          bash ${SUITE_PATH}
+          ;;
+          esac; }"
+
+# 模様を読み切ったかは **`case` の後ろの最初の `in`** で測る。1 本の貪欲な正規表現だと
+# アームの本体にある裸の `in` に引っ張られ、消費済みの模様を「まだ来ていない」と読む
+assert_not_wired "アームの本体に裸の in があっても模様は消費済み" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case never in match) echo hello in
+          ( : | cat \$(date) )
+          bash ${SUITE_PATH}
+          ;;
+          esac"
+
+# アームの終端として認める空の断片は `;;` と `;&` だけ。`|&` も空の断片を残すが
+# あれはパイプであって終端ではない（認めるとアームの本体の途中で模様の位置が立つ）
+assert_not_wired "|& はアームの終端ではない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case never in
+          match) echo x |& ( : | cat \$(date) )
+          bash ${SUITE_PATH} ;;
+          esac"
+
+# `case_scope` をこの断片が開く `case` まで広げた副作用を固定する 3 件。
+# **入ってきた `|` が模様の区切りなのは模様の位置にいたときだけ**——本物のパイプで
+# 入ってきた断片がたまたまアーム見出しを含む場合まで見送ると、子シェルの `set +e` を
+# 親に効いたものとして扱う
+assert_wired "本物のパイプの右側の case アームの set +e は漏れない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          echo x | { case zz in zz) set +e ;; esac; }
+          bash ${SUITE_PATH}"
+
+# アームの `set` を記録する階層は「`case` までに開いた分」。頭一致で +1 に決め打ちすると、
+# `case` の前に別の開きがある綴りで記録側が浅くなり、同じアームの `set -e` が打ち消せない
+assert_wired "ブレースの中の case アームでも set -e で打ち消せる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          { case x in a) set +e ; set -e ;; esac; }
+          bash ${SUITE_PATH}"
+
+assert_wired "関数の中の case アームでも set -e で打ち消せる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { case x in a) set +e ; set -e ;; esac; }
+          f
+          bash ${SUITE_PATH}"
+
+# 記録側と打ち消し側は同じ階層を指す必要がある。記録は「その `set` が走る深さ」、
+# 打ち消しは「同じか、それより外側（＝より確実に走る）階層なら成立」。
+# 逆向き（外で落として内で戻す）は成立させない（すぐ下の対で固定）
+assert_wired "入れ子の 1 行定義でも本文の set -e で打ち消せる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { g() { set +e; set -e; }; :; }
+          f
+          bash ${SUITE_PATH}"
+
+assert_wired "アームで落として本文で戻す関数は弱めない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { case x in a) set +e ;; esac; set -e; }
+          f
+          bash ${SUITE_PATH}"
+
+assert_wired "アームの中のブレースで括った set +e … set -e" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case a in a|b) { set +e; set -e; } ;; esac
+          bash ${SUITE_PATH}"
+
+# 模様を読み切ったかは**一番内側＝最後の** `case … in` で測る。1 行に入れ子で書くと
+# 外側が先に来るので、最初の 1 つで測ると内側のアームの位置が立たない
+assert_not_wired "1 行の入れ子 case でも内側のアームの set +e を数える" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case \"${DOLLAR}OSTYPE\" in linux*) case \"${DOLLAR}CI\" in true|1) set +e ;; esac ;; esac
+          bash ${SUITE_PATH}"
+
+# 模様の**途中**に来た `esac` は模様であって閉じ語ではない（先頭に来たものだけが
+# 空の `case` の終わり）。深さの走査と `case_depth` の走査の**両方**を揃えないと、
+# 片方だけが数えて `case_scope` が偽になり、本物のアームの `set` が見つからなくなる
+assert_not_wired "模様の途中の esac は閉じ語ではない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case zz in
+          (done|esac|zz) set +e ;;
+          esac
+          bash ${SUITE_PATH}"
+
+assert_not_wired "ブレースの中で開いた case の選択肢アームの set +e は数える" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          { case zz in (zz|yy) : ; set +e ;; esac; }
+          bash ${SUITE_PATH}"
+
+# **1 断片の中で入れ子に定義した関数は、外側の名前で台帳に載せる。**
+# `set` を探す側は最奥の本文まで一気に落とした結果を外側の定義の断片で読むので、
+# 内側の名前で控えると記録と参照の名前が食い違い、呼んでも反映されない
+assert_not_wired "入れ子の 1 行定義の本文の set +e も、呼べば効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          g() { f() { set -e; set +e; }; f; }
+          g
+          bash ${SUITE_PATH}"
+
+# **台帳の階層は「断片の末尾で開き終わった後の深さ」**。「定義を開く断片なら +1」と
+# 決め打ちすると、1 断片が 2 つ開く綴りで記録側と打ち消し側が 1 つずれ、
+# 本文で戻している関数が「弱める関数」として残る（正しくゲートする綴りを赤くする）
+assert_wired "本体がブレースで囲まれていても set -e で打ち消せる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { { set +e; set -e; }; }
+          f
+          bash ${SUITE_PATH}"
+
+# 台帳の名前は「`set` を探す側がどの名前に帰属させるか」に合わせる。断片の先頭が
+# 定義でないとき（`{ f() { …`）まで外側の名前へ寄せると名無しになり、
+# 記録そのものが落ちて握り潰しが見えなくなる
+assert_not_wired "ブレースの中で開いた定義の本文の set +e も、呼べば効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          { f() {
+          set +e
+          bash ${SUITE_PATH}
+          }
+          }
+          f
+          bash ${SUITE_PATH}"
+
+# **閉じ語も 1 断片に 2 つ以上載る。** 開き側が複数開けるのに閉じ側が 1 つしか
+# 閉じないと、以降が「まだ関数の本体の中」に見えて正しくゲートする綴りを赤くする
+assert_wired "1 断片に閉じ語が 2 つ載っても深さが戻る" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { if :; then
+          :
+          fi }
+          bash ${SUITE_PATH}"
+
+# 模様の位置かどうかを見るのは**断片の先頭の閉じ語だけ**。2 つ目以降はもう模様ではない
+# （`esac }` の `}` を模様と読むと階層が戻らず、以降が「まだ関数の本体の中」に見える）
+assert_wired ";; の後ろの esac } は 2 つとも閉じる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { case x in
+          a) : ;; esac }
+          bash ${SUITE_PATH}"
+
+# `case` の入れ子は `depth` とは独立に数える。閉じ側のループは `depth > 0` で止まるので、
+# 「階層は別の綴りが先に閉じてしまい `esac` が深さ 0 で来る」場合に数え損ねると、
+# 以降ずっと「`case` の中」に見えてパイプの子シェル判定が外れる
+assert_wired "深さ 0 で来た esac も case の入れ子を戻す" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case zz in
+          zz) ! if false; then :; fi ;;
+          esac
+          echo x | while read -r l; do set +e; done
+          bash ${SUITE_PATH}"
+
+# 模様が `|` で複数の選択肢に切られていれば、その間ずっと模様の位置。
+# 1 つ目しか守らないと、選択肢を 1 つ増やすだけで `case` の階層が畳まれる
+assert_wired "2 つ目の選択肢に来た閉じ語も模様として読む" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case zz in
+          a|done|zz) : ;;
+          esac
+          echo x | while read -r l; do set +e; done
+          bash ${SUITE_PATH}"
+
+# `set` を記録する階層に数えるのは **`case` のアームの分だけ**。開いた階層の数
+# （`count_opens()`）に置き換えると、**ブレースグループは同じシェル**なのに
+# `{ set +e; }` の外の `set -e` が打ち消せなくなり、**`if set +e; then` の `set` は
+# 条件の位置＝外側の深さで走る**のに 1 つ深く記録される（どちらも正しくゲートする
+# 綴りを赤くする。レビューで実測）。この 2 つを対で固定する
+assert_wired "ブレースグループの外の set -e は打ち消せる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          for i in 1 2; do
+          { set +e; }
+          set -e
+          done
+          bash ${SUITE_PATH}"
+
+# 同じ 2 つを**関数の本文**でも固定する（台帳側の階層は別の変数で数えているので、
+# 片方だけ直すともう片方が黙って残る。実際この対が無かったために 1 巡見落とした）。
+# 台帳の階層は「その関数の本体の階層」であって `set` が走る階層ではない
+assert_wired "関数の本文でもブレースグループの外の set -e は打ち消せる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() {
+          { set +e; }
+          set -e
+          }
+          f
+          bash ${SUITE_PATH}"
+
+assert_wired "関数の本文でも条件の位置の set +e を打ち消せる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { if set +e; then :; fi; set -e; }
+          f
+          bash ${SUITE_PATH}"
+
+# 締めすぎない側の裏返し（fail-open の防止）: 本文の中でも**走るとは限らない**階層の
+# `set -e` は打ち消しにならない。台帳の階層を関数の階層まで一気に畳むと、
+# `if [ -n "$X" ]; then set -e; fi` の 4 行で握り潰された関数が「戻している」に化ける
+assert_not_wired "条件の中の set -e は関数の握り潰しを打ち消さない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          set -e
+          f() {
+          set +e
+          if [ -n \"${DOLLAR}MAYBE\" ]; then
+          set -e
+          fi
+          }
+          f
+          bash ${SUITE_PATH}"
+
+# 最上位で定義した関数の台帳は、無関係な複合コマンドがフォークして閉じても消えない
+assert_not_wired "最上位の定義の台帳はフォークで消えない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          quiet() { set +e; }
+          for f in a b; do echo \"${DOLLAR}f\"; done | sort
+          quiet
+          bash ${SUITE_PATH}"
+
+assert_wired "条件の位置の set +e も外側の set -e で打ち消せる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          for i in 1 2; do
+          if set +e; then :; fi
+          set -e
+          done
+          bash ${SUITE_PATH}"
+
+# **既知の締めすぎ（fail-closed）。** 関数の本文で子シェルの中に置いた `set +e` は、
+# 呼んでも呼び出し元へ漏れない（フォークするため）のに台帳へ残るので、呼び出しの時点で
+# 弱めたものとして扱われる。**巻き戻しを「閉じた階層より深い記録を落とす」形にすると
+# 直るが、それは fail-open を開く**——最上位で定義した関数（本文は深さ 1）が、無関係な
+# 複合コマンドが深さ 0 でフォークして閉じただけで台帳から消え、握り潰されたスイートが
+# 「ゲートしている」と読まれる（レビューで実測）。階層の数値だけでは「この複合の中で
+# 控えたか」を区別できないので、区別できる印を持たせるまでは締めすぎ側で固定する
+assert_not_wired "子シェルの中の set +e も関数の台帳には残る（既知の締めすぎ）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f311() {
+          case zz in (zz|yy) set +e ;; esac | cat
+          }
+          f311
+          bash ${SUITE_PATH}"
+
+# **アーム見出しの後ろは命令の位置。** 剥がさないと、アームの中で開いた複合コマンドが
+# 1 つも数えられず、後の `esac` が外側の `case` の階層を閉じてしまう。
+# 「模様を消費したか」を `set_arm_here` で代用すると、外側のアームの中で内側の `case` を
+# 開く綴りで真になり、内側の模様（`(p|q)`）を読めずアームの `set +e` が捨てられる
+assert_not_wired "外側のアームの中で開いた case の選択肢アームも読む" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case ${DOLLAR}X in
+          a) case ${DOLLAR}Y in
+          (p|q) set +e ;;
+          esac ;;
+          esac
+          bash ${SUITE_PATH}"
+
+# アームの中で開いたループも数える（数えないと `done` が `case` の階層を閉じ、
+# 一致しないアームの中身が最上位のコードとして読まれる）
+assert_not_wired "アームの中で開いたループの後ろの呼び出しは最上位ではない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case never in
+          a) for i in 1; do :; done
+          bash ${SUITE_PATH}
+          ;;
+          esac"
+
+# **模様の位置では閉じ語も模様。** `done|other)` の `done` は模様であって
+# `do … done` の閉じではない。閉じ扱いすると `case` の階層をそこで畳み、
+# 直前のアームで見た `set +e` まで巻き戻される
+assert_not_wired "模様の位置の done は閉じ語ではない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case ${DOLLAR}X in
+          a) set +e ;;
+          done|other) : ;;
+          esac
+          bash ${SUITE_PATH}"
+
+# 締めすぎない側: 模様の位置に来た `esac` は空の `case` の終わりで、本当に閉じる
+assert_wired "模様の位置の esac は空の case を閉じる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case ${DOLLAR}X in
+          esac
+          bash ${SUITE_PATH}"
+
+# `case` の入れ子も閉じ側のループで数える。`^esac` だけを見ると `depth` は正しく戻るのに
+# `case_depth` だけが残り、以降の最上位のコードが「`case` の中」に見えて
+# パイプの子シェル判定が外れる（握り潰しでないものを握り潰しと読み、赤くする）
+assert_wired "1 断片の 2 つ目の esac も case の入れ子を戻す" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case a in
+          a)
+          if :; then
+          :
+          fi esac
+          echo x | while read -r l; do set +e; done
+          bash ${SUITE_PATH}"
+
+# アーム模様の位置も「この断片で `case` の入れ子が増えたか」で見る。
+# `^case` で見ると `{ case x in` の次の行の `(x|y)` を模様と読めず、
+# 幻の部分シェルが開いてアームの `set +e` が捨てられる
+assert_not_wired "ブレースの中で開いた case の次行の選択肢アームも読む" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          { case x in
+          (x|y) set +e ;;
+          esac; }
+          bash ${SUITE_PATH}"
+
+# 締めすぎない側: 定義の**後ろ**の最上位のコードは今までどおり最上位として読む
+assert_wired "入れ子の 1 行定義の次の行の呼び出しは最上位" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { g() { : ; }; : ; }
+          bash ${SUITE_PATH}"
+
 # --- 言及と実行の区別 -------------------------------------------------------------
 
 assert_not_wired "echo の中の言及" "name: ci
