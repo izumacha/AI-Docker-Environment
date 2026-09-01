@@ -3482,6 +3482,53 @@ jobs:
           f
           bash ${SUITE_PATH}"
 
+# 記録側と打ち消し側は同じ階層を指す必要がある。記録は「その `set` が走る深さ」、
+# 打ち消しは「同じか、それより外側（＝より確実に走る）階層なら成立」。
+# 逆向き（外で落として内で戻す）は成立させない（すぐ下の対で固定）
+assert_wired "入れ子の 1 行定義でも本文の set -e で打ち消せる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { g() { set +e; set -e; }; :; }
+          f
+          bash ${SUITE_PATH}"
+
+assert_wired "アームで落として本文で戻す関数は弱めない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { case x in a) set +e ;; esac; set -e; }
+          f
+          bash ${SUITE_PATH}"
+
+assert_wired "アームの中のブレースで括った set +e … set -e" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case a in a|b) { set +e; set -e; } ;; esac
+          bash ${SUITE_PATH}"
+
+# 模様を読み切ったかは**一番内側＝最後の** `case … in` で測る。1 行に入れ子で書くと
+# 外側が先に来るので、最初の 1 つで測ると内側のアームの位置が立たない
+assert_not_wired "1 行の入れ子 case でも内側のアームの set +e を数える" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          case \"${DOLLAR}OSTYPE\" in linux*) case \"${DOLLAR}CI\" in true|1) set +e ;; esac ;; esac
+          bash ${SUITE_PATH}"
+
 # 模様の**途中**に来た `esac` は模様であって閉じ語ではない（先頭に来たものだけが
 # 空の `case` の終わり）。深さの走査と `case_depth` の走査の**両方**を揃えないと、
 # 片方だけが数えて `case_scope` が偽になり、本物のアームの `set` が見つからなくなる
