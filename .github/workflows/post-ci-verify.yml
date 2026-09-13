@@ -84,7 +84,7 @@ jobs:
         # against `v1`, which moves with every release and so resolves to a
         # different commit than the pin. Procedure: FR-9.6(b) of
         # docs/requirements.md.
-        uses: anthropics/claude-code-action@ef8bb1e43bf303cff727a1dd0b8837029fe982a2 # v1.0.215
+        uses: anthropics/claude-code-action@0a8d3c9443bbff909ab973b6a17a340b913f229f # v1.0.221
         env:
           GH_TOKEN: ${{ github.token }}
         with:
