@@ -357,5 +357,5 @@ OAuth トークンは必ず名前付きボリューム `claude-home` に置き�
 - REST API は `openapi/openapi.yaml`（OpenAPI 3.1）が契約の正本。`npm run gen` が `src/generated/openapi.d.ts` に型を生成し、`src/lib/api-types.ts` がアプリ側の名前で再公開する。新しいエンドポイントは「定義 → `gen` → 実装 → API テスト」の順で作る。
 - マルチテナントは行スコープ（全テーブルに `tenantId`、ADR-0002）。他テナントの資源は 404 で隠す（403 だと存在が漏れる）。
 - RBAC は `viewer` / `operator` / `admin` × `view` / `execute` / `stop` の許可表 `src/domain/rbac.ts` が唯一の真実の源（不明なら拒否）。
-- Prisma クライアントは `src/generated/prisma` に出力される。enum の正準は `src/domain/types.ts`（`as const` で定義し Prisma の実行時コードに依存しない。Prisma 側との一致はテストで固定）。`@/generated/prisma` の直接 import は ESLint が禁止し、例外は結線箇所の `src/lib/prisma.ts` / `src/lib/prisma-client.ts` だけ。結線は `createPrismaClient()` に集約。生成物（`src/generated/`）はコミットしない。
+- Prisma クライアントは `src/generated/prisma` に出力される。enum の正準は `src/domain/types.ts`（`as const` で定義し Prisma の実行時コードに依存しない。Prisma 側との一致はテストで固定）。`@/generated/prisma` の直接 import は ESLint が禁止し、例外は結線箇所の `src/lib/prisma.ts` / `src/lib/prisma-client.ts` と prisma アダプタ `src/data/adapters/prisma/` だけ（データ層は Ports & Adapters。契約 `src/data/ports/`、本番 `adapters/prisma/`、テスト `adapters/memory/`。ADR-0006）。結線は `createPrismaClient()` に集約。生成物（`src/generated/`）はコミットしない。
 - 金額はマイクロ USD の整数（`BigInt`）で持ち、JSON では文字列で運ぶ。API キーは SHA-256 ハッシュ（`keyHash`）と先頭数文字（`prefix`）だけを保存し、平文は発行応答でしか返さない。
