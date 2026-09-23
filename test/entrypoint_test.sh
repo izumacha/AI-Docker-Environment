@@ -194,18 +194,36 @@ assert_not_contains "REFUSING TO START" "refusal message NOT printed once acknow
 # スキップ関連の環境変数を両方とも未設定にした既定状態では、fail-closed の
 # 拒否メッセージも insecure-skip の警告バナーも出ないこと（＝どちらの SEC-13
 # 分岐にも入らず、通常の `else` 分岐で本物の init-firewall.sh 起動を試みる
-# こと）を確認する。テスト環境に /usr/local/bin/init-firewall.sh は存在しない
-# ため、この分岐は最終的に非ゼロで終了するが、その終了コードは fail-closed
-# 分岐の exit 1 とは区別できる（コマンド未検出は通常 127）。
+# こと）を確認する。
+#
+# **「1 で終わらないこと」だけを見てはいけない（fail-open）。** それだと
+# 「ファイアウォールを起動した」と「起動する行が消えた」を区別できず、実測で
+# 次の 3 つの変異がどれも 17/17 緑のまま通った:
+#   (a) 行を削除する            … 起動されないのに緑
+#   (b) 末尾に & を付ける       … ルートが 1 本も入る前に exec してしまうのに緑
+#   (c) 末尾に || true を付ける … いちばん危険。init-firewall.sh は自分の終端プローブで
+#       example.com へ到達できたとき exit 1 する（FR-4.6 / FR-4.7 / SEC-5）ので、
+#       || true はその fail-closed の判定を握り潰す。スクリプト自身が「壊れている」と
+#       宣言したファイアウォールのままコンテナが起動し、agent へ降格する。
+#       CI では init-firewall.sh が成功するため、緑の実行では挙動が同一になり
+#       **他のどの検査にも現れない**。
+#
+# そこで「起動を試みた」ことを示す信号そのものを見る。テスト環境に
+# /usr/local/bin/init-firewall.sh は存在しないので、その行に到達していれば
+# シェルはコマンド未検出の 127 で終了し、メッセージにパスが現れる（実測）。
+# 上の (a)(b)(c) はいずれもこの 2 つを満たせない。
 run_entrypoint -u AIDOCK_SKIP_FIREWALL -u AIDOCK_INSECURE_ACK
-assert_exit_ne 1 "default (no skip vars) does not exit with SEC-13's fail-closed code"
+assert_exit 127 "default (no skip vars) actually reaches the init-firewall.sh invocation (127 = command not found)"
+assert_contains "init-firewall.sh" "default path names init-firewall.sh (the invocation was not removed or silenced)"
 assert_not_contains "REFUSING TO START" "default path does not print the fail-closed refusal message"
 assert_not_contains "WARNING: egress firewall SKIPPED" "default path does not print the insecure-skip warning banner"
 
 # 明示的に AIDOCK_SKIP_FIREWALL=0（"1" 以外の値）を渡した場合も既定状態と
 # 同じくどちらの分岐にも入らないことを確認する（unset と "0" が同義であること）。
+# こちらも同じ理由で「起動を試みた」ことまで見る。
 run_entrypoint -u AIDOCK_INSECURE_ACK AIDOCK_SKIP_FIREWALL=0
-assert_exit_ne 1 "AIDOCK_SKIP_FIREWALL=0 behaves the same as unset (no SEC-13 branch)"
+assert_exit 127 "AIDOCK_SKIP_FIREWALL=0 behaves the same as unset (reaches init-firewall.sh)"
+assert_contains "init-firewall.sh" "AIDOCK_SKIP_FIREWALL=0 names init-firewall.sh (invocation not removed or silenced)"
 assert_not_contains "REFUSING TO START" "AIDOCK_SKIP_FIREWALL=0 does not print the fail-closed refusal message"
 
 # --- summary ----------------------------------------------------------------
