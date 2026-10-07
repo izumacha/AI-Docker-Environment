@@ -18,11 +18,19 @@
 # Hermetic: entrypoint.sh's two SEC-13 "skip" branches never reach
 # /usr/local/bin/init-firewall.sh (the failure path `exit 1`s first; the
 # acknowledged-skip path explicitly skips it), so only `gosu` needs a PATH
-# stub. The default/no-skip path is intentionally NOT hermetically exercised
-# here (invoking the real init-firewall.sh needs root/iptables/ipset and is
-# already covered by the e2e job's AC-1 startup probes against a real
-# container); this suite instead asserts that the default path takes neither
-# SEC-13 branch, i.e. it falls through to attempt the real firewall init.
+# stub. The default/no-skip path still does not RUN the real init-firewall.sh
+# (that needs root/iptables/ipset and is covered by the e2e job's AC-1 startup
+# probes against a real container), but it is asserted on: the suite checks
+# that the default path takes neither SEC-13 branch AND that it actually
+# reaches the init-firewall.sh invocation -- otherwise deleting, backgrounding
+# or `|| true`-ing that line would go undetected (all three were measured
+# green before those assertions existed).
+#
+# That check assumes /usr/local/bin/init-firewall.sh is ABSENT on the test
+# host, which is true on CI (runs-on: ubuntu-latest, no container) but false
+# inside this project's own image, where the Dockerfile installs it. A
+# precondition below fails fast with that reason rather than reporting a
+# confusing assertion failure.
 
 # エラー発生時に即座に停止し、未定義変数の参照もエラーにする（安全なスクリプト実行の基本設定）
 set -euo pipefail
@@ -36,6 +44,24 @@ ENTRYPOINT="${REPO_ROOT}/docker/entrypoint.sh"
 
 # gosu 呼び出しに到達したことを示すセンチネル文字列（gosu スタブが出力する）
 GOSU_SENTINEL="__AIDOCK_ENTRYPOINT_GOSU_REACHED__"
+
+# 既定パスの検査は「/usr/local/bin/init-firewall.sh がこのホストに存在しない」ことを
+# 前提にしている（存在しなければ起動が必ず失敗し、gosu に到達しないため）。
+#
+# **このスイートをコンテナの中で走らせるとその前提が崩れる。** docker/Dockerfile は
+# init-firewall.sh をまさにそのパスへ COPY して 0755 を与えるので、`./bin/aidock shell`
+# の中から実行すると (a) 前提が成り立たず検査が理由の分からない赤になり、
+# (b) root + NET_ADMIN なら**本物のファイアウォール初期化が走って稼働中の
+# iptables / ipset を作り直す**という副作用まで出る。
+#
+# 黙って誤検出するより、前提が崩れていることを名指しして止める（fail-closed）。
+if [[ -e /usr/local/bin/init-firewall.sh ]]; then
+    printf 'precondition failed: /usr/local/bin/init-firewall.sh exists on this host.\n' >&2
+    printf '  This suite must run OUTSIDE the container (CI does: runs-on ubuntu-latest).\n' >&2
+    printf '  Inside the image that path is installed, so the default-path assertions\n' >&2
+    printf '  cannot hold and running them would re-execute the real firewall init.\n' >&2
+    exit 1
+fi
 
 # テスト用の一時ディレクトリを作成する
 WORK="$(mktemp -d)"
@@ -97,23 +123,6 @@ assert_exit() {
     else
         # 不一致の場合は FAIL を記録し、詳細を出力する
         printf 'FAIL - %s (want exit %s, got %s)\n' "$desc" "$want" "$RC"
-        printf '       output: %s\n' "$OUT"
-        FAIL=$((FAIL + 1))
-    fi
-}
-
-# 終了コードが期待値と異なることを確認するアサーション（緩い回帰検出用）
-assert_exit_ne() {
-    # 一致してはいけない終了コード
-    local not_want="$1"
-    # テストの説明文
-    local desc="$2"
-    # 実際の終了コードが避けたい値と異なれば合格とする
-    if [[ "$RC" -ne "$not_want" ]]; then
-        printf 'ok   - %s\n' "$desc"
-        PASS=$((PASS + 1))
-    else
-        printf 'FAIL - %s (exit %s should not have occurred)\n' "$desc" "$RC"
         printf '       output: %s\n' "$OUT"
         FAIL=$((FAIL + 1))
     fi
@@ -194,18 +203,41 @@ assert_not_contains "REFUSING TO START" "refusal message NOT printed once acknow
 # スキップ関連の環境変数を両方とも未設定にした既定状態では、fail-closed の
 # 拒否メッセージも insecure-skip の警告バナーも出ないこと（＝どちらの SEC-13
 # 分岐にも入らず、通常の `else` 分岐で本物の init-firewall.sh 起動を試みる
-# こと）を確認する。テスト環境に /usr/local/bin/init-firewall.sh は存在しない
-# ため、この分岐は最終的に非ゼロで終了するが、その終了コードは fail-closed
-# 分岐の exit 1 とは区別できる（コマンド未検出は通常 127）。
+# こと）を確認する。
+#
+# **「1 で終わらないこと」だけを見てはいけない（fail-open）。** それだと
+# 「ファイアウォールを起動した」と「起動する行が消えた」を区別できず、実測で
+# 次の 3 つの変異がどれも 17/17 緑のまま通った:
+#   (a) 行を削除する            … 起動されないのに緑
+#   (b) 末尾に & を付ける       … ルートが 1 本も入る前に exec してしまうのに緑
+#   (c) 末尾に || true を付ける … いちばん危険。init-firewall.sh は自分の終端プローブで
+#       example.com へ到達できたとき exit 1 する（FR-4.6 / FR-4.7 / SEC-5）ので、
+#       || true はその fail-closed の判定を握り潰す。スクリプト自身が「壊れている」と
+#       宣言したファイアウォールのままコンテナが起動し、agent へ降格する。
+#       CI では init-firewall.sh が成功するため、緑の実行では挙動が同一になり
+#       **他のどの検査にも現れない**。
+#
+# そこで「起動を試みた」ことを示す信号そのものを見る。上の precondition が
+# /usr/local/bin/init-firewall.sh の不在を保証しているので、その行に到達すれば
+# 起動は必ず失敗し、`set -e` がそこで打ち切るため **gosu には到達しない**。
+#
+# 主たる判定は「gosu の番兵が出ていないこと」にする。終了コードの数値ではなく
+# 「ファイアウォールの失敗が起動を止めたか」という意味そのものを見ているので、
+# 不在（127）と実行不可（126）のどちらでも同じ結論になり、環境で揺れない。
+# 上の (a)(b)(c) はいずれも gosu へ到達してしまうので、この 1 本で全部落ちる。
+# 併せてメッセージにパスが現れることも見る（`2>/dev/null` や改名を捕まえる）。
 run_entrypoint -u AIDOCK_SKIP_FIREWALL -u AIDOCK_INSECURE_ACK
-assert_exit_ne 1 "default (no skip vars) does not exit with SEC-13's fail-closed code"
+assert_not_contains "${GOSU_SENTINEL}" "default (no skip vars) aborts at init-firewall.sh and never reaches gosu"
+assert_contains "init-firewall.sh" "default path names init-firewall.sh (the invocation was not removed or silenced)"
 assert_not_contains "REFUSING TO START" "default path does not print the fail-closed refusal message"
 assert_not_contains "WARNING: egress firewall SKIPPED" "default path does not print the insecure-skip warning banner"
 
 # 明示的に AIDOCK_SKIP_FIREWALL=0（"1" 以外の値）を渡した場合も既定状態と
 # 同じくどちらの分岐にも入らないことを確認する（unset と "0" が同義であること）。
+# こちらも同じ理由で「起動を試みた」ことまで見る。
 run_entrypoint -u AIDOCK_INSECURE_ACK AIDOCK_SKIP_FIREWALL=0
-assert_exit_ne 1 "AIDOCK_SKIP_FIREWALL=0 behaves the same as unset (no SEC-13 branch)"
+assert_not_contains "${GOSU_SENTINEL}" "AIDOCK_SKIP_FIREWALL=0 behaves the same as unset (aborts at init-firewall.sh)"
+assert_contains "init-firewall.sh" "AIDOCK_SKIP_FIREWALL=0 names init-firewall.sh (invocation not removed or silenced)"
 assert_not_contains "REFUSING TO START" "AIDOCK_SKIP_FIREWALL=0 does not print the fail-closed refusal message"
 
 # --- summary ----------------------------------------------------------------

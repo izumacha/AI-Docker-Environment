@@ -78,6 +78,11 @@ jobs:
         # reaching init-firewall.sh or gosu; the acknowledged-skip path
         # explicitly skips init-firewall.sh and only needs a PATH-stubbed
         # gosu to observe that `exec gosu agent "$@"` was reached.
+        # The default path is asserted on too (that it actually reaches the
+        # init-firewall.sh invocation), which relies on that path being ABSENT
+        # on the runner -- true here because this job runs directly on
+        # ubuntu-latest with no `container:`. The suite fails fast with that
+        # reason if the path is ever present, so it cannot silently mis-assert.
         run: bash test/entrypoint_test.sh
 
       - name: record-demo.sh fail-closed unit tests
