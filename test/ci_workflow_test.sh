@@ -3012,9 +3012,13 @@ jobs:
 # **深さの勘定だけ**で止まっている。
 # **止めているのは錨ではなく `top` の絞り込み**（`uncertain == 0` だけを通す）。
 # `for … do` / `until true` / 条件が読めない `if` はいずれも `uncertain` を立てるので、
-# 錨が継続語を許しても渡ってこない。だから `ci_workflow_runs_script` は
-# `CI_WORKFLOW_BLOCK_BODY_START` を使ってよい——**リンタ網（`top` を渡さない）とは
-# 事情が違う**（あちらは錨が唯一の歯止めなので狭いまま）。
+# 錨が継続語を許しても渡ってこない（**手前の `&&` / `||` に守られた `if true` も同じく
+# 渡ってこない**。`true_at` が直後の区切りしか見ていなかった分はレビューで直した）。
+# だから `ci_workflow_runs_script` は
+# `CI_WORKFLOW_BLOCK_BODY_START` を使ってよい——**`shellcheck` の網とは事情が違う**
+# （あちらは `top` を渡さないので錨が唯一の歯止め。なお `bash -n` の網も `top` を
+# 渡さないが広い錨を使う＝「`top` を渡さない照会はすべて狭い錨」ではない。
+# 選び分けの正本は `test/ci_coverage_test.sh` の「錨は網ごとに選び分ける」）。
 # 実 `bash -e`（末尾に成功する番兵を足して「失敗が中断させるか」を測る）を真値とした
 # 30 形の差分照合で、**7 形が改善し、新しい誤りは 0 形**だった
 for folded_certain_case in \
@@ -3033,6 +3037,28 @@ jobs:
       - name: subject
         run: |
           ${folded_certain_case#*:}"
+done
+
+# **手前の連鎖に守られた `if true` / `while true` は「必ず走る」ではない**（レビューで実測）。
+# `true_at` の印は**直後**の区切りしか見ていなかったので、`&&` / `||` で**入ってきた**断片の
+# `if true` が「必ず走る」と記録されていた。錨が継続語を許すようになった時点で、その本体が
+# 実行の証拠に化ける——実 `bash -e` では左辺が偽なら 1 度も走らないのに `wired` になる
+# （`&&` / `||` の並びは `set -e` を発動させない）。入ってきた区切りは `pipe_in` の隣で
+# 控える（`prev_op` は断片の処理中に自分の区切りへ更新されるので開き側まで持たない）
+for chain_guarded_case in \
+    "&& の後ろの if true:test -n \"${DOLLAR}RUN\" && if true; then bash ${SUITE_PATH}; fi" \
+    "偽と分かる && の後ろ:false && if true; then bash ${SUITE_PATH}; fi" \
+    "真と分かる || の後ろ:true || if true; then bash ${SUITE_PATH}; fi" \
+    "&& の後ろの while true:test -n \"${DOLLAR}RUN\" && while true; do bash ${SUITE_PATH}; break; done"
+do
+    assert_not_wired "${chain_guarded_case%%:*}の本体は実行の証拠にしない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${chain_guarded_case#*:}"
 done
 
 # **アームの走査は丸括弧がいくつ並んでも必ず終わる**（issue #123 の補足で、到達不能だった
@@ -4830,14 +4856,18 @@ jobs:
         run: for f in ${DOLLAR}LIST; do sudo bash -n \"${DOLLAR}f\"; done" \
     ci_workflow_step_matches "" "${CI_WORKFLOW_BLOCK_BODY_START}bash +-n([^[:alnum:]_]|$)"
 
-# **締めすぎの側**: 「本当に実行されるか」を問う照会は、ブロック本体の先頭を
-# 実行の証拠に数えないこと。ループが 0 回まわる場合があるので、こちらは
-# fail-closed に保つ必要がある（広げると握り潰されたスイートを緑で通す）。
+# **締めすぎの側**: 「本当に実行されるか」を問う照会は、**0 回まわりうるループの**本体を
+# 実行の証拠に数えないこと。**止めているのは錨ではなく `top` の絞り込み**
+# （`uncertain == 0` の記録だけを通す）で、issue #123 (3) 以降この照会は
+# `CI_WORKFLOW_BLOCK_BODY_START`＝継続語を許す錨を使っている。
 # **この 1 件は「どちらの定数でも通る」**（レビューで実測）——`for f in a` は
-# `open_form()` が形 2 として読むので本体は深さ 1 にあり、`runs_script` が渡す
-# `top` が錨に関係なく除くため。2 つの定数を 1 つに畳む変更を落とすのは
-# 上の `assert_not_wired` 群（`if true` / `while true` の 1 行書き・部分シェルの中の
-# 条件付き分岐とループ、計 4 件）で、ここはその結論を照会の入口で重ねて固定するだけ。
+# `open_form()` が形 2 として読むので本体は深さ 1 にあり、`top` が錨に関係なく除くため。
+# 2 つの定数を 1 つに畳む変更を落とすのは同じファイルの 2 件
+# （「ステップ単位: 旧い開始位置は 1 行書きに当たらない」と
+# 「コマンド単位: コマンドの位置の開始位置はループの本体を数えない」。どちらも上にある）で、
+# ここはその結論を照会の入口で重ねて固定するだけ。
+# **`if true` / `while true` の 1 行書きを挙げないこと**——issue #123 (3) で
+# `assert_wired` へ反転したので、畳む変異では落ちない（実測で確認した 2 件が上記）。
 # **「この 1 件が定数の区別を守っている」と読まないこと**
 assert_matcher no-match "実行網: 1 行に畳んだループの本体は実行の証拠に数えない" "name: ci
 jobs:

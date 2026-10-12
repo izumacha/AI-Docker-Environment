@@ -73,10 +73,14 @@ CI_WORKFLOW_COMMAND_PREFIXES='((sudo|env|nice|timeout|command|exec)[[:space:]]+|
 CI_WORKFLOW_GROUP_OPENERS='([(][[:space:]]*|\{[[:space:]]+)*'
 
 # **コマンドの開始位置**を表す正規表現の断片（上の前置きを読み飛ばす）。
-# **`top` を渡さない照会**（リンタの形を見る側）がこれを使う。あちらは制御構造の深さで
-# 絞らないので、錨が唯一の歯止めになる（issue #123 (3) で `ci_workflow_runs_script` は
-# こちらから `CI_WORKFLOW_BLOCK_BODY_START` へ移った。理由は下記）。
-# このライブラリ自身は使わなくなったので、`source` した側が読む（下の定数と同じ扱い）
+# **`shellcheck` の網だけがこれを使う**（`test/ci_coverage_test.sh`）。あちらは
+# `top` を渡さない＝制御構造の深さで絞らないので、錨が唯一の歯止めになる。
+# **「`top` を渡さない照会はすべて狭い錨」とは書かないこと**——`bash -n` の網も
+# `top` を渡さないが、あちらは一覧をループで回すほかに書きようが無いので
+# `CI_WORKFLOW_BLOCK_BODY_START` を使う（issue #114。選び分けの正本は
+# `test/ci_coverage_test.sh` の「錨は網ごとに選び分ける」）。
+# issue #123 (3) で `ci_workflow_runs_script` はこちらから下の定数へ移った（理由は下記）。
+# このライブラリ自身は使わなくなったので、`source` した側が読む
 # shellcheck disable=SC2034
 CI_WORKFLOW_COMMAND_START="^[[:space:]]*${CI_WORKFLOW_GROUP_OPENERS}${CI_WORKFLOW_COMMAND_PREFIXES}"
 
@@ -100,10 +104,12 @@ CI_WORKFLOW_COMMAND_START="^[[:space:]]*${CI_WORKFLOW_GROUP_OPENERS}${CI_WORKFLO
 # 実 `bash -e`（末尾に成功する番兵を足して「失敗が中断させるか」を測る）を真値とした
 # 30 形の差分照合で、**7 形が改善し新しい誤りは 0 形**。対は `test/ci_workflow_test.sh` の
 # 「1 行の… の本体は実行の証拠になる / にしない」2 群（11 件）。
-# **`top` を渡さない照会（リンタの形を見る側）は引き続き `CI_WORKFLOW_COMMAND_START`**
-# ——あちらは深さで絞らないので、錨を広げると 1 行書きの 0 回ループが配線に化ける
-# （issue #146 に残っている穴が、より手軽な綴りで開く）。
-# **2 つの照会で許す語が違うこと自体が意図**で、片方へ寄せてはいけない。
+# **`shellcheck` の網は引き続き `CI_WORKFLOW_COMMAND_START`**——あちらは `top` を
+# 渡さないので、錨を広げると 1 行書きの 0 回ループが配線に化ける（issue #146 に
+# 残っている穴が、より手軽な綴りで開く）。**`bash -n` の網はこちらを使う**
+# （issue #114。ループで回すほかに書きようが無いため、0 回まわりうる弱さを承知で受ける）。
+# **3 つの照会で許す語が違うこと自体が意図**で、1 つへ寄せてはいけない
+# （選び分けの正本は `test/ci_coverage_test.sh` の「錨は網ごとに選び分ける」）。
 #
 # **広げる前に、死に体の本体が除かれていることが前提。** 本体の先頭を命令の位置として
 # 認めると、`( if false; then shellcheck $LIST; fi )` の 1 行書きまで照合を満たしてしまう
@@ -116,8 +122,10 @@ CI_WORKFLOW_COMMAND_START="^[[:space:]]*${CI_WORKFLOW_GROUP_OPENERS}${CI_WORKFLO
 # 読み飛ばすのは 1 つだけにする（`do do …` のような綴りは bash として成り立たないので、
 # 繰り返しを許すと照合が緩むだけで得が無い）。`elif` は**条件**の位置であって本体ではないので
 # 入れない（入れると、通らない条件の中の綴りを配線の証拠に数える方向へ広がる）。
-# このライブラリ自身は使わず、`source` した側（`test/ci_coverage_test.sh`）が読む
-# shellcheck disable=SC2034
+# **この定数はライブラリ内（`ci_workflow_runs_script`）と `source` した側
+# （`test/ci_coverage_test.sh` の `bash -n` の網）の両方が読む。** issue #123 (3) で
+# 前者が加わったので `shellcheck disable=SC2034` は外した（参照が在るのに付けたままにすると、
+# 「何も変えない門番」が 1 つ増える）。
 # **グループの開きは `do` / `then` / `else` の後ろに置く。** 断片が `( do …` のように
 # 開きの直後に本体の語を持つ綴りは bash として成り立たないので、手前へ置くと
 # この定数では**一度も当たらない**（何も変えない門番＝読み手に「守られている」と
@@ -1807,7 +1815,7 @@ ci_workflow_extract() {
         # **ここでは出力しない**のが要点で、ジョブ単位の無効化キー（`if: false` 等）は
         # YAML のキー順が自由である以上 `steps:` の**後ろ**にも書ける。書いた時点で
         # 出力済みのステップは取り消せないため、ジョブ 1 つ分を溜めてから出す
-        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, closed_any, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, closed_subshell, closed_uncertain, arm_masked, arm_at, arm_expected, case_scope, opens_case, opens_case_here, case_opens_at, close_probe, close_rest, close_first, open_head, esac_probe, esac_rest, esac_first, dead_probe, dead_lead, close_n) {
+        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, closed_any, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, closed_subshell, closed_uncertain, chain_in, arm_masked, arm_at, arm_expected, case_scope, opens_case, opens_case_here, case_opens_at, close_probe, close_rest, close_first, open_head, esac_probe, esac_rest, esac_first, dead_probe, dead_lead, close_n) {
             # **シェルのオプションはステップごとにリセットする。** ステップは 1 つずつ
             # 別のシェルで走るので、前のステップの `set +e` / `pipefail` は引き継がれない。
             # **控えるのは `set` で明示された分だけ（-1 = 明示なし）。** シェルの既定と突き合わせるのは
@@ -2124,6 +2132,16 @@ ci_workflow_extract() {
                         # **入ってきた区切りをここで控える。** `prev_op` はこの断片の処理中に
                         # 自分の区切りへ更新されるので、開き側の判定まで持たない
                         pipe_in = (prev_op == "|")
+                        # **入ってきた `&&` / `||` も同じ理由でここで控える。** 下の `true_at`
+                        # （「本体は必ず走る」の印）は直後の区切りしか見ていなかったため、
+                        # `test -n "$RUN" && if true; then <呼び出し>; fi` のように**手前**で
+                        # 連鎖に守られた `if true` が「必ず走る」と記録されていた。
+                        # 錨が継続語を許すようになった時点で、その本体が**実行の証拠**に化ける
+                        # （実 `bash -e` では左辺が偽なら 1 度も走らないのに `wired`。
+                        #  レビューで実測。`&&` / `||` の並びは `set -e` を発動させない）。
+                        # **`prev_op` を下で読み直してはいけない**——`prev_op` は断片の処理中に
+                        # 自分の区切りへ更新されるので、開き側まで持たない（`pipe_in` と同じ事情）
+                        chain_in = (prev_op == "&&" || prev_op == "||")
                         # **入ってきた `|` が模様の区切りなのは、模様の位置にいたときだけ。**
                         # `set_arm_here` だけで見送ると、`echo x | { case zz in zz) set +e` の
                         # ように**本物のパイプ**で入ってきた断片がたまたまアーム見出しを含む場合まで
@@ -2819,7 +2837,7 @@ ci_workflow_extract() {
                             # ——`split_commands` は `&&` で切るので `if true && [ -z "$SKIP" ]; then` の
                             # 断片は `if true` になる。素直に「必ず走る」と読むと、2 トークン足すだけで
                             # 走るとは限らない本体が「最上位で確実に走る」に化ける（fail-open。実測）
-                            if (open_kind == 1 && ops[j] != "&&" && ops[j] != "||") {
+                            if (open_kind == 1 && !chain_in && ops[j] != "&&" && ops[j] != "||") {
                                 depth++; true_at[depth] = 1
                                 # **必ず走る入れ子なので grouping と同じ扱い。** 開始位置を控えないと、
                                 # 閉じた `fi` / `done` に付いた `|| true` が中身へ伝わらず、
