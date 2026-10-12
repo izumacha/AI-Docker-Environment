@@ -51,11 +51,30 @@
 # **コマンドの手前に置ける前置き**（実行ラッパと環境変数の代入）を表す断片。
 # 下の 2 つの開始位置が**同じ一覧**を読むためにここ 1 か所に置く——別々に書くと、
 # 片方だけが `sudo shellcheck …` のような等価な書き換えを認めなくなる（レビューで実測）
-CI_WORKFLOW_COMMAND_PREFIXES='((sudo|env|nice|timeout|command|exec)[[:space:]]+|[0-9]+[smhd]?[[:space:]]+|[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*'
+# **`time` も前置きに入れる**（`strip_struct_wrappers()` / `strip_command_prefixes()` が
+# 既に「自分では何も変えない飾り」として扱っているのと揃える）——`time bash x` は
+# スクリプトを実行し、その失敗もそのまま伝わる（`set -e` の下で `time false` は exit 1）のに、
+# 一覧に無いせいで「実行されていない」と**事実と逆の診断**を出していた（fail-closed。レビューで実測）。
+# `-p` は `time` にだけ続けられる形にする（素の `-p ` を前置きとして認めると、
+# 無関係な綴りの先頭を命令の位置と読む方向へ広がる）。綴りは
+# `strip_command_prefixes()` の `^time[[:space:]]+(-p[[:space:]]+)?` と揃える。
+# **`!` は入れない**——あちらは終了状態を**反転**するので、本当にゲートしない
+CI_WORKFLOW_COMMAND_PREFIXES='((sudo|env|nice|timeout|command|exec)[[:space:]]+|time[[:space:]]+(-p[[:space:]]+)?|[0-9]+[smhd]?[[:space:]]+|[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*'
+
+# **必ず走るグループの開き**（部分シェル `(` とブレースグループ `{`）を表す断片。
+# どちらも本体を無条件に走らせ、終了状態もそのまま伝える（`set -e` の下で
+# `{ false; }` も `( false )` も中断する）ので、**何個重なっていても命令の位置は変わらない**。
+# 1 つの `(` しか許していなかった頃は、`{ bash x; }` ・ `{ ( bash x ) }` ・ `( ( bash x ) )` が
+# 実際には走ってゲートしているのに「実行されていない」と**事実と逆の診断**で
+# 必須ジョブを赤くしていた（fail-closed。レビューで実測。しかもこの差分は深さの勘定に
+# 重ねた開きを教えた側なので、**錨だけが追いついていない**状態だった）。
+# **`{` は空白を必須にする**——`{bash x;}` は bash として成り立たない綴りなので、
+# 許すと `${VAR}` のような無関係な綴りまで命令の位置と読む方向へ広がるだけ
+CI_WORKFLOW_GROUP_OPENERS='([(][[:space:]]*|\{[[:space:]]+)*'
 
 # **コマンドの開始位置**を表す正規表現の断片（上の前置きを読み飛ばす）。
 # `ci_workflow_runs_script`（「本当に実行されるか」を問う側）がこれを使う。
-CI_WORKFLOW_COMMAND_START="^[(]?[[:space:]]*${CI_WORKFLOW_COMMAND_PREFIXES}"
+CI_WORKFLOW_COMMAND_START="^[[:space:]]*${CI_WORKFLOW_GROUP_OPENERS}${CI_WORKFLOW_COMMAND_PREFIXES}"
 
 # **ブロック本体の先頭**も開始位置として許す版（`do` / `then` / `else` を 1 つだけ読み飛ばす）。
 #
@@ -86,7 +105,14 @@ CI_WORKFLOW_COMMAND_START="^[(]?[[:space:]]*${CI_WORKFLOW_COMMAND_PREFIXES}"
 # 入れない（入れると、通らない条件の中の綴りを配線の証拠に数える方向へ広がる）。
 # このライブラリ自身は使わず、`source` した側（`test/ci_coverage_test.sh`）が読む
 # shellcheck disable=SC2034
-CI_WORKFLOW_BLOCK_BODY_START="^[(]?[[:space:]]*((do|then|else)[[:space:]]+)?${CI_WORKFLOW_COMMAND_PREFIXES}"
+# **グループの開きは `do` / `then` / `else` の後ろに置く。** 断片が `( do …` のように
+# 開きの直後に本体の語を持つ綴りは bash として成り立たないので、手前へ置くと
+# この定数では**一度も当たらない**（何も変えない門番＝読み手に「守られている」と
+# 誤解させるだけ。同ファイルがそう書いている）。実際に起きる綴りは逆順の
+# `for f in $LIST; do ( bash -n "$f" ); done` を 1 行に畳んだ `do ( bash -n "$f" )` で、
+# 手前に置いた版ではこれが no-match になり、**全ファイルが構文チェックされているのに
+# 「されていない」と事実と逆の診断**を出していた（レビューで実測）
+CI_WORKFLOW_BLOCK_BODY_START="^[[:space:]]*((do|then|else)[[:space:]]+)?${CI_WORKFLOW_GROUP_OPENERS}${CI_WORKFLOW_COMMAND_PREFIXES}"
 
 # **YAML のコメントが始まる位置**を表す正規表現の断片（行頭、または空白の直後の `#`）。
 # 値の途中の `#`（`name: a#b`）はコメントではないので、ここで空白を任意にしてはいけない
@@ -181,7 +207,19 @@ emit_structural_lines() {
         # `depth` = いまフロー形式（`{` `[`）の中にいる深さ
         function at_value_start(prev, gap, keyq, dashind, depth) {
             # 行頭（まだ何も見ていない）は、素のスカラーの継続行かどうかを決められないので
-            # 開始と認めない（決められないなら伏せない＝ fail-closed）
+            # 開始と認めない（決められないなら伏せない＝ fail-closed）。
+            # **この 1 行は現状どのテストにも守られていない**（`if (0) return 0` へ変えても
+            # 全 7 スイートが緑。issue #119 の補足 2 で実測）。ただし**消してよい行ではない**:
+            # awk の `index(s, "")` は **1 を返す**ので、下の 1 つ目の条件は `prev` が空でも
+            # `depth > 0` なら真になり、**行頭の引用符を値の開始と読んで中身を伏せ始める**
+            # （伏せる＝隠す向き＝fail-open）。いま到達しないのは `flowdepth` が
+            # `mask_quoted_flow_punctuation()` の局所変数で**行ごとに 0 から数え直す**ため、
+            # `depth > 0` が成り立つ行では必ず `{` か `[` を見ており `prev != ""` になるから。
+            # つまりこれは「フロー形式の深さを行をまたいで持ち越す」改修を入れた瞬間に
+            # 効き始める backstop で、**到達しないことは不変条件ではなく今の実装の副産物**。
+            # （以前ここと `docs/requirements.md` は「この条件を消しても fail-open が残る」
+            #   「`-` の `gap` を除くすべての変異がこのスイート単体で赤くなる」と書いていたが、
+            #   どちらも実測で誤り。issue #119 で記述をそろえた）
             if (prev == "") return 0
             # フロー形式の区切り（`{` `[` `,`）の直後。**フロー形式の中にいるときだけ**。
             # ブロック形式ではこの 3 文字はただの平文で、YAML の素のスカラーに普通に現れる
@@ -507,7 +545,10 @@ emit_structural_lines() {
                 # 残りは行の途中から始まるので、行頭まわりの位置の記憶（`seqzone` など）は
                 # 真っさらな状態から数え直される。ずれる向きは「引用と認める機会が増える」＝
                 # 引き継ぎが増える側で、引き継ぎは**伏せるのをやめる方向にしか効かない**ため
-                # 見逃しには倒れない（実測でも余分に赤くなるだけだった）
+                # 見逃しには倒れない（実測でも余分に赤くなるだけだった）。
+                # **これは「引き継ぎが 1 行増える」ことについての話**で、
+                # 引き継ぎが**永久に解けなくなる**（ラッチする）場合は別——そちらは
+                # 両向きに壊れる（issue #119。下の `open_type == ""` が塞いでいる）
                 if (ch == qt) {
                     # ここまでが「開いていた引用スカラーの中身」。引用符を落としたうえで
                     # `#` だけを代役へ置き換える（理由は関数のコメント）
@@ -562,8 +603,13 @@ emit_structural_lines() {
             # **引用スカラーの続きの行では伏せない。** 行頭側から見ると、その行に現れる引用符は
             # 「閉じる側」かもしれず、開始と読むと後ろの**本物の区切り**ごと伏せて `uses:` /
             # `secrets:` を見逃す（実測: `steps: [{name: "a,` の次行 `,", uses: "…"}]` で
-            # 可変タグが検査から消えた。**fail-open**）。この止め方は**伏せるのをやめる方向にしか
-            # 効かない**ので、閉じ位置の見立てを誤っても余分に赤くなるだけで見逃しには倒れない
+            # 可変タグが検査から消えた。**fail-open**）。
+            # **「伏せるのをやめる方向にしか効かない」とは書けない**（issue #119）。
+            # 閉じ位置の見立て自体は確かに余分に赤くなる側へ倒れるが、**続きかどうかの印
+            # （`open_type`）がラッチすると両向きに壊れる**: 伏せ処理が死ねば引用の中の `#` が
+            # 行を切って本物の `secrets:` が落ち（fail-open）、ブロックスカラー判定が死ねば
+            # 後続の `run: |` の本文が構造行として漏れる（fail-closed）。
+            # ラッチの経路は下の `open_type == ""` が塞いでいる
             # この行が引用スカラーの続きだったかを控える（下のブロックスカラー判定で使う）
             was_continuation = (open_type != "") ? 1 : 0
             if (open_type != "") {
@@ -596,7 +642,20 @@ emit_structural_lines() {
             # 読み飛ばし、**その中にある本物の `uses:` が抽出から丸ごと消える**
             # （実測: `- {name: "a` / `run: |` / `", uses: actions/evil@v1}` で可変タグが検査から
             # 消え、違反 0 件で通った。**fail-open**）
-            if (!was_continuation && probe ~ /^[[:space:]]*(-[[:space:]]+)?[a-z_][a-z0-9_.-]*[[:space:]]*:[[:space:]]*[|>]([0-9]*[+-]?|[+-]?[0-9]*)[[:space:]]*$/) {
+            # **その行を出ていく時点で引用が開いたままなら、やはりブロックスカラーを始めない**
+            # （issue #119 (1)(2)）。`was_continuation` は「その行に**入る**前の状態」しか見ないので、
+            # 1 行が「ブロックスカラーを開く」と「引用を開いたまま終わる」を**同時に**満たす形
+            # （`- run: "|`）では両方が立つ。すると次の行が本文として `next` で読み飛ばされ、
+            # **閉じ引用符を載せた行がその読み飛ばしに飲まれて** `open_type` が永久に閉じない
+            # ——以降そのファイル全体で伏せ処理とブロックスカラー判定が死ぬ。壊れ方は両向きで、
+            # 伏せ処理が死ぬと引用の中の `#` が行を切って本物の `secrets:` が落ち（**fail-open**。
+            # 特権ワークフローが read-only に化けて FR-9.6(b) のピン検査をすり抜ける）、
+            # ブロックスカラー判定が死ぬと後続の `run: |` の本文が構造行として漏れて
+            # 実在するスイートが「未配線」になる（**fail-closed**。実測で `NOT-WIRED` / 読み込み失敗）。
+            # **いったんラッチすると同じファイル内に回復経路が無い**ので、引用が閉じていない行は
+            # 引用スカラーの途中として扱う（＝ブロックスカラーに倒さない fail-closed 側）
+            if (!was_continuation && open_type == "" \
+                && probe ~ /^[[:space:]]*(-[[:space:]]+)?[a-z_][a-z0-9_.-]*[[:space:]]*:[[:space:]]*[|>]([0-9]*[+-]?|[+-]?[0-9]*)[[:space:]]*$/) {
                 in_scalar = 1
                 # 本文の範囲は**鍵の桁**で決める。ダッシュの桁で決めると、
                 # `- if: >-` の本文だけでなく**同じ手順の兄弟キー**（次行の `uses:` 等）まで
@@ -1097,11 +1156,42 @@ ci_workflow_extract() {
         # **本体のループは補正済みの `paren` を上限に使う**（アーム模様の `(` を除いた値で、
         # こちらより正確）。歩く側がそれを使えないのは、`paren` の算出が
         # `set_arm_here` → `case_scope` → `walk_opens_case()` に依存して循環するため。
-        # 食い違うのは「`|` で切られたアーム模様の `(`」だけで、そのときは必ず `case` の中
-        # （`case_depth > 0`）なので `case_scope` は別経路で真になり、判定は変わらない
+        # **食い違いは「`|` で切られたアーム模様の `(`」だけではない（issue #145）。**
+        # ここに「食い違っても判定は変わらない」と書いてあった断りは**実測で偽**だった:
+        # 1 行書きのアーム（丸括弧なしの `a)`）は**対応する `(` を持たない `)`** を持つので、
+        # 生の釣り合いではそれが先頭の `(` を打ち消して上限が 0 になる。すると
+        # `f() { ( case $X in a) :;; esac ; bash x ) }` で `case` の階層が開かず、
+        # 続く `esac` が**関数の階層**を閉じて、呼ばれていない本体が「最上位で確実に走る」
+        # として記録される（fail-open。`main` から続く既存の穴なので退行ではない）。
+        # 直すには釣り合いの補正そのものに手を入れる必要があり、そこは #142 のレビューで
+        # 3 件の退行を出した場所なので独立した差分として #145 で追う。
+        # **ここに「判定は変わらない」と書き戻さないこと。**
         function lead_subshell_cap(t,   d) {
             d = paren_delta(t)
             return (d > 0) ? d : 0
+        }
+
+        # 先頭に並ぶ部分シェルの開きを**越えた残り**を返し、**越えた数を `LEAD_SUBSHELLS` へ控える**
+        # （`cap` が越えられる上限）。
+        # **数え方をここ 1 か所に置く**のが要点（レビューで実測した退行）。歩く側で
+        # `while (n < cap …)` と書くと、`n` は**その断片で開いた階層すべて**の数なので
+        # 手前に `{` や `f() {` があるだけで上限に当たり、**`(` を 1 つも越えられない**
+        # （`{ ( if false; then :; fi ) ; bash x; }` で死に体の印が 2 階層浅くなり、
+        #  閉じた後も残って*走る*呼び出しが `not-wired` に化けた＝fail-closed）。
+        # 綴りの共有だけでは足りず、**算術も共有する**必要がある。
+        # **数と残りを 1 度の歩きで返す**のも同じ理由——「数える関数」と「落とす関数」に
+        # 分けると同じ前置きを 2 度歩くうえ、「その `k` はこの綴りから数えたものか」という
+        # **誰も強制していない約束**が生まれる（2 行を入れ替えるだけで数と文字列が黙ってずれ、
+        # どのテストからも見えない）。awk は値を 1 つしか返せないので、
+        # `mask_quoted()` が `MASK_*` でやっているのと同じくグローバルへ控える
+        function cross_lead_subshells(t, cap,   n, probe) {
+            probe = t; n = 0
+            while (n < cap && probe ~ subshell_open_re()) {
+                n++
+                sub(subshell_open_re(), "", probe)
+            }
+            LEAD_SUBSHELLS = n
+            return probe
         }
 
         function open_form(t, cached_fn_form, use_cached,   ff, probe) {
@@ -1139,6 +1229,21 @@ ci_workflow_extract() {
         # `if` が開く階層の**外**で走る（`strip_command_prefixes()` が `if ` を剥がして
         # 見つけるので、素直に数えると 1 つ深く記録して打ち消しが成立しなくなる）。
         # 逆にブレース・関数の本体・`case` のアームは中で走るので数える
+        #
+        # **ここには先頭の部分シェルを越える処理（`cross_lead_subshells()`）を置いていない**
+        # ——`last_deciding_open()` / `walk_opens_case()` には要るのに、ここには要らない
+        # 理由を残す（置き忘れではないので、見つけた人が「同じ分断だ」と読んで足さないため）。
+        # (a) `set` を探す `set_command()` は `strip_command_prefixes()` を通るが、あの一覧に
+        #     `(` を剥がす規則は**無い**（同関数の「`(` は入れない」の段落が理由を記録している）。
+        #     したがって釣り合っていない先頭の `(` の後ろに置いた `set` はそもそも見つからず、
+        #     `set_probe` が空のままここへ来ない（`( set +e; bash x )` が実例）。
+        # (b) 残る経路は `case` のアームの走査（`set_arm` を `)` の先へ進めてから探す形）だけで、
+        #     ここだけは `( case $M in a) set +e` のように先頭の `(` を持つ本文が届く。
+        #     **実測ではこの越える処理を足しても判定が 1 件も変わらない**
+        #     （総当たりの 680 通り ＋ 1 行アームを狙った 14 通り、差分 0）。
+        #     何も変えない門番を置くと、読み手に「守られている」と誤解させるだけなので置かない。
+        # **この前提が崩れたら（`(` を剥がす規則が増える・アーム以外の経路が増える）、
+        #   自前で導き直さず `cross_lead_subshells()` をここでも通すこと。**
         function set_open_depth(t, cached_fn_form, use_cached,   n, k, probe, rest) {
             probe = t; n = 0
             while (1) {
@@ -1146,7 +1251,7 @@ ci_workflow_extract() {
                 # 何も開かない綴りと見出しだけの綴りはここで終わり
                 if (k == 0 || k == 4) { break }
                 # `case` のアームの本文はその中で走る（`case` を数えてそこで終わり）
-                if (k == 2) { if (probe ~ case_word_re()) { n++ } break }
+                if (k == 2) { if (opens_case_word(probe)) { n++ } break }
                 # `if` / ループの後ろは条件・対象の位置なので、その階層は数えない
                 if (k == 1) { break }
                 # ブレースと関数の本体は中で走る
@@ -1164,17 +1269,17 @@ ci_workflow_extract() {
         # `+1` と決め打ちすると `f() { g() { set +e` のように**必ず走る階層を挟まずに
         # 2 つ開く**綴りで記録側だけ浅くなり、本文の `set -e` が打ち消せない
         # （正しくゲートする綴りを赤くする。レビューで実測）
-        function last_deciding_open(t, cached_fn_form, use_cached, pending,   n, k, last, probe, rest, cap) {
-            probe = t; n = 0; last = 0
+        function last_deciding_open(t, cached_fn_form, use_cached, pending,   n, k, last, probe, rest, cap, leadn) {
+            probe = t; n = 0; last = 0; leadn = 0
             cap = lead_subshell_cap(t)
             while (1) {
                 # **先頭の部分シェルも 1 階層**（本体のループが開くので数を合わせる）。
                 # ただし**決め手にはしない**——部分シェルは必ず走るので、走るかどうかが
-                # そこで決まる階層ではない
-                while (n < cap && probe ~ subshell_open_re()) {
-                    n++
-                    sub(subshell_open_re(), "", probe)
-                }
+                # そこで決まる階層ではない。
+                # **上限は越えた数（`leadn`）で数える**（`n` と共有すると手前の `{` だけで
+                # 上限に当たる。理由は `cross_lead_subshells()` の説明）
+                probe = cross_lead_subshells(probe, cap - leadn)
+                leadn += LEAD_SUBSHELLS; n += LEAD_SUBSHELLS
                 k = open_form(probe, cached_fn_form, (use_cached && n == 0))
                 # 何も開かない綴りと、見出しだけの綴りはここで終わり
                 if (k == 0 || k == 4) { break }
@@ -1196,22 +1301,21 @@ ci_workflow_extract() {
         # `{ case x in a) set +e` のように前に別の開きがあると 1 では足りない
         # （記録側と打ち消し側の階層が食い違い、同じアームの `set -e` が打ち消せなくなる。
         #   正しくゲートする綴りを赤くする。レビューで実測）
-        function walk_opens_case(t, cached_fn_form, use_cached,   n, k, probe, rest, cap) {
-            probe = t; n = 0
+        function walk_opens_case(t, cached_fn_form, use_cached,   n, k, probe, rest, cap, leadn) {
+            probe = t; n = 0; leadn = 0
             cap = lead_subshell_cap(t)
             while (1) {
                 # 先頭の部分シェルを越える。越えないと `( case $X in (a|b)` で
                 # `case` が見えず `case_scope` が偽になり、**アーム模様の `(` を
                 # 部分シェルの開きとして数える補正が働かない**（釣り合いが 1 つ多く
                 # 膨らんで階層が閉じ切らず、以降の `set +e` がすべて
-                # 「子シェルの中」として無視される。issue #142 のレビューで実測）
-                while (n < cap && probe ~ subshell_open_re()) {
-                    n++
-                    sub(subshell_open_re(), "", probe)
-                }
+                # 「子シェルの中」として無視される。issue #142 のレビューで実測）。
+                # **上限は越えた数（`leadn`）で数える**（理由は `cross_lead_subshells()` の説明）
+                probe = cross_lead_subshells(probe, cap - leadn)
+                leadn += LEAD_SUBSHELLS; n += LEAD_SUBSHELLS
                 k = open_form(probe, cached_fn_form, (use_cached && n == 0))
                 # `case` を開く形に当たったらそこで確定（その `case` 自身も 1 階層）
-                if (k == 2 && probe ~ case_word_re()) { return n + 1 }
+                if (k == 2 && opens_case_word(probe)) { return n + 1 }
                 # 本体が同じ断片の中で続く綴り以外は、そこで終わり
                 if (k != 3 && k != 5) { return 0 }
                 n++
@@ -1417,6 +1521,17 @@ ci_workflow_extract() {
         # `case` を開く語の綴りを返す**唯一の場所**（`close_word_re()` / `function_head_re()` と同じ理由）
         function case_word_re() {
             return "^case([[:space:]]|$)"
+        }
+
+        # **この綴りが `case` を開くかを返す唯一の判定。** `open_form()` が分類に使うのと
+        # **同じ剥がし方**（`strip_struct_wrappers()`）を通すのが要点——生の綴りへ当てると
+        # `time case $X in …` / `! case $X in …` は分類では形 2（`case`）なのにこちらでは
+        # `case` と読まれず、`case_depth` も `arm_expected` も立たないまま**アーム模様の `)` が
+        # 部分シェルの閉じとして数えられる**（一致しないアームの中身が「最上位で確実に走る」に
+        # 化ける fail-open。2 語足すだけで「最上位だけ」の絞り込みを迂回できた。レビューで実測）。
+        # 綴りそのものは `case_word_re()` が唯一の源のまま（写しを増やさない）
+        function opens_case_word(t) {
+            return (strip_struct_wrappers(t) ~ case_word_re())
         }
 
         # `case` を閉じる語の綴りを返す**唯一の場所**
@@ -1861,7 +1976,7 @@ ci_workflow_extract() {
                         # アーム模様の位置・`case_depth` の勘定）に要るので 1 つの名前へ寄せる
                         # ——写しを持つと片方だけを直したときに答えが割れる（実際、この写しの
                         # ずれがそのまま 2 件の fail-open になっていた。レビューで実測）
-                        opens_case = (struct_text ~ case_word_re())
+                        opens_case = opens_case_word(struct_text)
                         # この断片が（先頭とは限らず）`case` を開くか。**`open_head` の剥がし方と
                         # `case_scope` の両方がこれを読む**——剥がす側だけ先頭一致にすると、
                         # `{ case never in match) …` で `starts_case_arm()` が前置きごと模様と読み、
@@ -2686,7 +2801,7 @@ ci_workflow_extract() {
                                 depth++; uncertain++; uncertain_at[depth] = 1
                                 # **`case` の入れ子はここで数える。** 断片の先頭とは限らない
                                 # （`f() { case x in` のように本体の中で開くことがある）
-                                if (open_probe ~ case_word_re()) { case_depth++ }
+                                if (opens_case_word(open_probe)) { case_depth++ }
                                 # **閉じた `fi` / `done` に付いた区切りは中身すべてに掛かる。**
                                 # grouping と同じで、控えないと `fi || true` が本体へ伝わらず、
                                 # 握り潰された実行が「ゲートしている」と読まれる（実測）

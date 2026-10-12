@@ -2800,6 +2800,64 @@ jobs:
       - name: subject
         run: sudo bash ${SUITE_PATH}"
 
+# **必ず走るグループの開きは、何個重なっても命令の位置を変えない**（レビューで実測）。
+# `(` を 1 つしか許していなかった頃は、実際には走ってゲートしている綴りを
+# 「実行されていない」と**事実と逆の診断**で落としていた（fail-closed）。
+# 対になる控えは下の 2 件（関数定義・偽と分かる条件）で、こちらが「何でも通す」形へ
+# 緩んでいないことを押さえる
+for group_open_case in \
+    "ブレースグループ:{ bash ${SUITE_PATH}; }" \
+    "ブレースの中の部分シェル:{ ( bash ${SUITE_PATH} ) }" \
+    "二重の部分シェル:( ( bash ${SUITE_PATH} ) )" \
+    "部分シェルの中のブレース:( { bash ${SUITE_PATH}; } )"
+do
+    assert_wired "${group_open_case%%:*}の先頭に置いた呼び出し" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${group_open_case#*:}"
+done
+
+# **`time` も前置き**（`strip_command_prefixes()` が既にそう扱っているのと揃える）。
+# `time bash x` はスクリプトを実行し、失敗もそのまま伝わる（`set -e` の下で `time false` は
+# exit 1）のに、前置きの一覧に無いせいで「実行されていない」と読まれていた（fail-closed）
+assert_wired "time 経由の呼び出し" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: time bash ${SUITE_PATH}"
+
+assert_wired "time -p 経由の呼び出し" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: time -p bash ${SUITE_PATH}"
+
+# 締めすぎない側: **`!` は終了状態を反転する**ので前置きに入れない（本当にゲートしない）
+assert_not_wired "! 経由の呼び出し（終了状態が反転するのでゲートしない）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: ! bash ${SUITE_PATH}"
+
+# 締めすぎない側: `-p` は `time` にだけ続く形（素の `-p` を前置きとして認めない）
+assert_not_wired "素の -p は前置きではない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: -p bash ${SUITE_PATH}"
+
 assert_not_wired "bash -o noexec（-n の別綴り）" "name: ci
 jobs:
   type-check:
@@ -3124,6 +3182,85 @@ jobs:
           { if false; then :; fi
           bash ${SUITE_PATH}
           }"
+
+# **前置きを重ねた形も同じこと**（レビューで実測した退行）。偽と分かる条件の印の深さは
+# `last_deciding_open()` から導くが、その中で先頭の `(` を越える上限を**開いた階層すべての数**と
+# 共有すると、手前に `{` や `f() {` があるだけで上限に当たり **`(` を 1 つも越えられない**
+# ——印が 2 階層浅くなり、閉じた後も残って*走る*呼び出しが `not-wired` に化ける（fail-closed）。
+# 越えた数は専用に数える（`cross_lead_subshells()`）。**重ね方を網羅するのが要点**で、
+# 「手前に 1 つあるときだけ」「2 つ重なったときだけ」「内と外を入れ替えたときだけ」割れる
+# 分断があるため、1 形だけ置くと残りが静かに穴になる（並べる綴りは重ね方 3 形
+# ——`{ ( … ) }` / `{ ( ( … ) ) }` / `( { … } )`——と、偽と分かる条件の 3 綴り）。
+# **`while false` / `until true` を併記するのは分類の枝が違うから**ではない
+# （`if` / `while` / `until` は `open_form()` の同じ枝に落ちる）——偽と分かる条件を見る
+# `strip_dead_cond_prefixes()` 側が `if|while` と `until` を**別の綴り**で判定しており、
+# そちらの取りこぼしを押さえる
+for composed_dead_case in \
+    "ブレースと部分シェル:{ ( if false; then :; fi ) ; bash ${SUITE_PATH}; }" \
+    "ブレースと二重の部分シェル:{ ( ( if false; then :; fi ) ) ; bash ${SUITE_PATH}; }" \
+    "部分シェルとブレース:( { if false; then :; fi ; bash ${SUITE_PATH}; } )" \
+    "ブレースと部分シェルの偽のループ:{ ( while false; do :; done ) ; bash ${SUITE_PATH}; }" \
+    "ブレースと部分シェルの until ループ:{ ( until true; do :; done ) ; bash ${SUITE_PATH}; }"
+do
+    assert_wired "${composed_dead_case%%:*}を閉じた後ろは生きている" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${composed_dead_case#*:}"
+done
+
+# **越えた数で数える上限は 2 か所にあり、両方を固定する**（レビューで実測）。
+# 上の 4 件が落とすのは `last_deciding_open()` 側（偽と分かる条件の印の深さ）だけで、
+# `walk_opens_case()` 側（`case` を開くかの判定）を `cap - n` へ戻しても**全件緑のまま通る**。
+# こちらは `{` を 2 つ重ねて上限を使い切ってから `(` の後ろに `case` を置くと、
+# `case_scope` が偽になって POSIX のアーム模様 `(a|b)` の `(` が部分シェルの開きとして
+# 数えられ、釣り合いが戻らないまま**最上位の `set +e` が「子シェルの中」として捨てられる**
+# ——握り潰されたスイートが「ゲートしている」と読まれる fail-open
+assert_not_wired "重ねた前置きの先で開く case も数える（上限は越えた数で）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          { { ( case ${DOLLAR}M in (a|b) set +e ;; esac )
+          set +e
+          bash ${SUITE_PATH}"
+
+# **締めすぎない側**: 前置きを重ねても、偽と分かる条件の**中**は証拠にしないこと
+# （上の 4 件が「印をどこにも付けない」形で緑になっていないことを押さえる）
+assert_not_wired "ブレースと部分シェルの中の偽と分かる分岐の本体" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          { ( if false; then
+            bash ${SUITE_PATH}
+          fi ) ; }"
+
+# **関数の本体は重ねても証拠にならない**（`f() { ( … ) }` の形。上の `assert_wired` 群と
+# 同じ重ね方なので、こちらを置かないと「前置きを越えたら何でも最上位」へ緩めた変異が
+# 全件緑のまま通る）。呼び出しを書いても同じ——このライブラリは関数の本体を
+# 一度も実行の証拠にしない
+for composed_fn_case in \
+    "呼び出しなし:f() { ( if false; then :; fi ) ; bash ${SUITE_PATH}; }" \
+    "呼び出しあり:f() { ( if false; then :; fi ) ; bash ${SUITE_PATH}; }
+          f"
+do
+    assert_not_wired "関数の本体に重ねた前置き（${composed_fn_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${composed_fn_case#*:}"
+done
 
 assert_not_wired "実行ラッパの後ろに置いた偽と分かる分岐の本体" "name: ci
 jobs:
@@ -4582,6 +4719,31 @@ assert_matcher no-match "コマンド単位: コマンドの位置の開始位�
     "${LOOPED_LINT_WORKFLOW}" \
     ci_workflow_command_matches "" "${CI_WORKFLOW_COMMAND_START}shellcheck([^[:alnum:]_])" '[$][{]?LIST[}]?([^[:alnum:]_]|$)'
 
+# **狭い錨が落とすのは 1 行書きだけ（実測。issue #146）。** 同じループを複数行で書くと
+# 本体が独立した断片になるので、**錨の広狭に関係なく当たる**——この照会は
+# `ci_workflow_gating_commands` を `top` なしで呼ぶ（制御構造の深さで絞らない）ため、
+# 錨はループ本体を除く手段になっていない。穴は複数行の綴りでは開いたままで、
+# **それでも錨は広げない**（広げれば 1 行書きでも同じ穴が開く）。
+# ここは「狭い錨が何を保証していて何を保証していないか」を両向きで固定する
+MULTILINE_LOOPED_LINT_WORKFLOW="name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: lint
+        run: |
+          for f in ${DOLLAR}CHANGED; do
+              shellcheck ${DOLLAR}LIST
+          done"
+
+assert_matcher match "コマンド単位: 複数行のループの本体は狭い開始位置でも数えてしまう" \
+    "${MULTILINE_LOOPED_LINT_WORKFLOW}" \
+    ci_workflow_command_matches "" "${CI_WORKFLOW_COMMAND_START}shellcheck([^[:alnum:]_])" '[$][{]?LIST[}]?([^[:alnum:]_]|$)'
+
+assert_matcher match "コマンド単位: 複数行のループは広げた開始位置でも数える" \
+    "${MULTILINE_LOOPED_LINT_WORKFLOW}" \
+    ci_workflow_command_matches "" "${CI_WORKFLOW_BLOCK_BODY_START}shellcheck([^[:alnum:]_])" '[$][{]?LIST[}]?([^[:alnum:]_]|$)'
+
 # **広げた側でも、複数行の書き方は今までどおり満たすこと**（退行していないこと）
 assert_matcher match "ステップ単位: 複数行のループも引き続き満たす" "name: ci
 jobs:
@@ -4594,6 +4756,26 @@ jobs:
               bash -n \"${DOLLAR}f\"
           done" \
     ci_workflow_step_matches "" "${CI_WORKFLOW_BLOCK_BODY_START}for +[A-Za-z_][A-Za-z0-9_]* +in +[^;&|]*[$][{]?LIST[}]?([^[:alnum:]_]|$)" "${CI_WORKFLOW_BLOCK_BODY_START}bash +-n([^[:alnum:]_]|$)"
+
+# **グループの開きは `do` / `then` / `else` の後ろ**（レビューで実測）。手前に置くと
+# `( do …` という成り立たない綴りしか当たらず**一度も効かない門番**になり、実際に起きる
+# `for f in $LIST; do ( bash -n "$f" ); done` の 1 行書き（断片は `do ( bash -n "$f" )`）が
+# no-match のまま——全ファイルが構文チェックされているのに「されていない」と
+# **事実と逆の診断**を出す（fail-closed）
+for block_group_case in \
+    "部分シェル:for f in ${DOLLAR}LIST; do ( bash -n \"${DOLLAR}f\" ); done" \
+    "ブレースグループ:for f in ${DOLLAR}LIST; do { bash -n \"${DOLLAR}f\"; }; done" \
+    "括りなし:for f in ${DOLLAR}LIST; do bash -n \"${DOLLAR}f\"; done"
+do
+    assert_matcher match "ステップ単位: ブロック本体の${block_group_case%%:*}も満たす" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: lint
+        run: ${block_group_case#*:}" \
+        ci_workflow_step_matches "" "${CI_WORKFLOW_BLOCK_BODY_START}bash +-n([^[:alnum:]_]|\$)"
+done
 
 # **広げた側でも実行ラッパを読み飛ばせること**（前置きの一覧を 1 か所に寄せた結果の確認）
 assert_matcher match "ステップ単位: 本体の先頭の語と実行ラッパが重なっても満たす" "name: ci
@@ -4678,7 +4860,9 @@ for dead_prefix_case in \
     "ブレースの偽のループ:{ while false; do shellcheck ${DOLLAR}LIST; done; }" \
     "関数の本体:f() { if false; then shellcheck ${DOLLAR}LIST; fi; }" \
     "case のアーム:case ${DOLLAR}M in lint) if false; then shellcheck ${DOLLAR}LIST; fi;; esac" \
-    "POSIX の case のアーム:case ${DOLLAR}M in (lint) if false; then shellcheck ${DOLLAR}LIST; fi;; esac"
+    "POSIX の case のアーム:case ${DOLLAR}M in (lint) if false; then shellcheck ${DOLLAR}LIST; fi;; esac" \
+    "飾り付きの case のアーム:time case ${DOLLAR}M in lint) if false; then shellcheck ${DOLLAR}LIST; fi;; esac" \
+    "反転付きの case のアーム:! case ${DOLLAR}M in lint) if false; then shellcheck ${DOLLAR}LIST; fi;; esac"
 do
     assert_matcher no-match "コマンド単位: ${dead_prefix_case%%:*}の中の偽と分かる条件は満たさない" "name: ci
 jobs:
@@ -4688,6 +4872,27 @@ jobs:
       - name: lint
         run: ${dead_prefix_case#*:}" \
         ci_workflow_command_matches "" "${CI_WORKFLOW_BLOCK_BODY_START}shellcheck([^[:alnum:]_])" '[$][{]?LIST[}]?([^[:alnum:]_]|$)'
+done
+
+# **`case` を開くかの判定も、分類と同じ剥がし方を通す**（レビューで実測した fail-open）。
+# `open_form()` は `time` / `!` を剥がしてから分類するのに、「この断片は `case` を開くか」を
+# 生の綴りで見ていたため、`time case …` / `! case …` では `case_depth` も `arm_expected` も
+# 立たず、**アーム模様の `)` が部分シェルの閉じとして数えられて**一致しないアームの中身が
+# 「最上位で確実に走る」に化けた（2 語足すだけで「最上位だけ」の絞り込みを迂回できた）。
+# 素の綴りと答えがそろうことを対で押さえる
+for decorated_case_arm in \
+    "素の綴り:case ${DOLLAR}X in a) ( : | cat ) ; bash ${SUITE_PATH};; esac" \
+    "time 付き:time case ${DOLLAR}X in a) ( : | cat ) ; bash ${SUITE_PATH};; esac" \
+    "反転付き:! case ${DOLLAR}X in a) ( : | cat ) ; bash ${SUITE_PATH};; esac"
+do
+    assert_not_wired "一致しないアームの中身は最上位に上がらない（${decorated_case_arm%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${decorated_case_arm#*:}"
 done
 
 # --- 必ず走らないアームの中の lint（issue #142 (2)(3)） -----------------------------
@@ -5928,6 +6133,99 @@ jobs:
       - run: |
           uses: actions/evil@v1
       - uses: ./other' 9
+
+# --- 1 行が「ブロックスカラーを開く」と「引用を開いたまま終わる」を同時に満たす形（issue #119） ---
+#
+# 続きの行かどうかの印（`open_type`）は**その行に入る前**の状態しか見ないので、
+# `- run: "|` のように両方を満たす行では `in_scalar` と `open_type` が同時に立つ。
+# すると次の行（＝**閉じ引用符を載せた行**）が本文として `next` で読み飛ばされ、
+# 引用が**永久に閉じない**。**いったんラッチすると同じファイル内に回復経路が無い**のがこの形の
+# 厄介さで、以降そのファイル全体で伏せ処理とブロックスカラー判定の両方が死ぬ。
+# 壊れ方は両向き:
+#   - 伏せ処理が死ぬ → 引用の中の `#` が行を切って本物の `secrets:` が落ちる（**fail-open**。
+#     特権ワークフローが read-only に化けて FR-9.6(b) のピン検査をすり抜ける）
+#   - ブロックスカラー判定が死ぬ → 後続の `run: |` の本文が構造行として漏れ、実在するスイートが
+#     「未配線」になる（**fail-closed**。実測で `main` は `NOT-WIRED`）
+# 塞ぎ方は「その行を出ていく時点で引用が閉じていること」を開始条件へ足すこと。
+# 2 形（`run: "|` と `"run: |`）を**両方**置く——前者はブロックスカラーの綴りが引用の*外*、
+# 後者は*中*にあり、通る経路が違う（後者は `main` では抽出そのものが失敗した）
+assert_wired "ブロックスカラーと引用を同時に開く行の後ろでも run: | は読める" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - run: \"|
+          a\"
+      - name: suites
+        run: |
+          bash ${SUITE_PATH}"
+
+assert_wired "引用の中に run: | と書いた手順の後ろでも run: | は読める" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - \"run: |
+          note\"
+      - name: suites
+        run: |
+          bash ${SUITE_PATH}"
+
+# **締めすぎない側**: 引用を開いていない素の `run: |` は今までどおり本文を読み飛ばすこと
+# （`open_type == \"\"` を足した条件が、正当なブロックスカラーまで止めていないこと）。
+# 本文に書いた `uses:` が構造行へ漏れないことで観測する
+assert_structural_line "引用を開いていない run: | の本文は今までどおり読み飛ばす" \
+    '' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          uses: actions/evil@v1
+      - uses: ./other' 7
+
+# 同じ入力で本文の後ろの行は出ること（上の空文字が「走査が止まった」の裏返しにならないよう）
+assert_structural_line "引用を開いていない run: | の後続の構造行は出る" \
+    '      - uses: ./other' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          uses: actions/evil@v1
+      - uses: ./other' 8
+
+# **穴の側の出力も固定する**（レビューで実測）。`run: "|` はブロックスカラーの開始と
+# 読まないので、続きの行（閉じ引用符を載せた行）は**本文として落ちず構造行として出る**。
+# 向きは「余分に出す」側で、ピン検査には実在しない手順への参照（幻の `uses:`）を渡すことに
+# なるが、**取りこぼす側（本物の `secrets:` を捨てる fail-open）よりこちらを取る**という
+# 既知の残り（`KNOWN RESIDUAL: 複数行にまたがる引用スカラーは幻を残す`）どおりの挙動。
+# 引用符そのものは伏せ処理が落とすので、期待値に閉じ引用符は現れない（実測）。
+# 固定しておかないと、どちらの向きへ動いてもテストが何も言わない
+assert_structural_line "引用の中のブロックスカラー記号の続きの行は構造行として出る" \
+    '          uses: actions/evil@v1' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: "|
+          uses: actions/evil@v1"
+      - uses: ./other' 7
+
+# 同じ入力で後続の構造行も出ること（ラッチが戻っていることを別の行で押さえる）
+assert_structural_line "引用の中のブロックスカラー記号の後ろでも構造行は出る" \
+    '      - uses: ./other' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: "|
+          uses: actions/evil@v1"
+      - uses: ./other' 8
 
 # **続きの行は「閉じたか」ではなく「末尾で何が開いているか」で見る。** 閉じた時点で打ち切ると、
 # 同じ行の後ろでもう 1 つ引用が開く形を取り逃がし、次の行が「引用の中なのに普通の行」として扱われる。
