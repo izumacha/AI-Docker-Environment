@@ -5929,6 +5929,69 @@ jobs:
           uses: actions/evil@v1
       - uses: ./other' 9
 
+# --- 1 行が「ブロックスカラーを開く」と「引用を開いたまま終わる」を同時に満たす形（issue #119） ---
+#
+# 続きの行かどうかの印（`open_type`）は**その行に入る前**の状態しか見ないので、
+# `- run: "|` のように両方を満たす行では `in_scalar` と `open_type` が同時に立つ。
+# すると次の行（＝**閉じ引用符を載せた行**）が本文として `next` で読み飛ばされ、
+# 引用が**永久に閉じない**。**いったんラッチすると同じファイル内に回復経路が無い**のがこの形の
+# 厄介さで、以降そのファイル全体で伏せ処理とブロックスカラー判定の両方が死ぬ。
+# 壊れ方は両向き:
+#   - 伏せ処理が死ぬ → 引用の中の `#` が行を切って本物の `secrets:` が落ちる（**fail-open**。
+#     特権ワークフローが read-only に化けて FR-9.6(b) のピン検査をすり抜ける）
+#   - ブロックスカラー判定が死ぬ → 後続の `run: |` の本文が構造行として漏れ、実在するスイートが
+#     「未配線」になる（**fail-closed**。実測で `main` は `NOT-WIRED`）
+# 塞ぎ方は「その行を出ていく時点で引用が閉じていること」を開始条件へ足すこと。
+# 2 形（`run: "|` と `"run: |`）を**両方**置く——前者はブロックスカラーの綴りが引用の*外*、
+# 後者は*中*にあり、通る経路が違う（後者は `main` では抽出そのものが失敗した）
+assert_wired "ブロックスカラーと引用を同時に開く行の後ろでも run: | は読める" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - run: \"|
+          a\"
+      - name: suites
+        run: |
+          bash ${SUITE_PATH}"
+
+assert_wired "引用の中に run: | と書いた手順の後ろでも run: | は読める" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - \"run: |
+          note\"
+      - name: suites
+        run: |
+          bash ${SUITE_PATH}"
+
+# **締めすぎない側**: 引用を開いていない素の `run: |` は今までどおり本文を読み飛ばすこと
+# （`open_type == \"\"` を足した条件が、正当なブロックスカラーまで止めていないこと）。
+# 本文に書いた `uses:` が構造行へ漏れないことで観測する
+assert_structural_line "引用を開いていない run: | の本文は今までどおり読み飛ばす" \
+    '' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          uses: actions/evil@v1
+      - uses: ./other' 7
+
+# 同じ入力で本文の後ろの行は出ること（上の空文字が「走査が止まった」の裏返しにならないよう）
+assert_structural_line "引用を開いていない run: | の後続の構造行は出る" \
+    '      - uses: ./other' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          uses: actions/evil@v1
+      - uses: ./other' 8
+
 # **続きの行は「閉じたか」ではなく「末尾で何が開いているか」で見る。** 閉じた時点で打ち切ると、
 # 同じ行の後ろでもう 1 つ引用が開く形を取り逃がし、次の行が「引用の中なのに普通の行」として扱われる。
 # するとそこに書かれた `run: |` がブロックスカラーとして認識され、**続く行が本文として丸ごと落ちる**
