@@ -2484,12 +2484,18 @@ COVERAGE_WIRING_TMP="${TEST_TMP}/ci-commands"
 if ! ci_workflow_load "${WORKFLOW_DIR}/ci.yml" "${COVERAGE_WIRING_TMP}"; then
     fail 'ci.yml still runs test/ci_coverage_test.sh (coverage net is wired)' \
         "could not read the run: steps from ${WORKFLOW_DIR}/ci.yml, so the coverage step's wiring could not be verified"
-# 網羅性テストが実際に実行されていることを確かめる
-elif ci_workflow_runs_script 'test/ci_coverage_test.sh'; then
+# 網羅性テストが実際に実行されていることを確かめる。
+# **ジョブ名まで渡す**のが要点（issue #114 (2) と同じ理由）。絞らないとどのジョブで
+# 実行されていても緑になり、`docs/requirements.md` FR-8.1 が type-check に置くと定めている
+# ハーメティックなスイートを e2e（Docker が要るジョブ）へ移しても支え役は何も言わない
+# ——そこを捕まえるのは移動先で走った網羅性テスト自身の `SUITE_JOBS` 検査だけ、つまり
+# **支えられる側の網**になってしまう（支え役が最初に破れる形。姉妹の
+# `test/sec18_denylist_test.sh` は 3 件すべてジョブ名付きで呼んでいる）
+elif ci_workflow_runs_script 'test/ci_coverage_test.sh' 'type-check'; then
     pass 'ci.yml still runs test/ci_coverage_test.sh (coverage net is wired)'
 else
     fail 'ci.yml still runs test/ci_coverage_test.sh (coverage net is wired)' \
-        "the CI coverage step no longer gates in ${WORKFLOW_DIR}/ci.yml; without it, scripts missing from SHELL_FILES and unwired suites stop being detected and CI stays green"
+        "the CI coverage step no longer gates in the type-check job of ${WORKFLOW_DIR}/ci.yml; without it, scripts missing from SHELL_FILES and unwired suites stop being detected and CI stays green (if the suite moved to another job, FR-8.1 and this assertion both need updating)"
 fi
 
 # 検査結果の合計を、他のテストスイートと同じ書式で出力する

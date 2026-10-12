@@ -4178,6 +4178,84 @@ jobs:
       - name: subject
         run: bash vendor/${SUITE_PATH}"
 
+# --- ジョブ名の読み出し（渡すジョブ名の綴りを確かめるため） --------------------------
+
+# `ci_workflow_job_names` の結果を 1 本の文字列にまとめて突き合わせる検査
+assert_job_names() {
+    # 合成ワークフローを書き出して読み込む
+    local workflow="${TMP_DIR}/jobs.yml"
+    printf '%s\n' "$2" > "${workflow}"
+    ci_workflow_load "${workflow}" "${TMP_DIR}/jobs-commands" \
+        || { report_fail "$1" "ワークフローを読み込めませんでした"; return; }
+    # 出てきたジョブ名をカンマ区切りにして期待値と比べる
+    local actual
+    actual="$(ci_workflow_job_names | tr '\n' ',')"
+    if [ "${actual}" = "$3" ]; then
+        report 0 "$1"
+    else
+        report_fail "$1" "期待 [$3] に対して実際は [${actual}]"
+    fi
+}
+
+assert_job_names "ジョブ名を宣言順に 1 件ずつ返す" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: a
+        run: bash ${SUITE_PATH}
+      - name: b
+        run: echo hi
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - name: c
+        run: echo hi" "type-check,e2e,"
+
+# **折りたたみの `env:` を持つジョブは `run:` が無くても現れること**（`SHELL_FILES` を
+# 定義するジョブがこの形になりうるため）
+assert_job_names "env だけのジョブも一覧に現れる" "name: ci
+jobs:
+  only-env:
+    runs-on: ubuntu-latest
+    env:
+      LIST: >-
+        a.sh
+    steps:
+      - name: a
+        uses: actions/checkout@v5" "only-env,"
+
+# **境界の記録**: `run:` も折りたたみ `env:` も持たないジョブ（`uses:` のステップだけ）は
+# 控えに 1 行も残らないので一覧に現れない。呼び出し側（`SUITE_JOBS` の値の照合）には
+# 足りる——`run:` を 1 つも持たないジョブはスイートを走らせられないので、
+# そこを表に登録することは最初から誤り。**「現れる」と読まないための固定**
+assert_job_names "uses だけのジョブは一覧に現れない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: a
+        run: bash ${SUITE_PATH}
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: b
+        uses: actions/checkout@v5" "type-check,"
+
+# 同じジョブの複数ステップで重複しないこと（突き合わせの表を素直に作れるようにする）
+assert_job_names "同じジョブ名は畳んで 1 件にする" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    env:
+      LIST: >-
+        a.sh
+    steps:
+      - name: a
+        run: bash ${SUITE_PATH}
+      - name: b
+        run: bash ${SUITE_PATH}" "type-check,"
+
 # --- env の読み出し（一覧はジョブ単位で見える） -------------------------------------
 
 # `SHELL_FILES` に相当する折りたたみブロックを読む検査。定義したジョブ名と中身を確かめる
@@ -4329,6 +4407,74 @@ jobs:
           done" \
     ci_workflow_step_matches "" "(^|[;&|(][[:space:]]*)for +[A-Za-z_][A-Za-z0-9_]* +in +[^;&|]*[$][{]?LIST[}]?([^[:alnum:]_]|$)" '(^|[;&|(][[:space:]]*)bash +-n([^[:alnum:]_]|$)'
 
+# --- ブロック本体の先頭を許す開始位置（issue #114 (1)） --------------------------------
+
+# **穴の側**: 意味の変わらない 1 行書きでも、ステップ単位の照合が満たされること。
+# `split_commands` は `;` で切るので断片は `do bash -n "$f"` になり、
+# `^` に錨を打った `CI_WORKFLOW_COMMAND_START` には当たらなかった
+# （実際にはすべてのファイルが構文チェックされているのに「されない」と**事実と逆の診断**で
+#  CI を赤くする＝整形しただけで赤くなる形）
+assert_matcher match "ステップ単位: 1 行に畳んだループの本体も満たす" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: lint
+        run: for f in ${DOLLAR}LIST; do bash -n \"${DOLLAR}f\"; done" \
+    ci_workflow_step_matches "" "${CI_WORKFLOW_BLOCK_BODY_START}for +[A-Za-z_][A-Za-z0-9_]* +in +[^;&|]*[$][{]?LIST[}]?([^[:alnum:]_]|$)" "${CI_WORKFLOW_BLOCK_BODY_START}bash +-n([^[:alnum:]_]|$)"
+
+# **旧い開始位置では当たらないこと**（この 2 つが別物であることの固定）。
+# どちらかに寄せる変更が入ったら、ここか下の no-match が落ちる
+assert_matcher no-match "ステップ単位: 旧い開始位置は 1 行書きに当たらない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: lint
+        run: for f in ${DOLLAR}LIST; do bash -n \"${DOLLAR}f\"; done" \
+    ci_workflow_step_matches "" "${CI_WORKFLOW_COMMAND_START}bash +-n([^[:alnum:]_]|$)"
+
+# **広げた側でも、複数行の書き方は今までどおり満たすこと**（退行していないこと）
+assert_matcher match "ステップ単位: 複数行のループも引き続き満たす" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: lint
+        run: |
+          for f in ${DOLLAR}LIST; do
+              bash -n \"${DOLLAR}f\"
+          done" \
+    ci_workflow_step_matches "" "${CI_WORKFLOW_BLOCK_BODY_START}for +[A-Za-z_][A-Za-z0-9_]* +in +[^;&|]*[$][{]?LIST[}]?([^[:alnum:]_]|$)" "${CI_WORKFLOW_BLOCK_BODY_START}bash +-n([^[:alnum:]_]|$)"
+
+# **広げた側でも実行ラッパを読み飛ばせること**（前置きの一覧を 1 か所に寄せた結果の確認）
+assert_matcher match "ステップ単位: 本体の先頭の語と実行ラッパが重なっても満たす" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: lint
+        run: for f in ${DOLLAR}LIST; do sudo bash -n \"${DOLLAR}f\"; done" \
+    ci_workflow_step_matches "" "${CI_WORKFLOW_BLOCK_BODY_START}bash +-n([^[:alnum:]_]|$)"
+
+# **締めすぎの側**: 「本当に実行されるか」を問う照会は、ブロック本体の先頭を
+# 実行の証拠に数えないこと。ループが 0 回まわる場合があるので、こちらは
+# fail-closed に保つ必要がある（広げると握り潰されたスイートを緑で通す）。
+# **この 1 件は「どちらの定数でも通る」**（レビューで実測）——`for f in a` は
+# `open_form()` が形 2 として読むので本体は深さ 1 にあり、`runs_script` が渡す
+# `top` が錨に関係なく除くため。2 つの定数を 1 つに畳む変更を落とすのは
+# 上の `assert_not_wired` 群（`if true` / `while true` の 1 行書き・部分シェルの中の
+# 条件付き分岐とループ、計 4 件）で、ここはその結論を照会の入口で重ねて固定するだけ。
+# **「この 1 件が定数の区別を守っている」と読まないこと**
+assert_matcher no-match "実行網: 1 行に畳んだループの本体は実行の証拠に数えない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: suites
+        run: for f in a; do bash test/subject_test.sh; done" \
+    ci_workflow_runs_script 'test/subject_test.sh'
+
 assert_matcher match "コマンド単位: 実行ラッパ越しでも満たす" "name: ci
 jobs:
   type-check:
@@ -4363,6 +4509,117 @@ jobs:
             done
           fi" \
     ci_workflow_step_matches "" "(^|[;&|(][[:space:]]*)for +[A-Za-z_][A-Za-z0-9_]* +in +[^;&|]*[$][{]?LIST[}]?([^[:alnum:]_]|$)" '(^|[;&|(][[:space:]]*)bash +-n([^[:alnum:]_]|$)'
+
+# --- 開き側が読めない飾りの後ろの偽と分かる条件（issue #114 のレビューで実測） --------
+#
+# `open_form()` は `( if false` / `time if false` / `! if false` / `eval if false` を
+# 分類できないので、階層も `uncertain` も立たない。偽と分かる条件の判定が
+# `^if` だけを見ていた頃は、**1 度も走らない本体がリンタの照合を満たしていた**
+# ——`main` でも複数行で書けば素通りしており（既存の穴）、ブロック本体の先頭を許す
+# 開始位置を入れると 1 行書きでも素通りした（どちらも実測）。
+# 判定は `strip_dead_cond_prefixes()` が飾りを剥がしてから行う。
+# **4 形すべてを置く**のが要点で、1 つでも欠けるとその綴りだけが静かに穴になる
+for dead_prefix_case in \
+    "部分シェル:( if false; then shellcheck ${DOLLAR}LIST; fi )" \
+    "実行ラッパ:time if false; then shellcheck ${DOLLAR}LIST; fi" \
+    "終了状態の反転:! if false; then shellcheck ${DOLLAR}LIST; fi" \
+    "重ねた飾り:( ! time if false; then shellcheck ${DOLLAR}LIST; fi )" \
+    "偽のループ:( while false; do shellcheck ${DOLLAR}LIST; done )" \
+    "until が真:( until true; do shellcheck ${DOLLAR}LIST; done )" \
+    "ブレースグループ:{ if false; then shellcheck ${DOLLAR}LIST; fi; }" \
+    "ブレースの偽のループ:{ while false; do shellcheck ${DOLLAR}LIST; done; }" \
+    "関数の本体:f() { if false; then shellcheck ${DOLLAR}LIST; fi; }" \
+    "case のアーム:case ${DOLLAR}M in lint) if false; then shellcheck ${DOLLAR}LIST; fi;; esac"
+do
+    assert_matcher no-match "コマンド単位: ${dead_prefix_case%%:*}の中の偽と分かる条件は満たさない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: lint
+        run: ${dead_prefix_case#*:}" \
+        ci_workflow_command_matches "" "${CI_WORKFLOW_BLOCK_BODY_START}shellcheck([^[:alnum:]_])" '[$][{]?LIST[}]?([^[:alnum:]_]|$)'
+done
+
+# **締めすぎない側**: 飾りを剥がした先が偽と分かる条件でなければ、今までどおり満たすこと。
+# 剥がす対象を広げすぎると（`{ ` や変数代入まで剥がす、条件を読まずに一律で死に体と見る等）
+# 正しく lint しているステップを「されていない」と誤報して赤くする
+assert_matcher match "コマンド単位: 部分シェルの中の必ず走る条件は満たす" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: lint
+        run: ( if true; then shellcheck ${DOLLAR}LIST; fi )" \
+    ci_workflow_command_matches "" "${CI_WORKFLOW_BLOCK_BODY_START}shellcheck([^[:alnum:]_])" '[$][{]?LIST[}]?([^[:alnum:]_]|$)'
+
+assert_matcher match "コマンド単位: 部分シェルの中の条件付き分岐は満たす" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: lint
+        run: ( if [ -n \"${DOLLAR}X\" ]; then shellcheck ${DOLLAR}LIST; fi )" \
+    ci_workflow_command_matches "" "${CI_WORKFLOW_BLOCK_BODY_START}shellcheck([^[:alnum:]_])" '[$][{]?LIST[}]?([^[:alnum:]_]|$)'
+
+assert_matcher match "コマンド単位: 部分シェルに直接置いた呼び出しは満たす" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: lint
+        run: ( shellcheck ${DOLLAR}LIST )" \
+    ci_workflow_command_matches "" "${CI_WORKFLOW_BLOCK_BODY_START}shellcheck([^[:alnum:]_])" '[$][{]?LIST[}]?([^[:alnum:]_]|$)'
+
+# **引用で包んだ `eval` の中の複合コマンドは「開きっぱなし」にしない**（レビューで実測）。
+# `split_commands` は引用の中の `;` で切らないので `eval "if false; …; fi"` は 1 断片で
+# 自己完結する。`eval ` と引用符を落として分類すると `open_form()` が階層を開くのに
+# 閉じる断片が来ず、**同じステップの以降すべて**が非ゲート扱いになって
+# 「配線されていない」という事実と逆の診断が出た（`main` は正しく緑）
+assert_matcher match "コマンド単位: 引用で包んだ eval の後ろは満たす" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: lint
+        run: |
+          eval \"if false; then echo skipped; fi\"
+          shellcheck ${DOLLAR}LIST" \
+    ci_workflow_command_matches "" "${CI_WORKFLOW_BLOCK_BODY_START}shellcheck([^[:alnum:]_])" '[$][{]?LIST[}]?([^[:alnum:]_]|$)'
+
+assert_matcher match "実行網: 引用で包んだ eval の後ろの呼び出しは実行の証拠になる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: suites
+        run: |
+          eval \"if false; then echo skipped; fi\"
+          bash test/subject_test.sh" \
+    ci_workflow_runs_script 'test/subject_test.sh'
+
+# **ブレース・関数・アームの見出しを落としても、偽でない条件は証拠のまま**であること
+assert_matcher match "コマンド単位: ブレースグループの中の条件付き分岐は満たす" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: lint
+        run: { if [ -n \"${DOLLAR}X\" ]; then shellcheck ${DOLLAR}LIST; fi; }" \
+    ci_workflow_command_matches "" "${CI_WORKFLOW_BLOCK_BODY_START}shellcheck([^[:alnum:]_])" '[$][{]?LIST[}]?([^[:alnum:]_]|$)'
+
+# **偽と分かる条件を閉じた後ろは生きている**こと（印の後始末が効いていること）。
+# `dead_depth` を戻し忘れると、ステップの残り全部が証拠から外れて赤くなる
+assert_matcher match "コマンド単位: 偽と分かる条件を閉じた後ろは満たす" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: lint
+        run: |
+          ( if false; then echo skipped; fi )
+          shellcheck ${DOLLAR}LIST" \
+    ci_workflow_command_matches "" "${CI_WORKFLOW_BLOCK_BODY_START}shellcheck([^[:alnum:]_])" '[$][{]?LIST[}]?([^[:alnum:]_]|$)'
 
 # 一覧を定義したジョブと、それを読むステップが**別のジョブ**にあるとき、
 # 絞り込みが効いていなければ「消費されている」と誤って読める（ci_coverage_test.sh がこれに依存する）
