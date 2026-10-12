@@ -3062,6 +3062,69 @@ jobs:
             bash ${SUITE_PATH}
           )"
 
+# **階層の勘定が部分シェルを抜けたところで 0 に戻ること**（issue #142 のレビューで実測）。
+# 上の 4 件はどれも「部分シェルの*中*の呼び出し」を問うので、`)` が食べられて
+# `subshell` が漏れたままでも答えが変わらない——**漏れが見えるのは閉じた*後ろ*の断片**。
+# ここは「閉じた後ろに置いた `set +e` が効く（＝親のオプションを変えられる）」を問うので、
+# 漏れていれば `set +e` が「子シェルの中」として無視されて `wired` に化ける。
+# 3 形とも**レビューの実測で壊れていた**（いずれも fail-open）
+assert_not_wired "部分シェルの case を閉じた後ろの set +e は効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ( case \"${DOLLAR}M\" in
+            a) echo hi ;;
+          esac )
+          set +e
+          bash ${SUITE_PATH}"
+
+# `|` で切った POSIX のアーム模様（`(a|b)`）は、その `(` が部分シェルの開きではない。
+# 先頭の `(` を越えて `case` を見つけられないと `case_scope` が偽になり、
+# **アーム模様の `(` を部分シェルとして数える補正が働かない**（釣り合いが 1 つ膨らんで
+# 階層が閉じ切らず、以降の `set +e` がすべて無視される）
+assert_not_wired "部分シェルの中の選択肢アームでも釣り合いが戻る" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ( case ${DOLLAR}X in (a|b) echo hi ;;
+          esac
+          )
+          set +e
+          bash ${SUITE_PATH}"
+
+# **偽と分かる条件の印は、その制御構造を囲っている階層に付ける。**
+# 断片に入る前の深さを印にすると、階層を開く前置き（`(` / `{` / `f() {`）が手前に付いたとき
+# **閉じた後も印が残り**、同じ前置きの中で*走る*後続の断片まで死に体として記録される
+# ——正しくゲートしている綴りを「配線されていない」と事実と逆に診断して赤くする。
+# `(` はレビューで実測した退行、`{` は `main` でも壊れていた既存の fail-closed
+assert_wired "部分シェルの中で偽と分かる条件を閉じた後ろは生きている" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ( if false; then :; fi
+          bash ${SUITE_PATH}
+          )"
+
+assert_wired "ブレースの中で偽と分かる条件を閉じた後ろは生きている" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          { if false; then :; fi
+          bash ${SUITE_PATH}
+          }"
+
 assert_not_wired "実行ラッパの後ろに置いた偽と分かる分岐の本体" "name: ci
 jobs:
   type-check:
