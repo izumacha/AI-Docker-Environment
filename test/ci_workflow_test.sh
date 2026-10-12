@@ -3002,6 +3002,129 @@ jobs:
         run: |
           ( for f in a; do bash ${SUITE_PATH}; done )"
 
+# **上の 3 形は 1 行書きなので、受け皿（生の本文が `then` で始まり開始位置に当たらない）
+# でも止まる。** 複数行で書くと呼び出しの断片は素の `bash …` になるので、止めているのは
+# 深さの勘定だけになる——`open_form()` が `(` を読まないため、以前は `(` の後ろの
+# 制御構造が**1 階層も開かないのに `fi` / `esac` だけが閉じていた**（issue #142 (3)）。
+# 実測では 3 形すべてが `main` で `wired`（＝条件次第でしか走らないスイートが
+# 「最上位で確実に走る」と報告される。1 文字で「最上位だけ」の絞り込みを迂回できた）
+assert_not_wired "部分シェルの中の条件付き分岐の本体（複数行）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ( if [ -n \"${DOLLAR}X\" ]; then
+            bash ${SUITE_PATH}
+          fi )"
+
+assert_not_wired "部分シェルの中の case のアームの本体（複数行）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ( case \"${DOLLAR}M\" in
+            a)
+              bash ${SUITE_PATH}
+              ;;
+          esac )"
+
+# **閉じ側が 1 つ余分に閉じると、外側の条件の `uncertain` まで消える**（同じ根の別の症状）。
+# `( if true; then :; fi )` は中が必ず走るので、それ自体は証拠になってよい形だが、
+# **その後ろ**の呼び出しは外側の `if [ -n … ]` 次第でしか走らない。
+# 以前は `fi )` が 2 階層閉じて（開いたのは `(` の 1 階層だけ）外側の印ごと巻き戻り、
+# 続く呼び出しが最上位扱いになっていた（実測で `main` は `wired`）
+assert_not_wired "部分シェルの中の制御構造を閉じた後ろは外側の条件のまま" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          if [ -n \"${DOLLAR}X\" ]; then
+            ( if true; then :; fi )
+            bash ${SUITE_PATH}
+          fi"
+
+# **締めすぎない側**: 部分シェルに直接置いた呼び出しは今までどおり証拠になること
+# （`(` を開き側で読むようにした変更が、必ず走る部分シェルまで巻き込んでいないこと）
+assert_wired "部分シェルに直接置いた呼び出しは実行の証拠になる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          (
+            bash ${SUITE_PATH}
+          )"
+
+# **階層の勘定が部分シェルを抜けたところで 0 に戻ること**（issue #142 のレビューで実測）。
+# 上の 4 件はどれも「部分シェルの*中*の呼び出し」を問うので、`)` が食べられて
+# `subshell` が漏れたままでも答えが変わらない——**漏れが見えるのは閉じた*後ろ*の断片**。
+# ここは「閉じた後ろに置いた `set +e` が効く（＝親のオプションを変えられる）」を問うので、
+# 漏れていれば `set +e` が「子シェルの中」として無視されて `wired` に化ける。
+# 3 形とも**レビューの実測で壊れていた**（いずれも fail-open）
+assert_not_wired "部分シェルの case を閉じた後ろの set +e は効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ( case \"${DOLLAR}M\" in
+            a) echo hi ;;
+          esac )
+          set +e
+          bash ${SUITE_PATH}"
+
+# `|` で切った POSIX のアーム模様（`(a|b)`）は、その `(` が部分シェルの開きではない。
+# 先頭の `(` を越えて `case` を見つけられないと `case_scope` が偽になり、
+# **アーム模様の `(` を部分シェルとして数える補正が働かない**（釣り合いが 1 つ膨らんで
+# 階層が閉じ切らず、以降の `set +e` がすべて無視される）
+assert_not_wired "部分シェルの中の選択肢アームでも釣り合いが戻る" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ( case ${DOLLAR}X in (a|b) echo hi ;;
+          esac
+          )
+          set +e
+          bash ${SUITE_PATH}"
+
+# **偽と分かる条件の印は、その制御構造を囲っている階層に付ける。**
+# 断片に入る前の深さを印にすると、階層を開く前置き（`(` / `{` / `f() {`）が手前に付いたとき
+# **閉じた後も印が残り**、同じ前置きの中で*走る*後続の断片まで死に体として記録される
+# ——正しくゲートしている綴りを「配線されていない」と事実と逆に診断して赤くする。
+# `(` はレビューで実測した退行、`{` は `main` でも壊れていた既存の fail-closed
+assert_wired "部分シェルの中で偽と分かる条件を閉じた後ろは生きている" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ( if false; then :; fi
+          bash ${SUITE_PATH}
+          )"
+
+assert_wired "ブレースの中で偽と分かる条件を閉じた後ろは生きている" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          { if false; then :; fi
+          bash ${SUITE_PATH}
+          }"
+
 assert_not_wired "実行ラッパの後ろに置いた偽と分かる分岐の本体" "name: ci
 jobs:
   type-check:
@@ -4434,6 +4557,31 @@ jobs:
         run: for f in ${DOLLAR}LIST; do bash -n \"${DOLLAR}f\"; done" \
     ci_workflow_step_matches "" "${CI_WORKFLOW_COMMAND_START}bash +-n([^[:alnum:]_]|$)"
 
+# **広げた開始位置の代償を固定しておく**（issue #142 (1)）。ブロック本体の先頭を命令の位置と
+# 認めると、**0 回まわりうるループの本体**も「配線されている」と数える。
+# `bash -n` は一覧をループで回すほかに書きようが無いのでこの弱さを承知で受け入れているが、
+# 一覧を 1 コマンドで受け取る `shellcheck` を同じ錨へ寄せると、
+# `for f in ${DOLLAR}CHANGED; do shellcheck ${DOLLAR}LIST; done`（「変更された分だけ lint する」
+# というごく自然なリファクタ）が `${DOLLAR}CHANGED` が空で**1 度も走らないまま**数えられる
+# ——`shellcheck` を事実上無効化したまま全スイートが緑になる。
+# **どちらの網がどの錨を使うかは `ci_coverage_test.sh` が決める**ので、ここでは
+# 「2 つの錨がこの形で答えを変える」ことだけを固定する（寄せる変更が入ればこの対が落ちる）
+LOOPED_LINT_WORKFLOW="name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: lint
+        run: for f in ${DOLLAR}CHANGED; do shellcheck ${DOLLAR}LIST; done"
+
+assert_matcher match "コマンド単位: 広げた開始位置は 0 回まわりうるループの本体も数える" \
+    "${LOOPED_LINT_WORKFLOW}" \
+    ci_workflow_command_matches "" "${CI_WORKFLOW_BLOCK_BODY_START}shellcheck([^[:alnum:]_])" '[$][{]?LIST[}]?([^[:alnum:]_]|$)'
+
+assert_matcher no-match "コマンド単位: コマンドの位置の開始位置はループの本体を数えない" \
+    "${LOOPED_LINT_WORKFLOW}" \
+    ci_workflow_command_matches "" "${CI_WORKFLOW_COMMAND_START}shellcheck([^[:alnum:]_])" '[$][{]?LIST[}]?([^[:alnum:]_]|$)'
+
 # **広げた側でも、複数行の書き方は今までどおり満たすこと**（退行していないこと）
 assert_matcher match "ステップ単位: 複数行のループも引き続き満たす" "name: ci
 jobs:
@@ -4529,7 +4677,8 @@ for dead_prefix_case in \
     "ブレースグループ:{ if false; then shellcheck ${DOLLAR}LIST; fi; }" \
     "ブレースの偽のループ:{ while false; do shellcheck ${DOLLAR}LIST; done; }" \
     "関数の本体:f() { if false; then shellcheck ${DOLLAR}LIST; fi; }" \
-    "case のアーム:case ${DOLLAR}M in lint) if false; then shellcheck ${DOLLAR}LIST; fi;; esac"
+    "case のアーム:case ${DOLLAR}M in lint) if false; then shellcheck ${DOLLAR}LIST; fi;; esac" \
+    "POSIX の case のアーム:case ${DOLLAR}M in (lint) if false; then shellcheck ${DOLLAR}LIST; fi;; esac"
 do
     assert_matcher no-match "コマンド単位: ${dead_prefix_case%%:*}の中の偽と分かる条件は満たさない" "name: ci
 jobs:
@@ -4540,6 +4689,44 @@ jobs:
         run: ${dead_prefix_case#*:}" \
         ci_workflow_command_matches "" "${CI_WORKFLOW_BLOCK_BODY_START}shellcheck([^[:alnum:]_])" '[$][{]?LIST[}]?([^[:alnum:]_]|$)'
 done
+
+# --- 必ず走らないアームの中の lint（issue #142 (2)(3)） -----------------------------
+#
+# **偽と分かる条件とは別の経路**で 1 度も走らない本体がある: 真と分かる条件
+# （`if true`）の残りのアームと、偽と分かる条件を持つ `elif`。どちらも
+# `uncertain` を立てない側なので、印を付けないと「最上位で確実に走る」に化ける
+assert_matcher no-match "コマンド単位: 真と分かる条件の else 側の lint は満たさない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: lint
+        run: if true; then :; else shellcheck ${DOLLAR}LIST; fi" \
+    ci_workflow_command_matches "" "${CI_WORKFLOW_BLOCK_BODY_START}shellcheck([^[:alnum:]_])" '[$][{]?LIST[}]?([^[:alnum:]_]|$)'
+
+# **部分シェルに包むと印が立たなかった**（issue #142 (3)）。`open_form()` は `(` を
+# 読まないので `( if true` の `if` が 1 階層も開かず、`true_at` の印が付かないまま
+# `else` 側が「最上位で確実に走る」として記録されていた（実測で `main` は MATCH）
+assert_matcher no-match "コマンド単位: 部分シェルの中の真と分かる条件の else 側の lint は満たさない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: lint
+        run: ( if true; then :; else shellcheck ${DOLLAR}LIST; fi )" \
+    ci_workflow_command_matches "" "${CI_WORKFLOW_BLOCK_BODY_START}shellcheck([^[:alnum:]_])" '[$][{]?LIST[}]?([^[:alnum:]_]|$)'
+
+# **偽と分かる条件を持つ `elif` の本体も 1 度も走らない**（issue #142 (2)）。
+# `elif` を `else` と同じ扱い（印の解除）にしていたので、2 語足すだけで
+# 走らない lint が証拠に数えられた（実測で `main` は MATCH）
+assert_matcher no-match "コマンド単位: 偽と分かる elif の中の lint は満たさない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: lint
+        run: if false; then :; elif false; then shellcheck ${DOLLAR}LIST; fi" \
+    ci_workflow_command_matches "" "${CI_WORKFLOW_BLOCK_BODY_START}shellcheck([^[:alnum:]_])" '[$][{]?LIST[}]?([^[:alnum:]_]|$)'
 
 # **締めすぎない側**: 飾りを剥がした先が偽と分かる条件でなければ、今までどおり満たすこと。
 # 剥がす対象を広げすぎると（`{ ` や変数代入まで剥がす、条件を読まずに一律で死に体と見る等）
@@ -4569,6 +4756,68 @@ jobs:
     steps:
       - name: lint
         run: ( shellcheck ${DOLLAR}LIST )" \
+    ci_workflow_command_matches "" "${CI_WORKFLOW_BLOCK_BODY_START}shellcheck([^[:alnum:]_])" '[$][{]?LIST[}]?([^[:alnum:]_]|$)'
+
+# **POSIX のアーム見出しでも、偽でなければ証拠のまま**であること（issue #142 (4) の裏側）。
+# `[^()]*` は内側の `(` を跨げないので、1 行書きの `case $M in (lint) …` では
+# 見出しが剥がせず、偽と分かる条件の判定が当たらなかった（丸括弧なしの綴りは当たる
+# ＝POSIX の綴りだけが外れる非対称）。剥がす側を広げた結果として
+# **本物の lint を「無い」と診断する**方向へ倒れていないことを押さえる。
+# **1 行書きのアームに置いた lint は、どちらの綴りでも証拠にならない**（実測）——
+# 控えるのは生の本文なので `case … in (lint) shellcheck …` は開始位置に当たらない
+# （`flush_step()` が「読めない以上は主張しない」と書いている受け皿。綴りによる
+#   非対称ではないので、ここでは複数行書きで「証拠のまま」を押さえる）
+assert_matcher match "コマンド単位: POSIX のアーム見出しの中の lint は満たす" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: lint
+        run: |
+          case ${DOLLAR}M in
+            (lint)
+              shellcheck ${DOLLAR}LIST
+              ;;
+          esac" \
+    ci_workflow_command_matches "" "${CI_WORKFLOW_BLOCK_BODY_START}shellcheck([^[:alnum:]_])" '[$][{]?LIST[}]?([^[:alnum:]_]|$)'
+
+# **`elif <不明>` の本体は走りうるので証拠のまま**であること（issue #142 (2) の裏側）。
+# 偽と分かる `elif` だけを死に体にする判定が、条件を読まずに一律で倒していないこと
+assert_matcher match "コマンド単位: 条件が読めない elif の中の lint は満たす" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: lint
+        run: if false; then :; elif [ -n \"${DOLLAR}X\" ]; then shellcheck ${DOLLAR}LIST; fi" \
+    ci_workflow_command_matches "" "${CI_WORKFLOW_BLOCK_BODY_START}shellcheck([^[:alnum:]_])" '[$][{]?LIST[}]?([^[:alnum:]_]|$)'
+
+# **偽と分かる条件の else 側は必ず走る**ので証拠のまま（印の解除が効いていること）。
+# `elif false` を印の付け直しにした変更が、`else` の解除まで止めていないこと
+assert_matcher match "コマンド単位: 偽と分かる条件の else 側の lint は満たす" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: lint
+        run: if false; then :; else shellcheck ${DOLLAR}LIST; fi" \
+    ci_workflow_command_matches "" "${CI_WORKFLOW_BLOCK_BODY_START}shellcheck([^[:alnum:]_])" '[$][{]?LIST[}]?([^[:alnum:]_]|$)'
+
+# **部分シェルの中の `case` のアームも証拠のまま**（開き側が `(` を読むようにした変更が、
+# アーム見出しの `)` を部分シェルの閉じと数えて `case` の階層を潰していないこと。
+# `set_arm_here` の `subshell == 0` を模様の位置で緩めた分の裏側）
+assert_matcher match "コマンド単位: 部分シェルの中の case のアームの lint は満たす" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: lint
+        run: |
+          ( case ${DOLLAR}M in
+            lint)
+              shellcheck ${DOLLAR}LIST
+              ;;
+          esac )" \
     ci_workflow_command_matches "" "${CI_WORKFLOW_BLOCK_BODY_START}shellcheck([^[:alnum:]_])" '[$][{]?LIST[}]?([^[:alnum:]_]|$)'
 
 # **引用で包んだ `eval` の中の複合コマンドは「開きっぱなし」にしない**（レビューで実測）。
