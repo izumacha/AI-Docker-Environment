@@ -4701,6 +4701,31 @@ assert_matcher no-match "コマンド単位: コマンドの位置の開始位�
     "${LOOPED_LINT_WORKFLOW}" \
     ci_workflow_command_matches "" "${CI_WORKFLOW_COMMAND_START}shellcheck([^[:alnum:]_])" '[$][{]?LIST[}]?([^[:alnum:]_]|$)'
 
+# **狭い錨が落とすのは 1 行書きだけ（実測。issue #146）。** 同じループを複数行で書くと
+# 本体が独立した断片になるので、**錨の広狭に関係なく当たる**——この照会は
+# `ci_workflow_gating_commands` を `top` なしで呼ぶ（制御構造の深さで絞らない）ため、
+# 錨はループ本体を除く手段になっていない。穴は複数行の綴りでは開いたままで、
+# **それでも錨は広げない**（広げれば 1 行書きでも同じ穴が開く）。
+# ここは「狭い錨が何を保証していて何を保証していないか」を両向きで固定する
+MULTILINE_LOOPED_LINT_WORKFLOW="name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: lint
+        run: |
+          for f in ${DOLLAR}CHANGED; do
+              shellcheck ${DOLLAR}LIST
+          done"
+
+assert_matcher match "コマンド単位: 複数行のループの本体は狭い開始位置でも数えてしまう" \
+    "${MULTILINE_LOOPED_LINT_WORKFLOW}" \
+    ci_workflow_command_matches "" "${CI_WORKFLOW_COMMAND_START}shellcheck([^[:alnum:]_])" '[$][{]?LIST[}]?([^[:alnum:]_]|$)'
+
+assert_matcher match "コマンド単位: 複数行のループは広げた開始位置でも数える" \
+    "${MULTILINE_LOOPED_LINT_WORKFLOW}" \
+    ci_workflow_command_matches "" "${CI_WORKFLOW_BLOCK_BODY_START}shellcheck([^[:alnum:]_])" '[$][{]?LIST[}]?([^[:alnum:]_]|$)'
+
 # **広げた側でも、複数行の書き方は今までどおり満たすこと**（退行していないこと）
 assert_matcher match "ステップ単位: 複数行のループも引き続き満たす" "name: ci
 jobs:
