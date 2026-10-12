@@ -119,6 +119,44 @@ mapfile -t shell_files < <(ci_workflow_env_records val "${SHELL_FILES_VAR}")
 [ "${#shell_files[@]}" -gt 0 ] \
     || bail "could not parse ${SHELL_FILES_VAR} out of ${CI_WORKFLOW} (the \"${SHELL_FILES_VAR}: >-\" block moved or changed shape); this test cannot verify coverage"
 
+# --- スイートがどのジョブで走るか（docs/requirements.md FR-8.1 の対応） ---------------
+
+# **ジョブ名まで照合するための表。** 正本は `docs/requirements.md` FR-8.1 で、
+# ここはそれを引く 1 か所。
+#
+# **なぜ要るのか（fail-open の修正）。** ケース 4 は以前
+# `ci_workflow_runs_script "${script}"` をジョブ名**なし**で呼んでいたため、
+# どのジョブで実行されていても緑になっていた（issue #114 (2)）。
+# FR-8.1 は Docker 不要のハーメティックなスイートを type-check に置くと定めているのに、
+# e2e へ移しても網は緑のまま通る——移した先は Docker が要るジョブなので、
+# Docker が使えない状況で**スイートが事実上動かなくなる**のに誰も気付けない。
+# 姉妹の `test/sec18_denylist_test.sh` は最初からジョブ名を渡しており、
+# そこには「絞り込まないと、ケース名が主張している『e2e ジョブが』の部分だけが
+# 誰にも確かめられない」と書いてある——**同じライブラリの同じ照会に 2 つの基準が
+# 併存していた**のを揃える。
+#
+# **表を持つこと自体が強制になる。** 下のループは載っていないスイートで落ちるので、
+# 新しいスイートを足した人は「どちらのジョブで走らせるか」を必ず 1 度決めることになる。
+# 現在は全 7 件が type-check（いずれもハーメティック）で、e2e で走るのは
+# `*_test.sh` の命名規約に沿わない `test/sec18_denylist_e2e.sh` だけなのでこの表には入らない
+# （あちらの配線は `test/sec18_denylist_test.sh` がジョブ名付きで固定している）。
+declare -A SUITE_JOBS=(
+    # guard_workspace() の自動テスト（SEC-8 / AC-2。PATH スタブでハーメティック）
+    ["test/guard_test.sh"]="type-check"
+    # entrypoint.sh の SEC-13 二重キーテスト（gosu を PATH スタブで差し替え）
+    ["test/entrypoint_test.sh"]="type-check"
+    # デモ録画スクリプトの fail-closed 契約テスト
+    ["test/record_demo_test.sh"]="type-check"
+    # SEC-18 機密 GID デニーリストの判定契約（e2e 本体とは別物）
+    ["test/sec18_denylist_test.sh"]="type-check"
+    # ci.yml 解析ライブラリの単体テスト
+    ["test/ci_workflow_test.sh"]="type-check"
+    # 本テスト自身（CI の検出網の網羅性）
+    ["test/ci_coverage_test.sh"]="type-check"
+    # action ピンとマーカーの一致検証（FR-9.6(b)）
+    ["test/action_pin_test.sh"]="type-check"
+)
+
 # --- リポジトリ側の実体を数え上げる -------------------------------------------------
 
 # コミット済みファイルのうちシェルスクリプトであるものを列挙する。
@@ -210,8 +248,19 @@ array_contains() {
 # `shellcheck bin/aidock` に書き換えるだけで一覧のほとんどが誰にも lint されなくなるのに
 # 本テストは緑のまま通る（レビューで実測）
 # コマンドの開始位置（`sudo` / `timeout` などの実行ラッパを読み飛ばす綴り）は
-# ライブラリの `CI_WORKFLOW_COMMAND_START` を使う。ここに独自の狭い版を書くと、
+# ライブラリの綴りを使う。ここに独自の狭い版を書くと、
 # 「実際に呼ばれているか」への答えが 2 つに割れる（§6 DRY）。
+# **リンタ網は `CI_WORKFLOW_BLOCK_BODY_START`（`do` / `then` / `else` も許す版）を使う。**
+# `split_commands` は `;` で切るので、意味の変わらない 1 行書き
+# （`for f in $SHELL_FILES; do bash -n "$f"; done`）の断片は `do bash -n "$f"` になり、
+# `^` に錨を打った `CI_WORKFLOW_COMMAND_START` には当たらない——**すべてのファイルが
+# 実際には構文チェックされているのに「一覧に載せても構文チェックされない」という
+# 事実と逆の診断で CI を赤くする**（issue #114 (1)。整形しただけで赤くなる形）。
+# ここで広げてよい理由は「問いが違う」こと: この網が問うのは
+# 「そのステップが一覧を消費する配線になっているか」で、本体が何回まわるかは
+# ケース 2・3（一覧と実体の突き合わせ）が受け持つ。
+# **`ci_workflow_runs_script`（下のケース 4）には広げない**——あちらは
+# 「本当に実行されるか」を問うので、0 回まわるループの本体を実行の証拠に数えてはいけない。
 # 変数参照は `$SHELL_FILES` と `${SHELL_FILES}` のどちらの書き方でも同じ意味なので両方を認め、
 # **直後が識別子の文字でないこと**まで見る（`$SHELL_FILES_FAST` のような別変数に当たらないように）
 SHELL_FILES_REF="[$][{]?${SHELL_FILES_VAR}[}]?([^[:alnum:]_]|$)"
@@ -230,7 +279,7 @@ assert_with ci_workflow_command_matches \
     "リンタ網: shellcheck が SHELL_FILES を受け取って実行される" \
     "ci.yml に「shellcheck に SHELL_FILES そのものを渡して実行する」コマンドが、一覧を定義したジョブに無い。一覧に載せても lint されない（失敗を握り潰す形も数えない）" \
     "${shell_files_job}" \
-    "${CI_WORKFLOW_COMMAND_START}shellcheck([^[:alnum:]_])" "${SHELL_FILES_REF}"
+    "${CI_WORKFLOW_BLOCK_BODY_START}shellcheck([^[:alnum:]_])" "${SHELL_FILES_REF}"
 
 # `bash -n` はループ変数を経由するため 1 行に収まらない。**同じステップの中に**
 # 「一覧を回すループ」と「bash -n の実行」が揃っていることを見る。
@@ -242,8 +291,8 @@ assert_with ci_workflow_step_matches \
     "リンタ網: bash -n が SHELL_FILES を回して実行される" \
     "ci.yml に「SHELL_FILES を for ループで回し、その各要素に bash -n を実行する」ステップが、一覧を定義したジョブに無い。一覧に載せても構文チェックされない（失敗を握り潰す形も数えない）" \
     "${shell_files_job}" \
-    "${CI_WORKFLOW_COMMAND_START}for +[A-Za-z_][A-Za-z0-9_]* +in +[^;&|]*${SHELL_FILES_REF}" \
-    "${CI_WORKFLOW_COMMAND_START}bash +-n([^[:alnum:]_]|$)"
+    "${CI_WORKFLOW_BLOCK_BODY_START}for +[A-Za-z_][A-Za-z0-9_]* +in +[^;&|]*${SHELL_FILES_REF}" \
+    "${CI_WORKFLOW_BLOCK_BODY_START}bash +-n([^[:alnum:]_]|$)"
 
 # --- ケース 2: すべてのシェルスクリプトがリンタの一覧に載っている -----------------------
 
@@ -291,14 +340,20 @@ for script in "${discovered_scripts[@]}"; do
     [[ "${script}" == test/*_test.sh ]] || continue
     # 検査したスイートの件数を数える
     wired_suites_checked=$((wired_suites_checked + 1))
+    # **そのスイートが属するジョブを表から引く。** 載っていなければ落とす（fail-closed）——
+    # 新しいスイートを足した人に「どちらのジョブで走らせるか」を必ず 1 度決めさせる
+    suite_job="${SUITE_JOBS[${script}]:-}"
+    [ -n "${suite_job}" ] \
+        || bail "${script} が SUITE_JOBS に無い。docs/requirements.md FR-8.1 を見て、このスイートを走らせるジョブ（type-check / e2e）を SUITE_JOBS へ登録すること"
+
     # ci.yml のいずれかの `run:` ステップが `bash <path>` を実行していることを確かめる。
     # 置いただけで呼ばれないスイートは「常に緑」と見分けが付かない。
     # パスは正規表現リテラルとしてエスケープし、直後が空白か行末であることまで見る
     # （`bash test/foo_test.sh` の探索が `bash test/foo_test.sh.bak` に当たらないように）
     assert_with ci_workflow_runs_script \
-        "実行網: ${script} が ci.yml から実行されている" \
-        "${script} は ci.yml のどの run: ステップからも実行されていない（コメント部分と、if: false / continue-on-error: true で無効化されたステップは数えない）" \
-        "${script}"
+        "実行網: ${script} が ci.yml の ${suite_job} ジョブから実行されている" \
+        "${script} は ci.yml の ${suite_job} ジョブのどの run: ステップからも実行されていない（コメント部分と、if: false / continue-on-error: true で無効化されたステップは数えない）。別のジョブへ移したのなら SUITE_JOBS も直すこと" \
+        "${script}" "${suite_job}"
 done
 
 # **1 件も見なかった場合を合格にしない。** 命名規約が変わる・発見ロジックが壊れる等で

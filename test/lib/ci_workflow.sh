@@ -48,11 +48,34 @@
 #   ci_workflow_regex_escape    <string>          # literal text -> safe ERE fragment
 # `<job>` は絞り込むジョブ名。空文字列を渡すとジョブを問わない。
 
-# **コマンドの開始位置**を表す正規表現の断片（実行ラッパと環境変数の前置きを読み飛ばす）。
-# `ci_workflow_runs_script` と、リンタの綴りを照合する呼び出し側の**両方**がこれを使う——
-# 別々に書くと「このコマンドは実際に呼ばれているか」への答えが 2 つに割れ、
+# **コマンドの手前に置ける前置き**（実行ラッパと環境変数の代入）を表す断片。
+# 下の 2 つの開始位置が**同じ一覧**を読むためにここ 1 か所に置く——別々に書くと、
 # 片方だけが `sudo shellcheck …` のような等価な書き換えを認めなくなる（レビューで実測）
-CI_WORKFLOW_COMMAND_START='^[(]?[[:space:]]*((sudo|env|nice|timeout|command|exec)[[:space:]]+|[0-9]+[smhd]?[[:space:]]+|[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*'
+CI_WORKFLOW_COMMAND_PREFIXES='((sudo|env|nice|timeout|command|exec)[[:space:]]+|[0-9]+[smhd]?[[:space:]]+|[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*'
+
+# **コマンドの開始位置**を表す正規表現の断片（上の前置きを読み飛ばす）。
+# `ci_workflow_runs_script`（「本当に実行されるか」を問う側）がこれを使う。
+CI_WORKFLOW_COMMAND_START="^[(]?[[:space:]]*${CI_WORKFLOW_COMMAND_PREFIXES}"
+
+# **ブロック本体の先頭**も開始位置として許す版（`do` / `then` / `else` を 1 つだけ読み飛ばす）。
+#
+# **なぜ 2 つに分けるのか。** `split_commands` は `;` で切るので、1 行に畳んだ
+# `for f in $LIST; do bash -n "$f"; done` の断片は `do bash -n "$f"` になる。
+# `CI_WORKFLOW_COMMAND_START` は `^` に錨を打っていて `do` を知らないため、
+# **意味の変わらない 1 行書き**が照合から外れていた（issue #114 (1)。向きは fail-closed で、
+# 実際にはすべてのファイルが構文チェックされているのに「一覧に載せても構文チェックされない」と
+# **事実と逆の診断**で CI を赤くする）。
+#
+# **`ci_workflow_runs_script` にこれを使ってはいけない。** あちらの問いは
+# 「そのスクリプトが本当に実行されるか」で、ループ本体が走るかは回数次第だから——
+# `do` を許すと「0 回まわるループの中の呼び出し」を実行の証拠として数える（fail-open）。
+# こちらの問いは「そのステップが一覧を消費する配線になっているか」なので、
+# 本体が何回まわるかは別の検査（一覧が空でないこと）が受け持つ。
+# **2 つの照会で許す語が違うこと自体が意図**で、片方へ寄せてはいけない。
+#
+# 読み飛ばすのは 1 つだけにする（`do do …` のような綴りは bash として成り立たないので、
+# 繰り返しを許すと照合が緩むだけで得が無い）。
+CI_WORKFLOW_BLOCK_BODY_START="^[(]?[[:space:]]*((do|then|else)[[:space:]]+)?${CI_WORKFLOW_COMMAND_PREFIXES}"
 
 # **YAML のコメントが始まる位置**を表す正規表現の断片（行頭、または空白の直後の `#`）。
 # 値の途中の `#`（`name: a#b`）はコメントではないので、ここで空白を任意にしてはいけない

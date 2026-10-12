@@ -4329,6 +4329,68 @@ jobs:
           done" \
     ci_workflow_step_matches "" "(^|[;&|(][[:space:]]*)for +[A-Za-z_][A-Za-z0-9_]* +in +[^;&|]*[$][{]?LIST[}]?([^[:alnum:]_]|$)" '(^|[;&|(][[:space:]]*)bash +-n([^[:alnum:]_]|$)'
 
+# --- ブロック本体の先頭を許す開始位置（issue #114 (1)） --------------------------------
+
+# **穴の側**: 意味の変わらない 1 行書きでも、ステップ単位の照合が満たされること。
+# `split_commands` は `;` で切るので断片は `do bash -n "$f"` になり、
+# `^` に錨を打った `CI_WORKFLOW_COMMAND_START` には当たらなかった
+# （実際にはすべてのファイルが構文チェックされているのに「されない」と**事実と逆の診断**で
+#  CI を赤くする＝整形しただけで赤くなる形）
+assert_matcher match "ステップ単位: 1 行に畳んだループの本体も満たす" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: lint
+        run: for f in ${DOLLAR}LIST; do bash -n \"${DOLLAR}f\"; done" \
+    ci_workflow_step_matches "" "${CI_WORKFLOW_BLOCK_BODY_START}for +[A-Za-z_][A-Za-z0-9_]* +in +[^;&|]*[$][{]?LIST[}]?([^[:alnum:]_]|$)" "${CI_WORKFLOW_BLOCK_BODY_START}bash +-n([^[:alnum:]_]|$)"
+
+# **旧い開始位置では当たらないこと**（この 2 つが別物であることの固定）。
+# どちらかに寄せる変更が入ったら、ここか下の no-match が落ちる
+assert_matcher no-match "ステップ単位: 旧い開始位置は 1 行書きに当たらない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: lint
+        run: for f in ${DOLLAR}LIST; do bash -n \"${DOLLAR}f\"; done" \
+    ci_workflow_step_matches "" "${CI_WORKFLOW_COMMAND_START}bash +-n([^[:alnum:]_]|$)"
+
+# **広げた側でも、複数行の書き方は今までどおり満たすこと**（退行していないこと）
+assert_matcher match "ステップ単位: 複数行のループも引き続き満たす" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: lint
+        run: |
+          for f in ${DOLLAR}LIST; do
+              bash -n \"${DOLLAR}f\"
+          done" \
+    ci_workflow_step_matches "" "${CI_WORKFLOW_BLOCK_BODY_START}for +[A-Za-z_][A-Za-z0-9_]* +in +[^;&|]*[$][{]?LIST[}]?([^[:alnum:]_]|$)" "${CI_WORKFLOW_BLOCK_BODY_START}bash +-n([^[:alnum:]_]|$)"
+
+# **広げた側でも実行ラッパを読み飛ばせること**（前置きの一覧を 1 か所に寄せた結果の確認）
+assert_matcher match "ステップ単位: 本体の先頭の語と実行ラッパが重なっても満たす" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: lint
+        run: for f in ${DOLLAR}LIST; do sudo bash -n \"${DOLLAR}f\"; done" \
+    ci_workflow_step_matches "" "${CI_WORKFLOW_BLOCK_BODY_START}bash +-n([^[:alnum:]_]|$)"
+
+# **締めすぎの側**: 「本当に実行されるか」を問う照会は、ブロック本体の先頭を
+# 実行の証拠に数えないこと。ループが 0 回まわる場合があるので、こちらは
+# fail-closed に保つ必要がある（広げると握り潰されたスイートを緑で通す）
+assert_matcher no-match "実行網: 1 行に畳んだループの本体は実行の証拠に数えない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: suites
+        run: for f in a; do bash test/subject_test.sh; done" \
+    ci_workflow_runs_script 'test/subject_test.sh'
+
 assert_matcher match "コマンド単位: 実行ラッパ越しでも満たす" "name: ci
 jobs:
   type-check:
