@@ -2800,6 +2800,64 @@ jobs:
       - name: subject
         run: sudo bash ${SUITE_PATH}"
 
+# **必ず走るグループの開きは、何個重なっても命令の位置を変えない**（レビューで実測）。
+# `(` を 1 つしか許していなかった頃は、実際には走ってゲートしている綴りを
+# 「実行されていない」と**事実と逆の診断**で落としていた（fail-closed）。
+# 対になる控えは下の 2 件（関数定義・偽と分かる条件）で、こちらが「何でも通す」形へ
+# 緩んでいないことを押さえる
+for group_open_case in \
+    "ブレースグループ:{ bash ${SUITE_PATH}; }" \
+    "ブレースの中の部分シェル:{ ( bash ${SUITE_PATH} ) }" \
+    "二重の部分シェル:( ( bash ${SUITE_PATH} ) )" \
+    "部分シェルの中のブレース:( { bash ${SUITE_PATH}; } )"
+do
+    assert_wired "${group_open_case%%:*}の先頭に置いた呼び出し" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${group_open_case#*:}"
+done
+
+# **`time` も前置き**（`strip_command_prefixes()` が既にそう扱っているのと揃える）。
+# `time bash x` はスクリプトを実行し、失敗もそのまま伝わる（`set -e` の下で `time false` は
+# exit 1）のに、前置きの一覧に無いせいで「実行されていない」と読まれていた（fail-closed）
+assert_wired "time 経由の呼び出し" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: time bash ${SUITE_PATH}"
+
+assert_wired "time -p 経由の呼び出し" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: time -p bash ${SUITE_PATH}"
+
+# 締めすぎない側: **`!` は終了状態を反転する**ので前置きに入れない（本当にゲートしない）
+assert_not_wired "! 経由の呼び出し（終了状態が反転するのでゲートしない）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: ! bash ${SUITE_PATH}"
+
+# 締めすぎない側: `-p` は `time` にだけ続く形（素の `-p` を前置きとして認めない）
+assert_not_wired "素の -p は前置きではない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: -p bash ${SUITE_PATH}"
+
 assert_not_wired "bash -o noexec（-n の別綴り）" "name: ci
 jobs:
   type-check:
@@ -3129,11 +3187,18 @@ jobs:
 # `last_deciding_open()` から導くが、その中で先頭の `(` を越える上限を**開いた階層すべての数**と
 # 共有すると、手前に `{` や `f() {` があるだけで上限に当たり **`(` を 1 つも越えられない**
 # ——印が 2 階層浅くなり、閉じた後も残って*走る*呼び出しが `not-wired` に化ける（fail-closed）。
-# 越えた数は専用に数える（`lead_subshells()`）。**3 形を置く**のが要点で、
-# 1 つでも欠けると「手前に 1 つあるときだけ」「2 つ重なったときだけ」の形が静かに穴になる
+# 越えた数は専用に数える（`cross_lead_subshells()`）。**重ね方を網羅するのが要点**で、
+# 「手前に 1 つあるときだけ」「2 つ重なったときだけ」「内と外を入れ替えたときだけ」割れる
+# 分断があるため、1 形だけ置くと残りが静かに穴になる（並べる綴りは重ね方 3 形
+# ——`{ ( … ) }` / `{ ( ( … ) ) }` / `( { … } )`——と、偽と分かる条件の 3 綴り）。
+# **`while false` / `until true` を併記するのは分類の枝が違うから**ではない
+# （`if` / `while` / `until` は `open_form()` の同じ枝に落ちる）——偽と分かる条件を見る
+# `strip_dead_cond_prefixes()` 側が `if|while` と `until` を**別の綴り**で判定しており、
+# そちらの取りこぼしを押さえる
 for composed_dead_case in \
     "ブレースと部分シェル:{ ( if false; then :; fi ) ; bash ${SUITE_PATH}; }" \
     "ブレースと二重の部分シェル:{ ( ( if false; then :; fi ) ) ; bash ${SUITE_PATH}; }" \
+    "部分シェルとブレース:( { if false; then :; fi ; bash ${SUITE_PATH}; } )" \
     "ブレースと部分シェルの偽のループ:{ ( while false; do :; done ) ; bash ${SUITE_PATH}; }" \
     "ブレースと部分シェルの until ループ:{ ( until true; do :; done ) ; bash ${SUITE_PATH}; }"
 do
@@ -3159,6 +3224,25 @@ jobs:
           { ( if false; then
             bash ${SUITE_PATH}
           fi ) ; }"
+
+# **関数の本体は重ねても証拠にならない**（`f() { ( … ) }` の形。上の `assert_wired` 群と
+# 同じ重ね方なので、こちらを置かないと「前置きを越えたら何でも最上位」へ緩めた変異が
+# 全件緑のまま通る）。呼び出しを書いても同じ——このライブラリは関数の本体を
+# 一度も実行の証拠にしない
+for composed_fn_case in \
+    "呼び出しなし:f() { ( if false; then :; fi ) ; bash ${SUITE_PATH}; }" \
+    "呼び出しあり:f() { ( if false; then :; fi ) ; bash ${SUITE_PATH}; }
+          f"
+do
+    assert_not_wired "関数の本体に重ねた前置き（${composed_fn_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${composed_fn_case#*:}"
+done
 
 assert_not_wired "実行ラッパの後ろに置いた偽と分かる分岐の本体" "name: ci
 jobs:
@@ -4713,7 +4797,9 @@ for dead_prefix_case in \
     "ブレースの偽のループ:{ while false; do shellcheck ${DOLLAR}LIST; done; }" \
     "関数の本体:f() { if false; then shellcheck ${DOLLAR}LIST; fi; }" \
     "case のアーム:case ${DOLLAR}M in lint) if false; then shellcheck ${DOLLAR}LIST; fi;; esac" \
-    "POSIX の case のアーム:case ${DOLLAR}M in (lint) if false; then shellcheck ${DOLLAR}LIST; fi;; esac"
+    "POSIX の case のアーム:case ${DOLLAR}M in (lint) if false; then shellcheck ${DOLLAR}LIST; fi;; esac" \
+    "飾り付きの case のアーム:time case ${DOLLAR}M in lint) if false; then shellcheck ${DOLLAR}LIST; fi;; esac" \
+    "反転付きの case のアーム:! case ${DOLLAR}M in lint) if false; then shellcheck ${DOLLAR}LIST; fi;; esac"
 do
     assert_matcher no-match "コマンド単位: ${dead_prefix_case%%:*}の中の偽と分かる条件は満たさない" "name: ci
 jobs:
@@ -4723,6 +4809,27 @@ jobs:
       - name: lint
         run: ${dead_prefix_case#*:}" \
         ci_workflow_command_matches "" "${CI_WORKFLOW_BLOCK_BODY_START}shellcheck([^[:alnum:]_])" '[$][{]?LIST[}]?([^[:alnum:]_]|$)'
+done
+
+# **`case` を開くかの判定も、分類と同じ剥がし方を通す**（レビューで実測した fail-open）。
+# `open_form()` は `time` / `!` を剥がしてから分類するのに、「この断片は `case` を開くか」を
+# 生の綴りで見ていたため、`time case …` / `! case …` では `case_depth` も `arm_expected` も
+# 立たず、**アーム模様の `)` が部分シェルの閉じとして数えられて**一致しないアームの中身が
+# 「最上位で確実に走る」に化けた（2 語足すだけで「最上位だけ」の絞り込みを迂回できた）。
+# 素の綴りと答えがそろうことを対で押さえる
+for decorated_case_arm in \
+    "素の綴り:case ${DOLLAR}X in a) ( : | cat ) ; bash ${SUITE_PATH};; esac" \
+    "time 付き:time case ${DOLLAR}X in a) ( : | cat ) ; bash ${SUITE_PATH};; esac" \
+    "反転付き:! case ${DOLLAR}X in a) ( : | cat ) ; bash ${SUITE_PATH};; esac"
+do
+    assert_not_wired "一致しないアームの中身は最上位に上がらない（${decorated_case_arm%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${decorated_case_arm#*:}"
 done
 
 # --- 必ず走らないアームの中の lint（issue #142 (2)(3)） -----------------------------
@@ -6025,6 +6132,36 @@ jobs:
     steps:
       - run: |
           uses: actions/evil@v1
+      - uses: ./other' 8
+
+# **穴の側の出力も固定する**（レビューで実測）。`run: "|` はブロックスカラーの開始と
+# 読まないので、続きの行（閉じ引用符を載せた行）は**本文として落ちず構造行として出る**。
+# 向きは「余分に出す」側で、ピン検査には実在しない手順への参照（幻の `uses:`）を渡すことに
+# なるが、**取りこぼす側（本物の `secrets:` を捨てる fail-open）よりこちらを取る**という
+# 既知の残り（`KNOWN RESIDUAL: 複数行にまたがる引用スカラーは幻を残す`）どおりの挙動。
+# 引用符そのものは伏せ処理が落とすので、期待値に閉じ引用符は現れない（実測）。
+# 固定しておかないと、どちらの向きへ動いてもテストが何も言わない
+assert_structural_line "引用の中のブロックスカラー記号の続きの行は構造行として出る" \
+    '          uses: actions/evil@v1' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: "|
+          uses: actions/evil@v1"
+      - uses: ./other' 7
+
+# 同じ入力で後続の構造行も出ること（ラッチが戻っていることを別の行で押さえる）
+assert_structural_line "引用の中のブロックスカラー記号の後ろでも構造行は出る" \
+    '      - uses: ./other' \
+    'name: ci
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: "|
+          uses: actions/evil@v1"
       - uses: ./other' 8
 
 # **続きの行は「閉じたか」ではなく「末尾で何が開いているか」で見る。** 閉じた時点で打ち切ると、
