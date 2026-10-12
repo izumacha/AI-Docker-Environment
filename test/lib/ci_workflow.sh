@@ -1086,7 +1086,8 @@ ci_workflow_extract() {
         # 呼び直すと無駄が大きい、というのが 1 度だけ求めている理由）。ループの 2 周目以降は
         # 本文が別物なので測り直す
         function open_form(t, cached_fn_form, use_cached,   ff, probe) {
-            # **自分では階層を開かない飾り（`time` / `eval` / `!`）の後ろも分類する。**
+            # **自分では階層を開かない飾り（`time` / `!`）の後ろも分類する。**
+            # （`eval` は**落とさない**。理由は `strip_struct_wrappers()` の説明）
             # 読まないと `time if false; then X; fi` の `if` が 1 階層も開かず、X が
             # 「最上位で走る」として記録される（issue #114 のレビューで実測）。
             # 綴りの一覧は `strip_struct_wrappers()` が唯一の源（`(` を含めない理由も同関数に）。
@@ -1296,16 +1297,53 @@ ci_workflow_extract() {
             if (want_pipe && wp[name] && wp_at[name] >= at) { wp[name] = 0 }
         }
 
+        # アーム見出しの**綴りを返す唯一の場所**（`close_word_re()` と同じ理由。この綴りは
+        # 「見出しで始まるか」の判定・見出しの剥がし・「模様を読み切ったか」の 3 か所が読むので、
+        # 写しを持つと片方だけが新しい綴りを知る＝同じ断片への答えが割れる。同ファイルの
+        # コメントは、以前そのずれが引用の扱いの食い違いとして現れたと記録している）。
+        # **末尾の区切りは付けない**——「見出しで始まるか」は境界（空白 / `;` / 行末）を要求し、
+        # 「剥がす」側は後ろの空白ごと落とすので、要求する形が呼び出し側で違う。
+        # 先頭の `(` は POSIX のアーム綴り（`(a)`）。`[^()]*` は `(` を跨げないので、
+        # 任意扱いで明示しないと丸括弧付きのアームだけ当たらない
+        # （当たらないとアーム同士の排他が効かず、別アームの `set -e` が
+        #   前のアームの `set +e` を打ち消す。実 bash と差分照合して実測）
+        function arm_head_re() {
+            return "^\\(?[^()]*\\)"
+        }
+
+        # 1 行書きで `case … in ` の前置きが手前に付いた見出しの綴り（issue #142 (4)）。
+        # **`[^()]*` は内側の `(` を跨げない**ので、上の綴りだけでは
+        # `case $M in (lint) …` に当たらない——`case $M in lint) …`（丸括弧なし）は当たるのに
+        # POSIX の綴りだけが外れる非対称で、`case $M in (lint) if false; then <lint>; fi;; esac` の
+        # 本体が「偽と分かる条件の中」と判定されず、**1 度も走らない lint が
+        # リンタ網の証拠に数えられていた**（実測で gate=1。丸括弧なしと複数行書きはどちらも gate=0）。
+        # **`case` を含むことまで要求する**のが要点で、` in ` と `(…)` だけを手がかりにすると
+        # `grep -e in (x) …` のような無関係な綴りまで見出しと読み、剥がした先に
+        # 偽と分かる条件が現れれば**走る本体を死に体**と判定しうる（向きは fail-closed）。
+        # 前置きに丸括弧は現れない（`case` の主語に `$(…)` があれば `[^()]*` が跨げず当たらない）
+        # ——その場合は当たらない側＝剥がさない側に倒れるので、幻の階層は作らない
+        function arm_head_in_re() {
+            return "^([^()]*[[:space:]])?case[[:space:]][^()]*[[:space:]]in[[:space:]]*\\(?[^()]*\\)"
+        }
+
         # 先頭のアーム見出し（`y)` / `(y)` / `y|z)`）を落として、その後ろ（＝命令の位置）を返す。
         # **位置は伏せた写しで測り、切るのは生の本文**——`starts_case_arm()` と同じ規則で、
         # 揃えないと引用の中の `)`（`"a)b") …`）で剥がす量がずれ、残りが分類できなくなって
         # アームの中の複合コマンドが 1 つも数えられない（後の `done` が `case` の階層を閉じ、
         # 一致しないアームの中身が最上位に上がる fail-open。レビューで実測）。
         # 長さは `mask_quoted()` が保つので、伏せた写しで測った桁をそのまま使える
-        function drop_arm_head(t,   masked) {
+        function drop_arm_head(t,   masked, re) {
             masked = mask_quoted(t)
-            if (!match(masked, /^\(?[^()]*\)[[:space:]]*/)) { return t }
-            return substr(t, RLENGTH + 1)
+            # **模様の位置にそのまま来る形を先に見る。** `a) case x in (b) …` では
+            # 外側の見出しだけを落とすのが正しく、順序を逆にすると内側の `case … in (b)` まで
+            # まとめて落として `case` の階層が 1 つも開かない（一致しないアームの中身が
+            # 最上位に上がる fail-open。`open_head` の剥がしが同じ理由を記録している）
+            re = arm_head_re() "[[:space:]]*"
+            if (match(masked, re)) { return substr(t, RLENGTH + 1) }
+            # 1 行書きで `case … in ` の前置きが手前に付く形
+            re = arm_head_in_re() "[[:space:]]*"
+            if (match(masked, re)) { return substr(t, RLENGTH + 1) }
+            return t
         }
 
         # この断片が、**自分で開いた `case` の模様まで読み切ったか**を返す。
@@ -1333,8 +1371,10 @@ ci_workflow_extract() {
             if (!match(from, /[[:space:]]in([[:space:]]|$)/)) { return 0 }
             # `in` の後ろが模様の位置
             rest = substr(from, RSTART + RLENGTH)
-            # 見出しを閉じる `)` まで来ていれば、この断片で模様は消費済み
-            return (rest ~ /^\(?[^()]*\)([[:space:]]|;|$)/)
+            # 見出しを閉じる `)` まで来ていれば、この断片で模様は消費済み。
+            # **ここは `in` の後ろを見ているので前置き付きの綴りは要らない**
+            # （綴り自体は `arm_head_re()` が唯一の源。写しを持つと答えが割れる）
+            return (rest ~ (arm_head_re() "([[:space:]]|;|$)"))
         }
 
         # `case` を開く語の綴りを返す**唯一の場所**（`close_word_re()` / `function_head_re()` と同じ理由）
@@ -1420,16 +1460,17 @@ ci_workflow_extract() {
             return updated
         }
 
-        # その断片が `case` のアーム見出しで始まるか（`y)` / `(y)` / `y|z)`）。
+        # その断片が `case` のアーム見出しで始まるか（`y)` / `(y)` / `y|z)`、
+        # および 1 行書きで `case … in ` の前置きが手前に付いた `case $M in (y) …`）。
         # **伏せた本文で測る**——引用の中の `) `（`echo "a) b"`）をアームと読むと、
         # 深さの勘定と括りの記録の両方が狂う。同じ規則が 3 か所にあったので 1 つへ寄せた
         # （うち 1 か所は生の本文で測っており、引用の扱いが食い違っていた）
-        function starts_case_arm(t) {
-            # 先頭の `(` は POSIX のアーム綴り（`(a)`）。`[^()]*` は `(` を跨げないので、
-            # 任意扱いで明示しないと丸括弧付きのアームだけ当たらない
-            # （当たらないとアーム同士の排他が効かず、別アームの `set -e` が
-            #   前のアームの `set +e` を打ち消す。実 bash と差分照合して実測）
-            return (mask_quoted(t) ~ /^\(?[^()]*\)([[:space:]]|;|$)/)
+        function starts_case_arm(t,   masked, tail) {
+            masked = mask_quoted(t)
+            # 境界（空白 / `;` / 行末）まで要求する。綴りは `arm_head_re()` /
+            # `arm_head_in_re()` が唯一の源（剥がす側と同じものを読む）
+            tail = "([[:space:]]|;|$)"
+            return (masked ~ (arm_head_re() tail)) || (masked ~ (arm_head_in_re() tail))
         }
 
         # 先頭の飾りを落として `set …` そのものを返す。該当しなければ空文字。
@@ -1487,10 +1528,11 @@ ci_workflow_extract() {
         }
 
         # **後ろの制御構造を「開き 1 つ」として数えるのを邪魔しない飾り**だけを落として返す。
-        # 落とすのは `time` / `eval` / `!` の 3 つで、どれも**自分では階層を開かない**うえ、
+        # 落とすのは `time` / `!` の 2 つで、どちらも**自分では階層を開かない**うえ、
         # 後ろに続く制御構造の条件がそのまま本体の運命を決める
         # （`time if false; then X; fi` も `! if false; …` も X は 1 度も走らない。
-        #  `!` は終了状態を反転するだけ、`time` は計測するだけ、`eval` は現在のシェルで走る）。
+        #  `!` は終了状態を反転するだけ、`time` は計測するだけ）。
+        # **`eval` を落とさない理由は下の段落が記録している**（引用で包んだ形を毒するため）。
         #
         # **`(` は入れない。** 部分シェルの階層は釣り合い（`paren_delta()`）が別に数えるので、
         # ここで落として `open_form()` が後ろの `if` も形 2 として返すと、1 つの断片で
@@ -1707,6 +1749,24 @@ ci_workflow_extract() {
                             # **偽の解除より先に見る**のが要点で、順序を逆にすると
                             # `elif` を 1 つ挟むだけで直前に付けた印が解除される
                             if (true_at[depth]) { if (dead_depth < 0) { dead_depth = depth - 1 } }
+                            # **`elif false` の本体も必ず走らない**（issue #142 (2)）。
+                            # `elif` を `else` と同じ扱いにしていたので
+                            # `if false; then true; elif false; then <lint>; fi` の本体が
+                            # 「必ず走る」側へ解除され、**1 度も走らない lint がリンタ網の
+                            # 証拠に数えられていた**（実測で MATCH）。`else` では
+                            # 「偽の裏は必ず真」が成り立つが、`elif <条件>` の裏は
+                            # その条件次第なので、同じ推論を当ててはいけない。
+                            # **偽と分かる条件を持つ `elif` だけ**を印の付け直しにする
+                            # （`dead_depth < 0` のときは新たに付け、既に付いていれば
+                            #  下の解除へ進ませないことで保たれる）。
+                            # **`elif <不明>` は解除したままにする**のが要点で、
+                            # そちらの本体は*走りうる*ので中の `set +e` を反映しないと
+                            # 握り潰しを見逃す（`set` の反映は `dead_depth < 0` が条件。実測で、
+                            #  解除をやめると `elif` の中の `set +e` が無視されて
+                            #  握り潰されたスイートが「ゲートしている」と読まれた）
+                            else if (text ~ /^elif[[:space:]]+false([[:space:]]|;|$)/) {
+                                if (dead_depth < 0) { dead_depth = depth - 1 }
+                            }
                             # 偽と分かる条件の else 側は逆に**必ず走る**ので、偽の印を解除する
                             else if (dead_depth >= 0 && depth == dead_depth + 1) { dead_depth = -1 }
                         }
@@ -1773,7 +1833,23 @@ ci_workflow_extract() {
                         case_opens_at = walk_opens_case(struct_text, fn_form, 1)
                         opens_case_here = (case_opens_at > 0)
                         case_scope = (case_depth > 0 || opens_case_here)
-                        set_arm_here = (case_scope && subshell == 0 && starts_case_arm(struct_text))
+                        # **部分シェルの中では、模様の位置にいるときだけアーム見出しと読む**
+                        # （issue #142 (3) のレビューで実測）。`subshell == 0` を無条件に課していた
+                        # 理由は `( cd /tmp; echo prep )` の後半——`split_commands` は括弧に関係なく
+                        # `;` で切るので `echo prep )` が断片になり、これをアーム見出しとして
+                        # 剥がすと閉じ括弧が釣り合いから消えて `subshell` が 0 へ戻らない
+                        # （以降の `set +e` がすべて「子シェルの中」として無視される）。
+                        # だが無条件にすると**部分シェルの中の `case` が丸ごと読めない**:
+                        # `( case "$X" in` → `a)` の `)` が部分シェルの閉じとして数えられ、
+                        # `case` の階層がその場で打ち消されて**一致しないアームの中身が
+                        # 「最上位で確実に走る」**になる（merged main でも同じ。実測）。
+                        # 2 つを分けるのは**模様の位置にいるか**で、`arm_expected` が
+                        # `case … in` の直後と `;;` の直後だけを追っている
+                        # （括弧の勘定が `arm_at == 1 && arm_expected` で同じ手がかりを使うのと揃える）。
+                        # `( cd /tmp` は `case … in` の直後には書けない綴りなので、
+                        # この条件で取り違えは起きない
+                        set_arm_here = (case_scope && (subshell == 0 || arm_expected) \
+                                        && starts_case_arm(struct_text))
                         # **アーム見出しの後ろは命令の位置。** 剥がさないと、アームの中で開いた
                         # 複合コマンド（`a) for i in 1; do …` / `a) case $Y in`）が 1 つも数えられず、
                         # 後の `done` / `esac` が **`case` の**階層を閉じてしまう
@@ -2365,7 +2441,7 @@ ci_workflow_extract() {
                         # すべき」と言い（断片が `then bash x` になり `CI_WORKFLOW_COMMAND_START` に
                         # 当たらないため）、実際 `struct_text` を控えればその 1 件は直る。
                         # **だが同じ変更で fail-open が丸ごと開く**（実測）——`open_form()` が読めない
-                        # 語で始まる断片（`( if false`、`time if …`、`eval if …`、`! if …`）では
+                        # 語で始まる断片（`( if false`、`time if …`、`! if …`）では
                         # 制御構造そのものが分類されず、`uncertain` も `dead_depth` も立たない。
                         # そこへ継続語を剥がした本文を控えると、**1 度も走らない本体が
                         # 「最上位で確実に走る」**として記録される:
@@ -2376,7 +2452,7 @@ ci_workflow_extract() {
                         # ——読めない以上は主張しない（fail-closed）」は、この受け皿のことでもある。
                         #
                         # **上の 4 形は開き側が読めるようになった**（issue #114 のレビュー）。
-                        # `time` / `eval` / `!` は `open_form()` が `strip_struct_wrappers()` を
+                        # `time` / `!` は `open_form()` が `strip_struct_wrappers()` を
                         # 通して分類するので階層が開き、`(` は釣り合いが階層を開く。
                         # **偽と分かる条件そのものは `strip_dead_cond_prefixes()` 経由で見る**ので、
                         # `( if false; then bash x; fi )` は畳んでも複数行でも gate=0 で記録される
@@ -2408,11 +2484,20 @@ ci_workflow_extract() {
                         # 入れると 1 行書きでも素通りするようになる。剥がす綴りは
                         # `strip_dead_cond_prefixes()` が唯一の源（なぜ `open_form()` 側で
                         # 読まないか・残る境界も同関数の説明にある）
-                        dead_probe = strip_dead_cond_prefixes(struct_text)
-                        if (dead_depth < 0 && ops[j] != "||" \
-                            && dead_probe ~ /^(if|while)[[:space:]]+false([[:space:]]|;|$)/) { dead_depth = depth }
-                        else if (dead_depth < 0 && ops[j] != "&&" \
-                                 && dead_probe ~ /^until[[:space:]]+true([[:space:]]|;|$)/) { dead_depth = depth }
+                        # **既に偽の印が付いているなら求めない**（issue #142 (6)）。
+                        # 消費側 2 つはどちらも `dead_depth < 0` で短絡するのに無条件で
+                        # 求めていたため、死に体のブロックに入ったあとの断片すべてで
+                        # `starts_case_arm()` / `drop_arm_head()`（どちらも 1 文字ずつの
+                        # 伏せ処理を通る）と `function_head_re()` の組み立てを走らせて
+                        # 捨てていた。同ファイルが `starts_case_arm()` について
+                        # 「同じ断片で 2 度呼ばない」と書いているのと同じ節約
+                        if (dead_depth < 0) {
+                            dead_probe = strip_dead_cond_prefixes(struct_text)
+                            if (ops[j] != "||" \
+                                && dead_probe ~ /^(if|while)[[:space:]]+false([[:space:]]|;|$)/) { dead_depth = depth }
+                            else if (ops[j] != "&&" \
+                                     && dead_probe ~ /^until[[:space:]]+true([[:space:]]|;|$)/) { dead_depth = depth }
+                        }
                         # **grouping を閉じた断片に付いた区切りは、その中身すべてに掛かる。**
                         # `( bash x ) || true` は中の `bash x` も「失敗が伝わらない」——
                         # 中身だけを見ると区切りが無いので「ゲートしている」と読まれる（レビューで実測）
@@ -2485,6 +2570,29 @@ ci_workflow_extract() {
                         # この断片で開いた階層に印を付けて回るための走査位置
                         od = depth_before
                         while (1) {
+                            # **先頭に並ぶ部分シェルの開き（`( if true; then`）はここで開く。**
+                            # `open_form()` は `(` を読まない（釣り合いが階層を数えるので、
+                            # 読ませると同じ階層を二重に開く）。そのため以前は `(` の後ろの
+                            # 制御構造が**1 階層も開かないのに `fi` / `esac` だけが閉じる**状態で、
+                            # 壊れ方が 2 つあった（issue #142 (3)。どちらも実測）:
+                            #   `( if [ -n "$X" ]; then <呼び出し>; fi )` の本体が `uncertain` 0
+                            #   ＝「最上位で確実に走る」として記録される（1 文字で「最上位だけ」の
+                            #   絞り込みを迂回できる）。さらに閉じる側が 1 つ余分に閉じるので、
+                            #   **外側の条件の `uncertain` まで消える**（`( if true; … fi )` を
+                            #   `if [ -n "$X" ]` の中へ置くと、続く呼び出しが最上位扱いになった）。
+                            # ここで開けば釣り合いの正側（下の `paren > 0`）と二重にならず、
+                            # **並びも綴りの順**になる（`(` が外・制御構造が内）。順序が逆だと
+                            # `else` が見る階層が部分シェル側になり、`true_at` の印に当たらない。
+                            # 釣り合いが 0 の断片（`( : )`）は階層が残らないので開かない
+                            while (paren > 0 && open_probe ~ /^\([[:space:]]*/) {
+                                depth++; group_start[depth] = nbuf
+                                subshell_at[depth] = 1; subshell++
+                                paren--
+                                sub(/^\([[:space:]]*/, "", open_probe)
+                                # 見出しと結び付く `{` は断片の先頭の 1 つだけ。`(` を越えた先の
+                                # `{` は部分シェルの中の素のグループなので、関数の本体ではない
+                                first_open = 0
+                            }
                             # いま先頭にある綴りが何を開くかを分類する
                             # 本文が `struct_text` そのもののあいだは、控えてある `fn_form` を渡す。
                             # **`first_open` を使い回さない**のが要点で、あちらは「見出しと結び付く

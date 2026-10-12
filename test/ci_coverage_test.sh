@@ -298,16 +298,27 @@ done
 # コマンドの開始位置（`sudo` / `timeout` などの実行ラッパを読み飛ばす綴り）は
 # ライブラリの綴りを使う。ここに独自の狭い版を書くと、
 # 「実際に呼ばれているか」への答えが 2 つに割れる（§6 DRY）。
-# **リンタ網は `CI_WORKFLOW_BLOCK_BODY_START`（`do` / `then` / `else` も許す版）を使う。**
-# `split_commands` は `;` で切るので、意味の変わらない 1 行書き
+# **錨は網ごとに選び分ける。`bash -n` だけが `CI_WORKFLOW_BLOCK_BODY_START`
+# （`do` / `then` / `else` も許す版）を使い、`shellcheck` は
+# `CI_WORKFLOW_COMMAND_START`（コマンドの位置に錨を打つ版）のままにする。**
+#
+# `bash -n` を広げる理由: `split_commands` は `;` で切るので、意味の変わらない 1 行書き
 # （`for f in $SHELL_FILES; do bash -n "$f"; done`）の断片は `do bash -n "$f"` になり、
 # `^` に錨を打った `CI_WORKFLOW_COMMAND_START` には当たらない——**すべてのファイルが
 # 実際には構文チェックされているのに「一覧に載せても構文チェックされない」という
 # 事実と逆の診断で CI を赤くする**（issue #114 (1)。整形しただけで赤くなる形）。
-# ここで広げてよい理由は「問いが違う」こと: この網が問うのは
-# 「そのステップが一覧を消費する配線になっているか」で、本体が何回まわるかは
-# ケース 2・3（一覧と実体の突き合わせ）が受け持つ。
-# **`ci_workflow_runs_script`（下のケース 4）には広げない**——あちらは
+# `bash -n` は一覧をループで回すほかに書きようが無いので、この網はループ本体を
+# 読まざるを得ない。本体が何回まわるかは**ケース 2・3 が受け持たない**ので
+# （あちらは一覧と実体を突き合わせるだけで、ループが回ることは見ていない）、
+# **ここは「0 回まわりうるループでも配線として数える」という弱さを承知で広げている**。
+#
+# `shellcheck` を広げない理由（issue #142 (1)）: あちらは一覧を 1 コマンドで受け取るので
+# ループで書く理由が無く、広げると
+# `for f in $CHANGED; do shellcheck $SHELL_FILES; done`（「変更されたファイルだけ lint する」
+# というごく自然なリファクタ）が `$CHANGED` が空のときに**1 度も走らないまま**
+# 配線として数えられる——**`shellcheck` を事実上無効化したまま全スイートが緑になる**
+# （実測で広げた錨では MATCH、旧錨では no-match）。**ここは広げないことで閉じる。**
+# **`ci_workflow_runs_script`（下のケース 4）にはどちらも広げない**——あちらは
 # 「本当に実行されるか」を問うので、0 回まわるループの本体を実行の証拠に数えてはいけない。
 # 変数参照は `$SHELL_FILES` と `${SHELL_FILES}` のどちらの書き方でも同じ意味なので両方を認め、
 # **直後が識別子の文字でないこと**まで見る（`$SHELL_FILES_FAST` のような別変数に当たらないように）
@@ -327,7 +338,7 @@ assert_with ci_workflow_command_matches \
     "リンタ網: shellcheck が SHELL_FILES を受け取って実行される" \
     "ci.yml に「shellcheck に SHELL_FILES そのものを渡して実行する」コマンドが、一覧を定義したジョブに無い。一覧に載せても lint されない（失敗を握り潰す形も数えない）" \
     "${shell_files_job}" \
-    "${CI_WORKFLOW_BLOCK_BODY_START}shellcheck([^[:alnum:]_])" "${SHELL_FILES_REF}"
+    "${CI_WORKFLOW_COMMAND_START}shellcheck([^[:alnum:]_])" "${SHELL_FILES_REF}"
 
 # `bash -n` はループ変数を経由するため 1 行に収まらない。**同じステップの中に**
 # 「一覧を回すループ」と「bash -n の実行」が揃っていることを見る。
