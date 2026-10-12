@@ -74,7 +74,10 @@ CI_WORKFLOW_COMMAND_START="^[(]?[[:space:]]*${CI_WORKFLOW_COMMAND_PREFIXES}"
 # **2 つの照会で許す語が違うこと自体が意図**で、片方へ寄せてはいけない。
 #
 # 読み飛ばすのは 1 つだけにする（`do do …` のような綴りは bash として成り立たないので、
-# 繰り返しを許すと照合が緩むだけで得が無い）。
+# 繰り返しを許すと照合が緩むだけで得が無い）。`elif` は**条件**の位置であって本体ではないので
+# 入れない（入れると、通らない条件の中の綴りを配線の証拠に数える方向へ広がる）。
+# このライブラリ自身は使わず、`source` した側（`test/ci_coverage_test.sh`）が読む
+# shellcheck disable=SC2034
 CI_WORKFLOW_BLOCK_BODY_START="^[(]?[[:space:]]*((do|then|else)[[:space:]]+)?${CI_WORKFLOW_COMMAND_PREFIXES}"
 
 # **YAML のコメントが始まる位置**を表す正規表現の断片（行頭、または空白の直後の `#`）。
