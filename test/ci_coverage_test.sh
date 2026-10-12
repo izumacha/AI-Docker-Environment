@@ -178,12 +178,7 @@ for ci_job_name in "${ci_job_names[@]}"; do ci_job_present["${ci_job_name}"]=1; 
 for suite_path in "${!SUITE_JOBS[@]}"; do
     # 値が ci.yml に実在するジョブ名であること
     [ -n "${ci_job_present[${SUITE_JOBS[${suite_path}]}]-}" ] \
-        || bail "SUITE_JOBS[${suite_path}] が指す \"${SUITE_JOBS[${suite_path}]}\" は ${CI_WORKFLOW} に無いジョブ名（実在するのは: ${ci_job_names[*]}）。ジョブを改名したのなら SUITE_JOBS も直すこと"
-    # **キーが実在するスイートであること。** 消した・改名したスイートのエントリが残っても、
-    # ケース 4 は引きに来ないので黙って腐る（同じファイルのケース 3 が SHELL_FILES に
-    # 対して持っている歯止めが、新しいこちらの表には無かった。レビューで実測）
-    [ -f "${REPO_ROOT}/${suite_path}" ] \
-        || bail "SUITE_JOBS に実体の無いスイート ${suite_path} が残っている。消した・改名したのならこのエントリも消すこと"
+        || bail "SUITE_JOBS[${suite_path}] が指す \"${SUITE_JOBS[${suite_path}]}\" は ${CI_WORKFLOW} に run: ステップを持つジョブとして見つからない（見つかるのは: ${ci_job_names[*]}）。ジョブを改名したのなら SUITE_JOBS も直すこと。そのジョブが実在する場合、run: ステップを 1 つも持たないのでスイートを走らせることもできない"
 done
 
 # --- リポジトリ側の実体を数え上げる -------------------------------------------------
@@ -269,6 +264,30 @@ array_contains() {
     # 最後まで一致しなければ失敗
     return 1
 }
+
+# --- SUITE_JOBS のキーの腐り止め（発見集合と突き合わせる） ---------------------------
+
+# **キーはケース 4 が実際に引く集合に属していること。** 消した・改名したスイートの
+# エントリが残っても、ケース 4 は引きに来ないので黙って腐る（同じファイルのケース 3 が
+# `SHELL_FILES` に対して持っている歯止めが、新しいこちらの表には無かった）。
+# **「ファイルが実在するか」では足りない**——ケース 4 のループは `test/*_test.sh` だけを
+# 回すので、`test/sec18_denylist_e2e.sh` のような実在するが対象外のパスを登録すると
+# 両方の検査を通りながら一度も引かれず、件数も変わらないまま「e2e スクリプトが e2e ジョブで
+# 走ること」を強制しているように読める（レビューで実測。痕跡ゼロ）。
+# **突き合わせる相手はケース 4 と同じ発見集合**にする（別の手がかりで照合すると、
+# 発見側が狭まったときにこちらも一緒に狭まって無力化される）
+declare -A discovered_suites=()
+for script in "${discovered_scripts[@]}"; do
+    # ケース 4 が回すのと同じ条件で絞る
+    [[ "${script}" == test/*_test.sh ]] || continue
+    discovered_suites["${script}"]=1
+done
+
+# 表のキーを 1 つずつ照合する
+for suite_path in "${!SUITE_JOBS[@]}"; do
+    [ -n "${discovered_suites[${suite_path}]-}" ] \
+        || bail "SUITE_JOBS の ${suite_path} は、ケース 4 が回す集合（コミット済みの test/*_test.sh）に無い。消した・改名したのならこのエントリも消すこと。命名規約に沿わないスクリプトの配線は、常時走る別のスイートからジョブ名付きで固定すること（test/sec18_denylist_test.sh が前例）"
+done
 
 # --- ケース 1: リンタの一覧が実際に使われている -----------------------------------------
 

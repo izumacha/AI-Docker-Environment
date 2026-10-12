@@ -4212,9 +4212,8 @@ jobs:
       - name: c
         run: echo hi" "type-check,e2e,"
 
-# **コマンドを 1 つも持たないジョブも現れること。** 現れないと、`uses:` だけのジョブや
-# `env:` だけのジョブへスイートを移したときに「知らないジョブ名」として
-# 誤って落ちる（呼び出し側の突き合わせが事実と逆の診断を出す側へ倒れる）
+# **折りたたみの `env:` を持つジョブは `run:` が無くても現れること**（`SHELL_FILES` を
+# 定義するジョブがこの形になりうるため）
 assert_job_names "env だけのジョブも一覧に現れる" "name: ci
 jobs:
   only-env:
@@ -4225,6 +4224,23 @@ jobs:
     steps:
       - name: a
         uses: actions/checkout@v5" "only-env,"
+
+# **境界の記録**: `run:` も折りたたみ `env:` も持たないジョブ（`uses:` のステップだけ）は
+# 控えに 1 行も残らないので一覧に現れない。呼び出し側（`SUITE_JOBS` の値の照合）には
+# 足りる——`run:` を 1 つも持たないジョブはスイートを走らせられないので、
+# そこを表に登録することは最初から誤り。**「現れる」と読まないための固定**
+assert_job_names "uses だけのジョブは一覧に現れない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: a
+        run: bash ${SUITE_PATH}
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: b
+        uses: actions/checkout@v5" "type-check,"
 
 # 同じジョブの複数ステップで重複しないこと（突き合わせの表を素直に作れるようにする）
 assert_job_names "同じジョブ名は畳んで 1 件にする" "name: ci
@@ -4509,7 +4525,11 @@ for dead_prefix_case in \
     "終了状態の反転:! if false; then shellcheck ${DOLLAR}LIST; fi" \
     "重ねた飾り:( ! time if false; then shellcheck ${DOLLAR}LIST; fi )" \
     "偽のループ:( while false; do shellcheck ${DOLLAR}LIST; done )" \
-    "until が真:( until true; do shellcheck ${DOLLAR}LIST; done )"
+    "until が真:( until true; do shellcheck ${DOLLAR}LIST; done )" \
+    "ブレースグループ:{ if false; then shellcheck ${DOLLAR}LIST; fi; }" \
+    "ブレースの偽のループ:{ while false; do shellcheck ${DOLLAR}LIST; done; }" \
+    "関数の本体:f() { if false; then shellcheck ${DOLLAR}LIST; fi; }" \
+    "case のアーム:case ${DOLLAR}M in lint) if false; then shellcheck ${DOLLAR}LIST; fi;; esac"
 do
     assert_matcher no-match "コマンド単位: ${dead_prefix_case%%:*}の中の偽と分かる条件は満たさない" "name: ci
 jobs:
@@ -4549,6 +4569,43 @@ jobs:
     steps:
       - name: lint
         run: ( shellcheck ${DOLLAR}LIST )" \
+    ci_workflow_command_matches "" "${CI_WORKFLOW_BLOCK_BODY_START}shellcheck([^[:alnum:]_])" '[$][{]?LIST[}]?([^[:alnum:]_]|$)'
+
+# **引用で包んだ `eval` の中の複合コマンドは「開きっぱなし」にしない**（レビューで実測）。
+# `split_commands` は引用の中の `;` で切らないので `eval "if false; …; fi"` は 1 断片で
+# 自己完結する。`eval ` と引用符を落として分類すると `open_form()` が階層を開くのに
+# 閉じる断片が来ず、**同じステップの以降すべて**が非ゲート扱いになって
+# 「配線されていない」という事実と逆の診断が出た（`main` は正しく緑）
+assert_matcher match "コマンド単位: 引用で包んだ eval の後ろは満たす" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: lint
+        run: |
+          eval \"if false; then echo skipped; fi\"
+          shellcheck ${DOLLAR}LIST" \
+    ci_workflow_command_matches "" "${CI_WORKFLOW_BLOCK_BODY_START}shellcheck([^[:alnum:]_])" '[$][{]?LIST[}]?([^[:alnum:]_]|$)'
+
+assert_matcher match "実行網: 引用で包んだ eval の後ろの呼び出しは実行の証拠になる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: suites
+        run: |
+          eval \"if false; then echo skipped; fi\"
+          bash test/subject_test.sh" \
+    ci_workflow_runs_script 'test/subject_test.sh'
+
+# **ブレース・関数・アームの見出しを落としても、偽でない条件は証拠のまま**であること
+assert_matcher match "コマンド単位: ブレースグループの中の条件付き分岐は満たす" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: lint
+        run: { if [ -n \"${DOLLAR}X\" ]; then shellcheck ${DOLLAR}LIST; fi; }" \
     ci_workflow_command_matches "" "${CI_WORKFLOW_BLOCK_BODY_START}shellcheck([^[:alnum:]_])" '[$][{]?LIST[}]?([^[:alnum:]_]|$)'
 
 # **偽と分かる条件を閉じた後ろは生きている**こと（印の後始末が効いていること）。
