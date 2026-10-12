@@ -3004,32 +3004,75 @@ jobs:
           ) ; set +e ; }
           bash ${SUITE_PATH}"
 
-# (3) 1 行に畳んだ `if true; then …` の本体は、**意図的に**実行の証拠にしない。
-# issue #123 (3) はこれを直すよう求めており、控える本文を継続語を剥がした側
-# （`struct_text`）にすれば確かに直る。**だが同じ変更で fail-open が丸ごと開く**——
-# 開き側が読めない語で始まる断片（`( if false`・`time if …`・`eval if …`）では
-# 制御構造が分類されず `uncertain` も `dead_depth` も立たないため、1 度も走らない
-# 本体が「最上位で確実に走る」として記録される（下の 4 ケースで固定。実測で
-# `( if false; then bash x; fi )` が「配線されている」に化けた）。
-# 生の本文を控えていれば `then bash x` のまま綴りに当たらず、受け皿になる。
-# **畳んだ綴りを拾うのは、開き側が同じ語を読めるようになってから**
-assert_not_wired "1 行の if true の本体は実行の証拠にしない（fail-closed 側の受け皿）" "name: ci
+# (3) 1 行に畳んだ**必ず走る**ブロックの本体は実行の証拠にする（issue #123 (3)）。
+# **以前はここを意図的に落としていた**が、その理由（開き側が読めない語で始まる断片では
+# `uncertain` も `dead_depth` も立たないので、継続語を命令の位置として許すと走らない本体が
+# 最上位の実行に化ける）は **issue #142 (3) で消えている**——`( if false` も `time if …` も
+# `! if …` も開き側が分類できるようになったため。下の 4 形がその控えで、いまは
+# **深さの勘定だけ**で止まっている。
+# **止めているのは錨ではなく `top` の絞り込み**（`uncertain == 0` だけを通す）。
+# `for … do` / `until true` / 条件が読めない `if` はいずれも `uncertain` を立てるので、
+# 錨が継続語を許しても渡ってこない。だから `ci_workflow_runs_script` は
+# `CI_WORKFLOW_BLOCK_BODY_START` を使ってよい——**リンタ網（`top` を渡さない）とは
+# 事情が違う**（あちらは錨が唯一の歯止めなので狭いまま）。
+# 実 `bash -e`（末尾に成功する番兵を足して「失敗が中断させるか」を測る）を真値とした
+# 30 形の差分照合で、**7 形が改善し、新しい誤りは 0 形**だった
+for folded_certain_case in \
+    "if true:if true; then bash ${SUITE_PATH}; fi" \
+    "if コロン:if :; then bash ${SUITE_PATH}; fi" \
+    "while true:while true; do bash ${SUITE_PATH}; break; done" \
+    "if true と部分シェル:if true; then ( bash ${SUITE_PATH} ); fi" \
+    "if true とブレース:if true; then { bash ${SUITE_PATH}; }; fi" \
+    "入れ子の if true:if true; then if true; then bash ${SUITE_PATH}; fi; fi"
+do
+    assert_wired "1 行の${folded_certain_case%%:*}の本体は実行の証拠になる" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
     steps:
       - name: subject
         run: |
-          if true; then bash ${SUITE_PATH}; fi"
+          ${folded_certain_case#*:}"
+done
 
-assert_not_wired "1 行の while true の本体も実行の証拠にしない" "name: ci
+# **アームの走査は丸括弧がいくつ並んでも必ず終わる**（issue #123 の補足で、到達不能だった
+# 「1 文字も進まないなら打ち切る」門番を外したことの対）。`match()` はどちらの選択肢も
+# `)` を 1 つ要求するので毎周必ず進むが、**止まらなければスイートが固まる**ので、
+# 丸括弧が入れ子で並ぶ綴りを実際に通しておく（握り潰しが見えていることも同時に確かめる）
+for arm_scan_case in \
+    "主語にコマンド置換:case ${DOLLAR}(echo linux) in (linux) set +e ;; esac" \
+    "入れ子のコマンド置換と複数アーム:case ${DOLLAR}(basename ${DOLLAR}(pwd)) in (a) : ;; (linux) set +e ;; esac"
+do
+    assert_not_wired "アームの走査が終わる（${arm_scan_case%%:*}）" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
     steps:
       - name: subject
         run: |
-          while true; do bash ${SUITE_PATH}; break; done"
+          ${arm_scan_case#*:}
+          bash ${SUITE_PATH}"
+done
+
+# **締めすぎない側＝広げても開かないこと**（上と同じ 1 行書きで、実 bash では失敗が
+# 中断させない 5 形）。`top` の絞り込みが効いていることをここで固定する——
+# 錨だけを見て「継続語を許したら何でも通る」と読まないため
+for folded_uncertain_case in \
+    "0 回まわるループ:for i in ${DOLLAR}NEVERSET; do bash ${SUITE_PATH}; done" \
+    "until true:until true; do bash ${SUITE_PATH}; done" \
+    "真と分かる条件の else:if true; then :; else bash ${SUITE_PATH}; fi" \
+    "握り潰した本体:if true; then set +e; bash ${SUITE_PATH}; fi" \
+    "連鎖に守られた if true:if true && [ -z \"${DOLLAR}SKIP\" ]; then bash ${SUITE_PATH}; fi"
+do
+    assert_not_wired "1 行の${folded_uncertain_case%%:*}の本体は実行の証拠にしない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${folded_uncertain_case#*:}"
+done
 
 # 上の受け皿が外れると一斉に穴になる 4 形。**開き側が読めない語で始まる断片**の後ろの
 # 継続語を命令の位置として扱うと、走らない本体が最上位の実行として記録される
