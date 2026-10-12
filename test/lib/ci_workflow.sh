@@ -1137,6 +1137,29 @@ ci_workflow_extract() {
             return (d > 0) ? d : 0
         }
 
+        # 先頭に並ぶ部分シェルの開きを**何個越えられるか**（`cap` が上限）。
+        # **数え方をここ 1 か所に置く**のが要点（レビューで実測した退行）。歩く側で
+        # `while (n < cap …)` と書くと、`n` は**その断片で開いた階層すべて**の数なので
+        # 手前に `{` や `f() {` があるだけで上限に当たり、**`(` を 1 つも越えられない**
+        # （`{ ( if false; then :; fi ) ; bash x; }` で死に体の印が 2 階層浅くなり、
+        #  閉じた後も残って*走る*呼び出しが `not-wired` に化けた＝fail-closed）。
+        # 綴りの共有だけでは足りず、**算術も共有する**必要がある
+        function lead_subshells(t, cap,   n, probe) {
+            probe = t; n = 0
+            while (n < cap && probe ~ subshell_open_re()) {
+                n++
+                sub(subshell_open_re(), "", probe)
+            }
+            return n
+        }
+
+        # 先頭から `k` 個分の部分シェルの開きを落とした残りを返す（上の関数と対で使う）
+        function drop_lead_subshells(t, k,   i, probe) {
+            probe = t
+            for (i = 0; i < k; i++) { sub(subshell_open_re(), "", probe) }
+            return probe
+        }
+
         function open_form(t, cached_fn_form, use_cached,   ff, probe) {
             # **自分では階層を開かない飾り（`time` / `!`）の後ろも分類する。**
             # （`eval` は**落とさない**。理由は `strip_struct_wrappers()` の説明）
@@ -1172,6 +1195,21 @@ ci_workflow_extract() {
         # `if` が開く階層の**外**で走る（`strip_command_prefixes()` が `if ` を剥がして
         # 見つけるので、素直に数えると 1 つ深く記録して打ち消しが成立しなくなる）。
         # 逆にブレース・関数の本体・`case` のアームは中で走るので数える
+        #
+        # **ここには先頭の部分シェルを越える処理（`lead_subshells()`）を置いていない**
+        # ——`last_deciding_open()` / `walk_opens_case()` には要るのに、ここには要らない
+        # 理由を残す（置き忘れではないので、見つけた人が「同じ分断だ」と読んで足さないため）。
+        # (a) `set` を探す `set_command()` は `strip_command_prefixes()` を通るが、あの一覧に
+        #     `(` を剥がす規則は**無い**（同関数の「`(` は入れない」の段落が理由を記録している）。
+        #     したがって釣り合っていない先頭の `(` の後ろに置いた `set` はそもそも見つからず、
+        #     `set_probe` が空のままここへ来ない（`( set +e; bash x )` が実例）。
+        # (b) 残る経路は `case` のアームの走査（`set_arm` を `)` の先へ進めてから探す形）だけで、
+        #     ここだけは `( case $M in a) set +e` のように先頭の `(` を持つ本文が届く。
+        #     **実測ではこの越える処理を足しても判定が 1 件も変わらない**
+        #     （総当たりの 680 通り ＋ 1 行アームを狙った 14 通り、差分 0）。
+        #     何も変えない門番を置くと、読み手に「守られている」と誤解させるだけなので置かない。
+        # **この前提が崩れたら（`(` を剥がす規則が増える・アーム以外の経路が増える）、
+        #   自前で導き直さず `lead_subshells()` / `drop_lead_subshells()` をここでも通すこと。**
         function set_open_depth(t, cached_fn_form, use_cached,   n, k, probe, rest) {
             probe = t; n = 0
             while (1) {
@@ -1197,16 +1235,19 @@ ci_workflow_extract() {
         # `+1` と決め打ちすると `f() { g() { set +e` のように**必ず走る階層を挟まずに
         # 2 つ開く**綴りで記録側だけ浅くなり、本文の `set -e` が打ち消せない
         # （正しくゲートする綴りを赤くする。レビューで実測）
-        function last_deciding_open(t, cached_fn_form, use_cached, pending,   n, k, last, probe, rest, cap) {
-            probe = t; n = 0; last = 0
+        function last_deciding_open(t, cached_fn_form, use_cached, pending,   n, k, last, probe, rest, cap, leadn, lead) {
+            probe = t; n = 0; last = 0; leadn = 0
             cap = lead_subshell_cap(t)
             while (1) {
                 # **先頭の部分シェルも 1 階層**（本体のループが開くので数を合わせる）。
                 # ただし**決め手にはしない**——部分シェルは必ず走るので、走るかどうかが
-                # そこで決まる階層ではない
-                while (n < cap && probe ~ subshell_open_re()) {
-                    n++
-                    sub(subshell_open_re(), "", probe)
+                # そこで決まる階層ではない。
+                # **上限は越えた数（`leadn`）で数える**（`n` と共有すると手前の `{` だけで
+                # 上限に当たる。理由は `lead_subshells()` の説明）
+                lead = lead_subshells(probe, cap - leadn)
+                if (lead > 0) {
+                    probe = drop_lead_subshells(probe, lead)
+                    leadn += lead; n += lead
                 }
                 k = open_form(probe, cached_fn_form, (use_cached && n == 0))
                 # 何も開かない綴りと、見出しだけの綴りはここで終わり
@@ -1229,18 +1270,20 @@ ci_workflow_extract() {
         # `{ case x in a) set +e` のように前に別の開きがあると 1 では足りない
         # （記録側と打ち消し側の階層が食い違い、同じアームの `set -e` が打ち消せなくなる。
         #   正しくゲートする綴りを赤くする。レビューで実測）
-        function walk_opens_case(t, cached_fn_form, use_cached,   n, k, probe, rest, cap) {
-            probe = t; n = 0
+        function walk_opens_case(t, cached_fn_form, use_cached,   n, k, probe, rest, cap, leadn, lead) {
+            probe = t; n = 0; leadn = 0
             cap = lead_subshell_cap(t)
             while (1) {
                 # 先頭の部分シェルを越える。越えないと `( case $X in (a|b)` で
                 # `case` が見えず `case_scope` が偽になり、**アーム模様の `(` を
                 # 部分シェルの開きとして数える補正が働かない**（釣り合いが 1 つ多く
                 # 膨らんで階層が閉じ切らず、以降の `set +e` がすべて
-                # 「子シェルの中」として無視される。issue #142 のレビューで実測）
-                while (n < cap && probe ~ subshell_open_re()) {
-                    n++
-                    sub(subshell_open_re(), "", probe)
+                # 「子シェルの中」として無視される。issue #142 のレビューで実測）。
+                # **上限は越えた数（`leadn`）で数える**（理由は `lead_subshells()` の説明）
+                lead = lead_subshells(probe, cap - leadn)
+                if (lead > 0) {
+                    probe = drop_lead_subshells(probe, lead)
+                    leadn += lead; n += lead
                 }
                 k = open_form(probe, cached_fn_form, (use_cached && n == 0))
                 # `case` を開く形に当たったらそこで確定（その `case` 自身も 1 階層）

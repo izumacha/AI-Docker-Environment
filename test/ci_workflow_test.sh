@@ -3125,6 +3125,41 @@ jobs:
           bash ${SUITE_PATH}
           }"
 
+# **前置きを重ねた形も同じこと**（レビューで実測した退行）。偽と分かる条件の印の深さは
+# `last_deciding_open()` から導くが、その中で先頭の `(` を越える上限を**開いた階層すべての数**と
+# 共有すると、手前に `{` や `f() {` があるだけで上限に当たり **`(` を 1 つも越えられない**
+# ——印が 2 階層浅くなり、閉じた後も残って*走る*呼び出しが `not-wired` に化ける（fail-closed）。
+# 越えた数は専用に数える（`lead_subshells()`）。**3 形を置く**のが要点で、
+# 1 つでも欠けると「手前に 1 つあるときだけ」「2 つ重なったときだけ」の形が静かに穴になる
+for composed_dead_case in \
+    "ブレースと部分シェル:{ ( if false; then :; fi ) ; bash ${SUITE_PATH}; }" \
+    "ブレースと二重の部分シェル:{ ( ( if false; then :; fi ) ) ; bash ${SUITE_PATH}; }" \
+    "ブレースと部分シェルの偽のループ:{ ( while false; do :; done ) ; bash ${SUITE_PATH}; }" \
+    "ブレースと部分シェルの until ループ:{ ( until true; do :; done ) ; bash ${SUITE_PATH}; }"
+do
+    assert_wired "${composed_dead_case%%:*}を閉じた後ろは生きている" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${composed_dead_case#*:}"
+done
+
+# **締めすぎない側**: 前置きを重ねても、偽と分かる条件の**中**は証拠にしないこと
+# （上の 4 件が「印をどこにも付けない」形で緑になっていないことを押さえる）
+assert_not_wired "ブレースと部分シェルの中の偽と分かる分岐の本体" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          { ( if false; then
+            bash ${SUITE_PATH}
+          fi ) ; }"
+
 assert_not_wired "実行ラッパの後ろに置いた偽と分かる分岐の本体" "name: ci
 jobs:
   type-check:
