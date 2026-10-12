@@ -105,7 +105,14 @@ CI_WORKFLOW_COMMAND_START="^[[:space:]]*${CI_WORKFLOW_GROUP_OPENERS}${CI_WORKFLO
 # 入れない（入れると、通らない条件の中の綴りを配線の証拠に数える方向へ広がる）。
 # このライブラリ自身は使わず、`source` した側（`test/ci_coverage_test.sh`）が読む
 # shellcheck disable=SC2034
-CI_WORKFLOW_BLOCK_BODY_START="^[[:space:]]*${CI_WORKFLOW_GROUP_OPENERS}((do|then|else)[[:space:]]+)?${CI_WORKFLOW_COMMAND_PREFIXES}"
+# **グループの開きは `do` / `then` / `else` の後ろに置く。** 断片が `( do …` のように
+# 開きの直後に本体の語を持つ綴りは bash として成り立たないので、手前へ置くと
+# この定数では**一度も当たらない**（何も変えない門番＝読み手に「守られている」と
+# 誤解させるだけ。同ファイルがそう書いている）。実際に起きる綴りは逆順の
+# `for f in $LIST; do ( bash -n "$f" ); done` を 1 行に畳んだ `do ( bash -n "$f" )` で、
+# 手前に置いた版ではこれが no-match になり、**全ファイルが構文チェックされているのに
+# 「されていない」と事実と逆の診断**を出していた（レビューで実測）
+CI_WORKFLOW_BLOCK_BODY_START="^[[:space:]]*((do|then|else)[[:space:]]+)?${CI_WORKFLOW_GROUP_OPENERS}${CI_WORKFLOW_COMMAND_PREFIXES}"
 
 # **YAML のコメントが始まる位置**を表す正規表現の断片（行頭、または空白の直後の `#`）。
 # 値の途中の `#`（`name: a#b`）はコメントではないので、ここで空白を任意にしてはいけない

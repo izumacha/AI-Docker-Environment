@@ -3212,6 +3212,24 @@ jobs:
           ${composed_dead_case#*:}"
 done
 
+# **越えた数で数える上限は 2 か所にあり、両方を固定する**（レビューで実測）。
+# 上の 4 件が落とすのは `last_deciding_open()` 側（偽と分かる条件の印の深さ）だけで、
+# `walk_opens_case()` 側（`case` を開くかの判定）を `cap - n` へ戻しても**全件緑のまま通る**。
+# こちらは `{` を 2 つ重ねて上限を使い切ってから `(` の後ろに `case` を置くと、
+# `case_scope` が偽になって POSIX のアーム模様 `(a|b)` の `(` が部分シェルの開きとして
+# 数えられ、釣り合いが戻らないまま**最上位の `set +e` が「子シェルの中」として捨てられる**
+# ——握り潰されたスイートが「ゲートしている」と読まれる fail-open
+assert_not_wired "重ねた前置きの先で開く case も数える（上限は越えた数で）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          { { ( case ${DOLLAR}M in (a|b) set +e ;; esac )
+          set +e
+          bash ${SUITE_PATH}"
+
 # **締めすぎない側**: 前置きを重ねても、偽と分かる条件の**中**は証拠にしないこと
 # （上の 4 件が「印をどこにも付けない」形で緑になっていないことを押さえる）
 assert_not_wired "ブレースと部分シェルの中の偽と分かる分岐の本体" "name: ci
@@ -4738,6 +4756,26 @@ jobs:
               bash -n \"${DOLLAR}f\"
           done" \
     ci_workflow_step_matches "" "${CI_WORKFLOW_BLOCK_BODY_START}for +[A-Za-z_][A-Za-z0-9_]* +in +[^;&|]*[$][{]?LIST[}]?([^[:alnum:]_]|$)" "${CI_WORKFLOW_BLOCK_BODY_START}bash +-n([^[:alnum:]_]|$)"
+
+# **グループの開きは `do` / `then` / `else` の後ろ**（レビューで実測）。手前に置くと
+# `( do …` という成り立たない綴りしか当たらず**一度も効かない門番**になり、実際に起きる
+# `for f in $LIST; do ( bash -n "$f" ); done` の 1 行書き（断片は `do ( bash -n "$f" )`）が
+# no-match のまま——全ファイルが構文チェックされているのに「されていない」と
+# **事実と逆の診断**を出す（fail-closed）
+for block_group_case in \
+    "部分シェル:for f in ${DOLLAR}LIST; do ( bash -n \"${DOLLAR}f\" ); done" \
+    "ブレースグループ:for f in ${DOLLAR}LIST; do { bash -n \"${DOLLAR}f\"; }; done" \
+    "括りなし:for f in ${DOLLAR}LIST; do bash -n \"${DOLLAR}f\"; done"
+do
+    assert_matcher match "ステップ単位: ブロック本体の${block_group_case%%:*}も満たす" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: lint
+        run: ${block_group_case#*:}" \
+        ci_workflow_step_matches "" "${CI_WORKFLOW_BLOCK_BODY_START}bash +-n([^[:alnum:]_]|\$)"
+done
 
 # **広げた側でも実行ラッパを読み飛ばせること**（前置きの一覧を 1 か所に寄せた結果の確認）
 assert_matcher match "ステップ単位: 本体の先頭の語と実行ラッパが重なっても満たす" "name: ci
