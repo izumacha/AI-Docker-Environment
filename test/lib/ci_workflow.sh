@@ -1600,7 +1600,7 @@ ci_workflow_extract() {
         # **ここでは出力しない**のが要点で、ジョブ単位の無効化キー（`if: false` 等）は
         # YAML のキー順が自由である以上 `steps:` の**後ろ**にも書ける。書いた時点で
         # 出力済みのステップは取り消せないため、ジョブ 1 つ分を溜めてから出す
-        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, closed_any, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, closed_subshell, closed_uncertain, arm_masked, arm_at, arm_expected, case_scope, opens_case, opens_case_here, case_opens_at, close_probe, close_rest, close_first, open_head, esac_probe, esac_rest, esac_first, dead_probe) {
+        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, closed_any, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, closed_subshell, closed_uncertain, arm_masked, arm_at, arm_expected, case_scope, opens_case, opens_case_here, case_opens_at, close_probe, close_rest, close_first, open_head, esac_probe, esac_rest, esac_first, dead_probe, close_n) {
             # **シェルのオプションはステップごとにリセットする。** ステップは 1 つずつ
             # 別のシェルで走るので、前のステップの `set +e` / `pipefail` は引き継がれない。
             # **控えるのは `set` で明示された分だけ（-1 = 明示なし）。** シェルの既定と突き合わせるのは
@@ -2163,6 +2163,9 @@ ci_workflow_extract() {
                         # 閉じ側。**その階層が「走るか分からない」側だったかを覚えておき**、
                         # 対応する分だけ戻す（`uncertain_at[]` が階層ごとの印）
                         closed_group_start = -1
+                        # この断片が閉じる階層の数（キーワードの分＋括弧の分）。
+                        # 畳むループを 1 つにするための勘定（issue #121）
+                        close_n = 0
                         # **閉じ語も 1 断片に 2 つ以上載る。** 開き側が 1 断片で複数開けるように
                         # なった以上、閉じ側も同じだけ閉じられないと深さが戻らない
                         # （`f() { if :; then` … `fi }` は bash では 2 つ閉じる。1 つしか
@@ -2179,24 +2182,31 @@ ci_workflow_extract() {
                         # 2 つ目以降はもう模様ではない（`esac }` の `}` を模様と読むと
                         # 階層が戻らず、以降が「まだ関数の本体の中」に見える。レビューで実測）
                         close_first = 1
-                        while (close_probe ~ close_word_re() && depth > 0 \
+                        # **ここでは数えるだけで、階層はまだ畳まない**（issue #121）。
+                        # 畳む処理は括弧の分と共通で、以前は**同じ 8 行がここと括弧側の 2 か所に
+                        # 写しで**あった（階層ごとの状態を 1 つ足すたびに片方へ入れ忘れる形で、
+                        # PR #118 が実際にそれをやっている）。数だけ `close_n` に集めて
+                        # **1 つのループ**で畳めば写しが消える。
+                        # **順序は変わらない**——どちらの経路も「内側から 1 つずつ、同じ 8 行」なので、
+                        # 合計を内側から畳むのと結果が同じ（`closed_group_start` は上書きし続けて
+                        # 最後に残るのが一番外側、という引き継ぎ方もそのまま成り立つ）。
+                        # **括弧側の判定（`paren_probe`）がこの畳みを先に必要としないことも要る**——
+                        # 読むのは `text` / `set_arm_here` / `case_scope` / `arm_expected` / `ops[j]` だけで、
+                        # どれもこの断片に入る前に確定しており `depth` にも `subshell` にも依存しない
+                        # （依存していたら、畳む位置を後ろへ動かした時点で判定が変わっていた）
+                        # **打ち切りの上限は「まだ畳んでいない深さ」で見る**（素直に `depth > 0` と
+                        # 書くと、深さ 1 に対して閉じ語が 2 つ載った断片で 2 と数えてしまい、
+                        # 下のループが `depth > 0` で止まるぶんは同じでも、括弧の分と足した合計が
+                        # 実際より多くなって**括弧で閉じるべき分が食われる**）
+                        while (close_probe ~ close_word_re() && depth - close_n > 0 \
                                && !(close_first && arm_expected \
                                     && (close_probe !~ esac_word_re() || prev_op == "|"))) {
                             close_first = 0
-                            if (uncertain_at[depth]) { uncertain--; uncertain_at[depth] = 0; closed_uncertain = 1 }
-                            if (group_start[depth] >= 1) { closed_group_start = group_start[depth] }
-                            if (fndef_at[depth]) { fndef--; fndef_at[depth] = 0 }
-                            true_at[depth] = 0
-                            if (subshell_at[depth]) { subshell--; subshell_at[depth] = 0; closed_subshell = 1 }
-                            group_start[depth] = -1
-                            # 巻き戻し先はこの断片が閉じた**一番外側**の階層の入口（下の説明を参照）。
-                            # 閉じる順は内側からなので、上書きし続ければ最後に残るのが一番外側
-                            closed_entry_e = entry_errexit[depth]; closed_entry_p = entry_pipefail[depth]; closed_entry_seen = 1
-                            # **`case` の入れ子はここでは数えない。** この走査は `depth > 0` で
+                            close_n++
+                            # **`case` の入れ子はここでは数えない。** この走査は残りの深さで
                             # 止まるので、階層を別の綴りが先に閉じてしまい `esac` が深さ 0 で
                             # 来る場合に数え損ねる。数えるのは下の `esac_probe` の走査
                             # （`depth` から独立に、同じ閉じ語の綴りと同じ模様の位置の判定で歩く）
-                            depth--; closed_any = 1
                             # 閉じた語の分だけ進める。**1 文字も減らなければ打ち切る**（無限ループ避け）
                             close_rest = drop_close_word(close_probe)
                             if (close_rest == close_probe) { break }
@@ -2259,19 +2269,23 @@ ci_workflow_extract() {
                             }
                         }
                         paren = paren_delta(paren_probe)
-                        if (paren < 0) {
-                            # 括弧で閉じる分も、階層ごとの印を見て戻す
-                            for (closing = 0; closing < -paren && depth > 0; closing++) {
-                                if (uncertain_at[depth]) { uncertain--; uncertain_at[depth] = 0; closed_uncertain = 1 }
-                                if (group_start[depth] >= 1) { closed_group_start = group_start[depth] }
-                                if (fndef_at[depth]) { fndef--; fndef_at[depth] = 0 }
-                                true_at[depth] = 0
-                                if (subshell_at[depth]) { subshell--; subshell_at[depth] = 0; closed_subshell = 1 }
-                                group_start[depth] = -1
-                                # 括弧で閉じた分も同じ（一番外側が最後に残る）
-                                closed_entry_e = entry_errexit[depth]; closed_entry_p = entry_pipefail[depth]; closed_entry_seen = 1
-                                depth--; closed_any = 1
-                            }
+                        # 括弧で閉じる分を同じ勘定へ足す（キーワードの分は上で数えてある）
+                        if (paren < 0) { close_n -= paren }
+                        # **階層を畳むのはここ 1 か所だけ**（issue #121）。キーワードで閉じる分と
+                        # 括弧で閉じる分を合わせて、内側から 1 つずつ戻す。
+                        # 階層ごとの状態（`uncertain_at` / `group_start` / `fndef_at` / `true_at` /
+                        # `subshell_at` / `entry_*`）を増やすときに触るのはこのループだけでよい
+                        for (closing = 0; closing < close_n && depth > 0; closing++) {
+                            if (uncertain_at[depth]) { uncertain--; uncertain_at[depth] = 0; closed_uncertain = 1 }
+                            if (group_start[depth] >= 1) { closed_group_start = group_start[depth] }
+                            if (fndef_at[depth]) { fndef--; fndef_at[depth] = 0 }
+                            true_at[depth] = 0
+                            if (subshell_at[depth]) { subshell--; subshell_at[depth] = 0; closed_subshell = 1 }
+                            group_start[depth] = -1
+                            # 巻き戻し先はこの断片が閉じた**一番外側**の階層の入口。
+                            # 閉じる順は内側からなので、上書きし続ければ最後に残るのが一番外側
+                            closed_entry_e = entry_errexit[depth]; closed_entry_p = entry_pipefail[depth]; closed_entry_seen = 1
+                            depth--; closed_any = 1
                         }
                         # **フォークして閉じた複合コマンドの中の `set` は親へ漏れない。**
                         # `while …; do set +e; done | cat` / `{ set +e; } | cat` / `… &` は
