@@ -73,6 +73,14 @@ CI_WORKFLOW_COMMAND_START="^[(]?[[:space:]]*${CI_WORKFLOW_COMMAND_PREFIXES}"
 # 本体が何回まわるかは別の検査（一覧が空でないこと）が受け持つ。
 # **2 つの照会で許す語が違うこと自体が意図**で、片方へ寄せてはいけない。
 #
+# **広げる前に、死に体の本体が除かれていることが前提。** 本体の先頭を命令の位置として
+# 認めると、`( if false; then shellcheck $LIST; fi )` の 1 行書きまで照合を満たしてしまう
+# （issue #114 のレビューで実測。`main` でも同じコードを複数行で書くと素通りしていた既存の穴）。
+# 除いているのは `flush_step()` の `dead_depth`（`strip_dead_cond_prefixes()` 経由で
+# 偽と分かる条件を見る）で、**その判定を緩めるとこの定数を使う 2 つの網が同時に fail-open になる**。
+# 対になる検査は `test/ci_workflow_test.sh` の
+# 「コマンド単位: …の中の偽と分かる条件は満たさない」6 件。
+#
 # 読み飛ばすのは 1 つだけにする（`do do …` のような綴りは bash として成り立たないので、
 # 繰り返しを許すと照合が緩むだけで得が無い）。`elif` は**条件**の位置であって本体ではないので
 # 入れない（入れると、通らない条件の中の綴りを配線の証拠に数える方向へ広がる）。
@@ -1077,13 +1085,20 @@ ci_workflow_extract() {
         # `function_form()` の結果を使い回すための引数（同関数は正規表現を組み立てるので
         # 呼び直すと無駄が大きい、というのが 1 度だけ求めている理由）。ループの 2 周目以降は
         # 本文が別物なので測り直す
-        function open_form(t, cached_fn_form, use_cached,   ff) {
+        function open_form(t, cached_fn_form, use_cached,   ff, probe) {
+            # **自分では階層を開かない飾り（`time` / `eval` / `!`）の後ろも分類する。**
+            # 読まないと `time if false; then X; fi` の `if` が 1 階層も開かず、X が
+            # 「最上位で走る」として記録される（issue #114 のレビューで実測）。
+            # 綴りの一覧は `strip_struct_wrappers()` が唯一の源（`(` を含めない理由も同関数に）。
+            # **関数定義とブレースの判定は剥がす前の綴りで行う**——`function_form()` は
+            # 見出しの綴りを見るので、飾りが付いた形はそもそも関数定義ではない
+            probe = strip_struct_wrappers(t)
             # **「必ず走る」条件を先に見る。** `if true` は下の一般形にも当たるので、
             # 順序を逆にすると本体が「走るか分からない」側に落ちて、正しくゲートしている
             # 呼び出しが実行の証拠から外れる
-            if (t ~ /^(if|while)[[:space:]]+(true|:)([[:space:]]|;|$)/) { return 1 }
+            if (probe ~ /^(if|while)[[:space:]]+(true|:)([[:space:]]|;|$)/) { return 1 }
             # 条件・ループ・`case` は、条件や対象を読まないと本体が走るか決まらない
-            if (t ~ /^(if|while|until|for|case|select)([[:space:]]|$)/) { return 2 }
+            if (probe ~ /^(if|while|until|for|case|select)([[:space:]]|$)/) { return 2 }
             # 関数定義の綴りは `function_form()` が唯一の判定（3 綴りの一覧を写さない）
             ff = use_cached ? cached_fn_form : function_form(t)
             # 本体を同じ断片で開く綴り（`f() { …`）
@@ -1420,7 +1435,8 @@ ci_workflow_extract() {
         # 先頭の飾りを落として `set …` そのものを返す。該当しなければ空文字。
         # **落としてよいのは「現在のシェルのまま `set` を呼ぶ」書き方だけ**——
         # ブレースグループ / 変数代入の前置き / `builtin` / `command` / `eval`。
-        # `CI_WORKFLOW_COMMAND_START` の実行ラッパ一覧（`sudo` / `env` / `timeout` 等）は
+        # `CI_WORKFLOW_COMMAND_PREFIXES` の実行ラッパ一覧（`sudo` / `env` / `timeout` 等。
+        # `CI_WORKFLOW_COMMAND_START` と `CI_WORKFLOW_BLOCK_BODY_START` がそこを読む）は
         # **意図的に共有しない**。あちらは「スクリプトを走らせるか」を問う側の一覧で、
         # どれも別プロセスを起こすため `set` を渡しても親のオプションは変わらない
         # （`sudo set +e` は握り潰しではない）。同じ一覧にすると fail-closed 側に化ける
@@ -1470,6 +1486,56 @@ ci_workflow_extract() {
             return probe
         }
 
+        # **後ろの制御構造を「開き 1 つ」として数えるのを邪魔しない飾り**だけを落として返す。
+        # 落とすのは `time` / `eval` / `!` の 3 つで、どれも**自分では階層を開かない**うえ、
+        # 後ろに続く制御構造の条件がそのまま本体の運命を決める
+        # （`time if false; then X; fi` も `! if false; …` も X は 1 度も走らない。
+        #  `!` は終了状態を反転するだけ、`time` は計測するだけ、`eval` は現在のシェルで走る）。
+        #
+        # **`(` は入れない。** 部分シェルの階層は釣り合い（`paren_delta()`）が別に数えるので、
+        # ここで落として `open_form()` が後ろの `if` も形 2 として返すと、1 つの断片で
+        # 同じ階層を二重に開く（`set` の記録・`case` の模様・関数の台帳がすべて 1 つずれる）。
+        # 偽と分かる条件を見るだけの判定は `strip_dead_cond_prefixes()` が `(` も落とす
+        # ——あちらは深さを動かさないので二重に数える心配が無い。
+        #
+        # **`strip_command_prefixes()` とは別にする。** あちらは `if|elif|while|until` を
+        # 落として「実際に走る命令」を返すので、ここで使うと**分類したい制御構造の語そのもの**が
+        # 消える。ブレースグループ（`{ `）も落とさない——`open_form()` が階層として数える綴りで、
+        # 剥がすと深さの勘定と食い違う
+        function strip_struct_wrappers(t,   probe) {
+            probe = t
+            # 剥がせるものが無くなるまで繰り返す（`! time if false` のように重なる）
+            while (1) {
+                # `time` は計測するだけで、後ろの制御構造はそのまま走る
+                if (sub(/^time[[:space:]]+(-p[[:space:]]+)?/, "", probe)) { continue }
+                # `eval` は現在のシェルで走るので、引用を外して中身を見る
+                if (sub(/^eval[[:space:]]+/, "", probe)) { gsub(/["\047]/, "", probe); continue }
+                # `!` は終了状態を反転するだけで、本体が走るかは変えない
+                if (sub(/^![[:space:]]+/, "", probe)) { continue }
+                break
+            }
+            return probe
+        }
+
+        # **偽と分かる条件を見る側**の飾り落とし。上の 3 つに加えて部分シェルの開き `(` も落とす。
+        # `( if false; then X; fi )` の X は 1 度も走らないが、`open_form()` は `( if false` を
+        # 分類できない（`(` を読ませると上の説明のとおり階層を二重に開く）。深さを動かさない
+        # この判定でだけ `(` も落として、偽と分かる条件を取りこぼさないようにする。
+        # **残る境界**: `( if <条件>; then X; fi )` のように条件が読めない形では、`(` が開く
+        # 階層だけが立ち `uncertain` は立たない。実行の照会は深さ 0 だけを見るので影響は無く、
+        # リンタの照合は「条件付きの lint も証拠として数える」設計なのでこれで正しい
+        function strip_dead_cond_prefixes(t,   probe, before) {
+            probe = t
+            # 括弧と飾りが交互に重なることがあるので、綴りが減らなくなるまで回す
+            while (1) {
+                before = probe
+                sub(/^\([[:space:]]*/, "", probe)
+                probe = strip_struct_wrappers(probe)
+                if (probe == before) { break }
+            }
+            return probe
+        }
+
         # `set` のオプション 1 つ分の新しい値を返す。**向きごとに反映してよい条件が違う**（issue #113）。
         # `on` が真なら `-`（ゲートを強める）、偽なら `+`（弱める）。反映してよくなければ現在値を返す。
         # 短い綴りと長い綴りで同じ判断を書き写さないよう、ここ 1 か所に寄せてある
@@ -1510,7 +1576,7 @@ ci_workflow_extract() {
         # **ここでは出力しない**のが要点で、ジョブ単位の無効化キー（`if: false` 等）は
         # YAML のキー順が自由である以上 `steps:` の**後ろ**にも書ける。書いた時点で
         # 出力済みのステップは取り消せないため、ジョブ 1 つ分を溜めてから出す
-        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, closed_any, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, closed_subshell, closed_uncertain, arm_masked, arm_at, arm_expected, case_scope, opens_case, opens_case_here, case_opens_at, close_probe, close_rest, close_first, open_head, esac_probe, esac_rest, esac_first) {
+        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, closed_any, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, closed_subshell, closed_uncertain, arm_masked, arm_at, arm_expected, case_scope, opens_case, opens_case_here, case_opens_at, close_probe, close_rest, close_first, open_head, esac_probe, esac_rest, esac_first, dead_probe) {
             # **シェルのオプションはステップごとにリセットする。** ステップは 1 つずつ
             # 別のシェルで走るので、前のステップの `set +e` / `pipefail` は引き継がれない。
             # **控えるのは `set` で明示された分だけ（-1 = 明示なし）。** シェルの既定と突き合わせるのは
@@ -2262,16 +2328,20 @@ ci_workflow_extract() {
                         # 「最上位で確実に走る」**として記録される:
                         #     ( if false; then bash x; fi )   → 「配線されている」
                         # 剥がさなければ `then bash x` のまま当たらないので、生の本文が受け皿になっている。
-                        # **受け皿が効くのは畳んだ綴りだけ**——同じコードを複数行で書くと本文の断片が
-                        # `bash x` で始まるので、控える本文がどちらでも綴りに当たる（`( if false; then`
-                        # 改行 `bash x` 改行 `fi )` は `main` でも「配線されている」。この差分の外にある
-                        # 既存の穴で、塞ぐには開き側が `(` や実行ラッパの後ろの制御構造を読めるようにする必要がある）。
                         # `CI_WORKFLOW_COMMAND_START` の説明にある「条件やループの本体に置いた
                         # 呼び出しがゲートになるかは、その本体が何をするかを読まないと決まらない
                         # ——読めない以上は主張しない（fail-closed）」は、この受け皿のことでもある。
-                        # **畳んだ綴りを拾いたいなら、先に開き側が同じ語を読めるようにすること**
-                        # （`( … )` の中や実行ラッパの後ろの制御構造を分類できるようにする）。
-                        # 順序を逆にすると、直る 1 件と引き換えに上の 4 形が一斉に穴になる
+                        #
+                        # **上の 4 形は開き側が読めるようになった**（issue #114 のレビュー）。
+                        # `time` / `eval` / `!` は `open_form()` が `strip_struct_wrappers()` を
+                        # 通して分類するので階層が開き、`(` は釣り合いが階層を開く。
+                        # **偽と分かる条件そのものは `strip_dead_cond_prefixes()` 経由で見る**ので、
+                        # `( if false; then bash x; fi )` は畳んでも複数行でも gate=0 で記録される
+                        # （複数行の綴りは `main` では素通りしていた既存の穴で、同じ変更で閉じた）。
+                        # それでも**ここで控えるのは生の本文のまま**にする——`struct_text` を控えると
+                        # 「0 回まわるループの中の呼び出し」まで最上位の実行として記録され、
+                        # そちらは条件を読まずに判断できない（`for f in $EMPTY; do bash x; done`）。
+                        # つまり受け皿の役目は「死に体の除去」から「回数の分からない本体の除去」へ移った
                         buf[nbuf] = step_id "\t" ops[j] "\t" ((dead_depth >= 0 || unreachable) ? 0 : errexit) "\t" pipefail "\t" uncertain "\t" text
                         # 偽と分かる条件のブロックに入るところを覚える（この深さより深い間は無効）
                         # **連鎖が続くなら条件は 1 語だけではない。** `split_commands` は `&&` / `||` で
@@ -2285,10 +2355,21 @@ ci_workflow_extract() {
                         #     `||` は右側で真になりうるので除く
                         #   - 条件が真（`until true`）… `||` はそのまま真なので印を維持、
                         #     `&&` は右側で偽になりうるので除く
+                        # **開き側が読めない飾りの後ろも見る**（issue #114 のレビューで実測）。
+                        # `( if false; then shellcheck $LIST; fi )` は `open_form()` が
+                        # `( if false` を分類できないため階層も `uncertain` も立たず、
+                        # ここで `^if` だけを見ていると偽と分かる条件が記録されない。
+                        # すると**1 度も走らない本体がリンタの照合を満たす**（下の控えに
+                        # gate=1 で載る）——`main` でも複数行で書けば素通りしていた既存の穴で、
+                        # ブロック本体の先頭を許す開始位置（`CI_WORKFLOW_BLOCK_BODY_START`）を
+                        # 入れると 1 行書きでも素通りするようになる。剥がす綴りは
+                        # `strip_dead_cond_prefixes()` が唯一の源（なぜ `open_form()` 側で
+                        # 読まないか・残る境界も同関数の説明にある）
+                        dead_probe = strip_dead_cond_prefixes(struct_text)
                         if (dead_depth < 0 && ops[j] != "||" \
-                            && struct_text ~ /^(if|while)[[:space:]]+false([[:space:]]|;|$)/) { dead_depth = depth }
+                            && dead_probe ~ /^(if|while)[[:space:]]+false([[:space:]]|;|$)/) { dead_depth = depth }
                         else if (dead_depth < 0 && ops[j] != "&&" \
-                                 && struct_text ~ /^until[[:space:]]+true([[:space:]]|;|$)/) { dead_depth = depth }
+                                 && dead_probe ~ /^until[[:space:]]+true([[:space:]]|;|$)/) { dead_depth = depth }
                         # **grouping を閉じた断片に付いた区切りは、その中身すべてに掛かる。**
                         # `( bash x ) || true` は中の `bash x` も「失敗が伝わらない」——
                         # 中身だけを見ると区切りが無いので「ゲートしている」と読まれる（レビューで実測）
@@ -2986,6 +3067,43 @@ ci_workflow_env_records() {
         fi
         # 値の記録は `<変数名> <エントリ>` の形なので、名前を確かめてからエントリだけを返す
         [ "${text%% *}" = "${name}" ] && printf '%s\n' "${text#* }"
+    done < "${CI_WORKFLOW_COMMANDS}"
+}
+
+# 控えに現れる**ジョブ名**を 1 行 1 件で返す（重複は畳む）。
+#
+# **ジョブ名を渡す照会の綴りを確かめるための関数。** `ci_workflow_runs_script` /
+# `ci_workflow_command_matches` / `ci_workflow_step_matches` は、存在しないジョブ名を
+# 渡されても「そのジョブには無い」と答える——つまり**ジョブを改名した・表の値を打ち間違えた
+# だけで「配線されていない」という事実と逆の診断**が出て、しかも診断文は正しい原因を
+# 名指しできない（issue #114 のレビューで実測。ケース 4 の 7 件が一斉にそうなった）。
+# 呼び出し側はこの一覧と突き合わせて、知らないジョブ名なら**原因を名指しして**落とせる。
+#
+# **ワークフローを読むのはこのライブラリだけ**という決まりのため、呼び出し側が
+# 独自に `jobs:` を探すのではなくここを通す（解析器が 2 つになると、`run: |` の本文に
+# 同じ見た目の行があったときに片方だけが食い付く）。
+# 控えには `ジョブ名#ステップ番号` と `ジョブ名#env` の両方が入るので、
+# **コマンドを 1 つも持たないジョブ**（`env:` だけ、`uses:` だけ）もここには現れる
+ci_workflow_job_names() {
+    # 走査中の 1 行・キー・ジョブ名
+    local record key job
+    # 既に出したジョブ名の印。**名前をこのライブラリ固有にする**のが要点で、`seen` のような
+    # ありふれた名前を連想配列で宣言すると、`source` したスクリプト側で同名のスカラ変数を
+    # 使っているところが shellcheck の SC2178 / SC2128 で落ちる——しかも**ファイルを 1 つずつ
+    # 渡したときは source を追わないので再現せず**、CI のように一覧をまとめて渡したときだけ
+    # 落ちる（実測。`test/action_pin_test.sh` の `local seen=0` が巻き添えになった）
+    local -A emitted_jobs=()
+    while IFS= read -r record; do
+        # 行頭のキー（`ジョブ名#…`）を取り出す
+        key="${record%%$'\t'*}"
+        # キーからジョブ名だけを取り出す
+        job="${key%%#*}"
+        # 空のキーは読み飛ばす（保存先が壊れているときの保険）
+        [ -n "${job}" ] || continue
+        # 同じジョブ名は 1 度だけ出す
+        [ -z "${emitted_jobs[${job}]-}" ] || continue
+        emitted_jobs["${job}"]=1
+        printf '%s\n' "${job}"
     done < "${CI_WORKFLOW_COMMANDS}"
 }
 

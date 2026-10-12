@@ -157,6 +157,35 @@ declare -A SUITE_JOBS=(
     ["test/action_pin_test.sh"]="type-check"
 )
 
+# **表の値（ジョブ名）が ci.yml に実在することを先に確かめる（fail-closed）。**
+# ジョブ名を渡す照会は、知らないジョブ名に対して「そのジョブには無い」と答えるだけなので、
+# ジョブを改名した・値を打ち間違えただけで**ケース 4 の全件が「実行されていない」という
+# 事実と逆の診断で落ちる**（issue #114 のレビューで実測。7 件が一斉にそうなり、
+# 診断文は正しい原因＝ジョブ名の不一致を名指しできなかった）。
+# ここで先に落とせば、原因と直し方がそのまま出る。
+# **読むのは共有ライブラリ**（`jobs:` を独自に探すと YAML の解析器が 2 つになる）
+mapfile -t ci_job_names < <(ci_workflow_job_names)
+
+# 一覧が空なら、保存先か書式が変わって読めていない（検査が丸ごと消えるのを防ぐ）
+[ "${#ci_job_names[@]}" -gt 0 ] \
+    || bail "could not read any job names out of ${CI_WORKFLOW}; the SUITE_JOBS values cannot be validated"
+
+# 突き合わせを引きやすい形にする
+declare -A ci_job_present=()
+for ci_job_name in "${ci_job_names[@]}"; do ci_job_present["${ci_job_name}"]=1; done
+
+# 表のすべてのエントリについて、キー（スイート）と値（ジョブ名）の両方を確かめる
+for suite_path in "${!SUITE_JOBS[@]}"; do
+    # 値が ci.yml に実在するジョブ名であること
+    [ -n "${ci_job_present[${SUITE_JOBS[${suite_path}]}]-}" ] \
+        || bail "SUITE_JOBS[${suite_path}] が指す \"${SUITE_JOBS[${suite_path}]}\" は ${CI_WORKFLOW} に無いジョブ名（実在するのは: ${ci_job_names[*]}）。ジョブを改名したのなら SUITE_JOBS も直すこと"
+    # **キーが実在するスイートであること。** 消した・改名したスイートのエントリが残っても、
+    # ケース 4 は引きに来ないので黙って腐る（同じファイルのケース 3 が SHELL_FILES に
+    # 対して持っている歯止めが、新しいこちらの表には無かった。レビューで実測）
+    [ -f "${REPO_ROOT}/${suite_path}" ] \
+        || bail "SUITE_JOBS に実体の無いスイート ${suite_path} が残っている。消した・改名したのならこのエントリも消すこと"
+done
+
 # --- リポジトリ側の実体を数え上げる -------------------------------------------------
 
 # コミット済みファイルのうちシェルスクリプトであるものを列挙する。
