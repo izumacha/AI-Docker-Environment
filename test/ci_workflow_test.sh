@@ -5270,6 +5270,25 @@ done
 # 書かれて issue #149 の位置の判定が飛ばされる（実測で、握り潰された `&& echo ok` が
 # wired に化ける fail-open）。**命令の位置にある形（`(` の直後・`do` の後ろ 等）は
 # 引き続き外す**ので、issue #145 の対（「裸のアーム見出しと関数の本体」6 形）が守る
+# 締めすぎない側。**本体を開く語は断片の先頭にも来る**（レビュー指摘、実測）——`split_commands` は
+# 断片の前後の空白を落とすので `then case $X in a) :` には手前の空白が無い。空白を必須にすると
+# 見出しの `)` が釣り合いに残り、先頭の `(` を打ち消して階層が 1 つも開かず、
+# **1 度も呼ばれない関数の本体が「最上位で確実に走る」と記録される**（issue #145 の fail-open が戻る）
+for arm_head_body_word_case in \
+    "then の直後:f() { ( if true; then case \$X in a) :;; esac; fi ; bash ${SUITE_PATH} ) }" \
+    "do の直後:f() { ( for i in a; do case \$X in a) :;; esac; done ; bash ${SUITE_PATH} ) }" \
+    "else の直後:f() { ( if false; then :; else case \$X in a) :;; esac; fi ; bash ${SUITE_PATH} ) }"
+do
+    assert_not_wired "本体を開く語の直後の見出しも釣り合いから外す（${arm_head_body_word_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${arm_head_body_word_case#*:}"
+done
+
 assert_not_wired "引数の位置の case は見出しとして読まない" "name: ci
 jobs:
   type-check:
