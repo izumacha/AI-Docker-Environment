@@ -4174,6 +4174,90 @@ jobs:
           ${sub_promote_case#*:}"
 done
 
+# **`&&` でつながった並びが部分シェルの最後のコマンドなら、どの要素の失敗も親へ伝わる**
+# （issue #193）。`&&` は左が落ちた時点で短絡するので、その失敗がそのまま部分シェルの
+# 終了状態になる（実 `bash -e` で GATES）。候補を 1 件しか控えない形だと右辺（`echo ok`）が
+# スイートの控えを潰し、**正しくゲートしている綴りを「未配線」と逆の診断で赤くする**
+# ——issue #180 の対応（`( set +e` を読むようにした変更）がこの形を作った既存の退行。
+# 閉じる断片のコマンドを見る門番も区切りを見ていなかったので、1 行書きと
+# `… && echo ok )` の 2 形は候補が正しくても引き上げを見送っていた
+for sub_and_chain_case in \
+    "複数行:(
+          set +e
+          bash ${SUITE_PATH} && echo ok
+          )" \
+    "閉じ括弧が同じ断片:(
+          set +e
+          bash ${SUITE_PATH} && echo ok )" \
+    "一行:( set +e; bash ${SUITE_PATH} && echo ok )" \
+    "3 つつなぐ:(
+          set +e
+          bash ${SUITE_PATH} && echo a && echo b
+          )" \
+    "閉じる断片のリダイレクト:(
+          set +e
+          bash ${SUITE_PATH} && echo ok
+          ) >/dev/null" \
+    "末尾の ; で閉じる:(
+          set +e
+          bash ${SUITE_PATH} && echo ok;
+          )" \
+    "内側の部分シェルの中で並ぶ:(
+          set +e
+          ( bash ${SUITE_PATH} && echo ok )
+          )" \
+    "内側の部分シェルに && が付く:(
+          set +e
+          ( bash ${SUITE_PATH} ) && echo ok
+          )"
+do
+    assert_wired "&& の連鎖が部分シェルの最後なら引き上げる（${sub_and_chain_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${sub_and_chain_case#*:}"
+done
+
+# **向きの対。** 上の引き上げを「区切りを問わず控えを足す」まで広げると、手前の失敗が
+# 右辺の実行に吸われる綴りまで「ゲートしている」と読む fail-open になる（実 `bash -e` は
+# いずれも NOGATE）。`||` は左が落ちても右辺が走って 0 で終わり、`;` や改行で続く綴りは
+# 後ろのコマンドが終了状態を上書きする。**`&& … || …` も握り潰し側**で、短絡しても
+# `||` の右辺が拾うので失敗は 1 つも漏れない
+for sub_and_chain_swallowed_case in \
+    "|| で拾う:(
+          set +e
+          bash ${SUITE_PATH} || echo fallback
+          )" \
+    "&& のあと || で拾う:(
+          set +e
+          bash ${SUITE_PATH} && echo ok || echo bad
+          )" \
+    "|| のあと && でつなぐ:(
+          set +e
+          bash ${SUITE_PATH} || true && echo ok
+          )" \
+    "並びの後ろにもう 1 行:(
+          set +e
+          bash ${SUITE_PATH} && echo ok
+          echo z
+          )" \
+    "閉じ括弧の断片が || で拾う:(
+          set +e
+          bash ${SUITE_PATH} && echo ok || echo bad )"
+do
+    assert_not_wired "&& の連鎖でも握り潰される側（${sub_and_chain_swallowed_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${sub_and_chain_swallowed_case#*:}"
+done
+
 assert_not_wired "外で落として部分シェルの中で戻しても credit しない" "name: ci
 jobs:
   type-check:
@@ -5527,7 +5611,8 @@ for and_pipeline_case in \
     "読めない引数の exit が後ろ:bash ${SUITE_PATH} && echo ok || exit \$rc" \
     "失敗で終わる return が後ろ:bash ${SUITE_PATH} && echo ok || return 1" \
     "0 の算術コマンドが後ろ:bash ${SUITE_PATH} && echo ok || (( 0 ))" \
-    "0 が並ぶ算術コマンドが後ろ:bash ${SUITE_PATH} && echo ok || (( 00 ))"
+    "0 が並ぶ算術コマンドが後ろ:bash ${SUITE_PATH} && echo ok || (( 00 ))" \
+    "反転した非 0 の算術コマンドが後ろ:bash ${SUITE_PATH} && echo ok || ! (( 1 ))"
 do
     assert_wired "並びの終端まで届けば合否に効く（${and_pipeline_case%%:*}）" "name: ci
 jobs:

@@ -2297,7 +2297,7 @@ ci_workflow_extract() {
         # **ここでは出力しない**のが要点で、ジョブ単位の無効化キー（`if: false` 等）は
         # YAML のキー順が自由である以上 `steps:` の**後ろ**にも書ける。書いた時点で
         # 出力済みのステップは取り消せないため、ジョブ 1 つ分を溜めてから出す
-        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_lead_rest, set_lead_n, set_sub, set_res, set_res_at, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, closed_any, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, closed_subshell, closed_uncertain, chain_in, inverted, arm_masked, arm_at, arm_expected, case_scope, opens_case, opens_case_here, case_opens_at, close_probe, close_rest, close_first, open_head, esac_probe, esac_rest, esac_first, dead_probe, dead_lead, close_n, exit_seen, chain_at, chain_depth, closed_sub_seen, closed_sub_e, closed_sub_p, sub_rec, sub_rec_level, prom_rec, sub_id, carry_level, open_stripped, head_inverted, inverted_at, closed_inverted, prop_op, sub_serial) {
+        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_lead_rest, set_lead_n, set_sub, set_res, set_res_at, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, closed_any, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, closed_subshell, closed_uncertain, chain_in, inverted, arm_masked, arm_at, arm_expected, case_scope, opens_case, opens_case_here, case_opens_at, close_probe, close_rest, close_first, open_head, esac_probe, esac_rest, esac_first, dead_probe, dead_lead, close_n, exit_seen, chain_at, chain_depth, closed_sub_seen, closed_sub_e, closed_sub_p, sub_rec, sub_rec_level, prom_rec, sub_id, carry_level, open_stripped, head_inverted, inverted_at, closed_inverted, prop_op, sub_serial, prom_list, nprom, pi) {
             # **シェルのオプションはステップごとにリセットする。** ステップは 1 つずつ
             # 別のシェルで走るので、前のステップの `set +e` / `pipefail` は引き継がれない。
             # **控えるのは `set` で明示された分だけ（-1 = 明示なし）。** シェルの既定と突き合わせるのは
@@ -2463,7 +2463,7 @@ ci_workflow_extract() {
                         # 取るため、値そのものを「閉じていない」の目印には使えない
                         closed_entry_seen = 0
                         closed_inverted = 0
-                        prom_rec = 0
+                        prom_rec = ""
                         closed_sub_seen = 0
                         closed_sub_e = 0
                         closed_sub_p = 0
@@ -3174,9 +3174,9 @@ ci_workflow_extract() {
                                 # 引き上げ候補は**内側から見て最初に見つかったもの**（閉じる順が
                                 # 内→外なので、先に見つかった方が内側）。入口の姿は逆に
                                 # 一番外側のものを使う（上書きし続ければ最後に残る）
-                                if (prom_rec == 0 && sub_rec[depth] > 0) { prom_rec = sub_rec[depth] }
+                                if (prom_rec == "" && sub_rec[depth] != "") { prom_rec = sub_rec[depth] }
                             }
-                            sub_rec[depth] = 0
+                            sub_rec[depth] = ""
                             if (chain_at[depth]) { chain_depth--; chain_at[depth] = 0 }
                             # **反転した階層を閉じた断片は、その中の最後のコマンドを載せている。**
                             # 階層が閉じるのは記録より**先**なので（1 行に畳んだ
@@ -3230,10 +3230,21 @@ ci_workflow_extract() {
                             # ——あの綴りは `set_command()` が先頭の `(` を越えられず握り潰しを
                             # 読まないので**ここへ到達しない**（`main` 既存の fail-open として
                             # 別にピンがある）。存在しない制御経路の説明は保守上の罠になる
-                            if (prom_rec > 0 && !carries_command(text)) {
+                            # **閉じる断片のコマンドが `&&` でつながっているなら引き上げる**（issue #193）。
+                            # 門番の目的は「後ろに走るコマンドが終了状態を上書きする」場合を除くこと
+                            # だが、`&&` で続く綴り（`( set +e; bash <スイート> && echo ok )`）では
+                            # 左が落ちた時点で短絡し、その失敗がそのまま部分シェルの状態になる
+                            # （実 `bash -e` で GATES）。区切りを見ずに弾いていたので、1 行書きと
+                            # `… && echo ok )` の 2 形が「未配線」と逆の診断で赤くなっていた
+                            if (prom_rec != "" && (!carries_command(text) || prev_op == "&&")) {
                                 if (closed_sub_e != 0) {
-                                    split(buf[prom_rec], inner, "\t")
-                                    buf[prom_rec] = inner[1] "\t" inner[2] "\t" closed_sub_e "\t" inner[4] "\t" inner[5] "\t" inner[6] "\t" inner[7]
+                                    # **候補は 1 件ではない**（issue #193）。`&&` の連鎖はどの要素の
+                                    # 失敗もそのまま並びの状態になるので、控えた分すべてを引き上げる
+                                    nprom = split(prom_rec, prom_list, " ")
+                                    for (pi = 1; pi <= nprom; pi++) {
+                                        split(buf[prom_list[pi]], inner, "\t")
+                                        buf[prom_list[pi]] = inner[1] "\t" inner[2] "\t" closed_sub_e "\t" inner[4] "\t" inner[5] "\t" inner[6] "\t" inner[7]
+                                    }
                                 }
                                 # **外側でもまだ握り潰されているなら、引き上げ候補を外側へ引き継ぐ**
                                 # （issue #152 のレビュー指摘）。入れ子の部分シェルでは内側の
@@ -3246,7 +3257,7 @@ ci_workflow_extract() {
                                     if (carry_level > 0) { sub_rec[carry_level] = prom_rec }
                                 }
                             }
-                            prom_rec = 0
+                            prom_rec = ""
                         }
                         if (closed_entry_seen && (ops[j] == "|" || ops[j] == "&")) {
                             errexit = closed_entry_e
@@ -3350,7 +3361,19 @@ ci_workflow_extract() {
                         if (subshell > 0 && errexit == 0 && !(dead_depth >= 0 || unreachable || exit_seen) \
                             && carries_command(text)) {
                             sub_rec_level = enclosing_subshell_depth(depth, subshell_at)
-                            if (sub_rec_level > 0) { sub_rec[sub_rec_level] = nbuf }
+                            # **`&&` でつながった断片は足し、それ以外は置き換える**（issue #193）。
+                            # `&&` は左が落ちた時点で短絡するので、連鎖のどの要素の失敗も
+                            # そのまま並びの終了状態になる＝どれも親へ伝わる候補。置き換えるだけだと
+                            # 右辺（`echo ok`）が控えを潰し、スイートの記録が引き上げられないまま
+                            # 「未配線」と逆の診断で赤くなる（issue #180 の対応がこの形を作った）。
+                            # **`||` / `;` / `|` では置き換える**のが要点で、あちらは手前の失敗が
+                            # 右辺の実行に吸われる（`bash <スイート> || echo fallback` は NOGATE）——
+                            # 足してしまうと 1 度も落ちない並びを「ゲートしている」と読む fail-open。
+                            # `A && B || C` も自然に閉じる（`||` で置き換わるので候補は `C` だけ）
+                            if (sub_rec_level > 0) {
+                                if (prev_op == "&&" && sub_rec[sub_rec_level] != "") { sub_rec[sub_rec_level] = sub_rec[sub_rec_level] " " nbuf }
+                                else { sub_rec[sub_rec_level] = nbuf }
+                            }
                         }
                         # 偽と分かる条件のブロックに入るところを覚える（この深さより深い間は無効）
                         # **連鎖が続くなら条件は 1 語だけではない。** `split_commands` は `&&` / `||` で
