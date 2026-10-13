@@ -3100,6 +3100,18 @@ jobs:
             bash ${SUITE_PATH}
           fi"
 
+# **`!` を重ねると打ち消し合う。** `STRUCT_INVERTED` を「1 を代入する掛け金」にすると
+# `! ! if true; then <呼び出し>; fi` を「反転されている」と読み、実 bash では伝わる失敗を
+# 「伝わらない」と判定する（fail-closed。実測で `main` は `not-wired`・実 bash は GATES）
+assert_wired "! を重ねた if true の本体は実行の証拠になる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ! ! if true; then bash ${SUITE_PATH}; fi"
+
 # **締めすぎない側**: `!` の無い `time` は今までどおり証拠になること（`STRUCT_INVERTED` を
 # 「飾りが 1 つでも剥がれたか」にすると、計測するだけの `time` まで巻き込んで
 # 正しくゲートしている呼び出しが実行の証拠から外れる）
@@ -3391,6 +3403,100 @@ jobs:
         run: |
           ${composed_fn_case#*:}"
 done
+
+# **1 行書きのアーム見出しを閉じる `)` は部分シェルの閉じではない**（issue #145）。
+# `case ${DOLLAR}X in a)` の `)` は**対応する `(` を持たない**ので、生の釣り合いでは
+# 手前の `(` を打ち消す。すると `(` の階層が 1 つも開かず、続く `esac` が
+# **関数やブレースの階層**を閉じて、呼ばれていない本体が「最上位で確実に走る」として
+# 記録されていた（`main` から続く fail-open。`f` は一度も呼ばれていないので実 bash では
+# 1 行も走らない）。POSIX の綴り（`(a)`）と部分シェルの無い綴りは釣り合いが崩れないので
+# `main` でも正しく `not-wired` だった＝**綴り 1 つで答えが変わる非対称**でもあった
+for arm_close_case in \
+    "部分シェルの中:f() { ( case ${DOLLAR}X in a) :;; esac ; bash ${SUITE_PATH} ) }" \
+    "部分シェルが外:( f() { case ${DOLLAR}X in a) :;; esac ; bash ${SUITE_PATH}; } )" \
+    "呼び出しあり:f() { ( case ${DOLLAR}X in a) :;; esac ; bash ${SUITE_PATH} ) }
+          f" \
+    "空白なしの開き:f() { (case ${DOLLAR}X in a) :;; esac ; bash ${SUITE_PATH} ) }" \
+    "タブで開く:f() { (	case ${DOLLAR}X in a) :;; esac ; bash ${SUITE_PATH} ) }"
+do
+    assert_not_wired "裸のアーム見出しと関数の本体（${arm_close_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${arm_close_case#*:}"
+done
+
+# **締めすぎない側＝本物の部分シェルの閉じを食わないこと。** 落とすのは見出しを閉じる
+# `)` の 1 文字だけなので、同じ断片にある本物の `( … )` は今までどおり閉じ、
+# 最上位に置いた呼び出しは証拠のまま（実 bash でもすべて失敗が伝わる形）
+for arm_close_live_case in \
+    "部分シェルの中の最上位:( case ${DOLLAR}X in a) :;; esac ; bash ${SUITE_PATH} )" \
+    "esac の後ろ:case ${DOLLAR}X in a) :;; esac
+          bash ${SUITE_PATH}" \
+    "アームの中の本物の部分シェル:case never in a) time ( : ) ;; esac
+          bash ${SUITE_PATH}" \
+    "ブレースの中:{ case ${DOLLAR}X in a) :;; esac ; bash ${SUITE_PATH}; }"
+do
+    assert_wired "裸のアーム見出しがあっても証拠になる（${arm_close_live_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${arm_close_live_case#*:}"
+done
+
+# **この差分で締めすぎが 1 つほどけた**（実 bash を真値とした 800 ケースの総当たりで実測）。
+# 部分シェルの中の `set +e` は**親の errexit を消さない**ので、部分シェルの終了状態
+# （＝最後のコマンドの状態）がそのまま親へ伝わり、失敗はジョブへ届く。ところが
+# 1 行書きのアーム見出しで釣り合いが崩れていた分、`(` の階層が開かず `set +e` が
+# **最上位のもの**として読まれ、続く呼び出しが「握り潰されている」と判定されていた
+# （fail-closed＝正しくゲートしている設定を「配線されていない」と報告する向き）
+# **1 行書きの `( … )` も同じ**。この形は**上限（`lead_subshell_cap()`）に同じ補正を
+# 入れると `not-wired` へ戻る**ので、補正を入れない判断をここで固定している
+# （入れた版では先頭の `(` を越えて `case_depth` が増え、続く `set +e` の読み方が変わる。
+#  800 ケースの総当たりで差はこの形と `( { … ; } )` の 2 つだけ＝実測）
+for subsh_setoff_case in \
+    "改行で開く:(
+          case \"${DOLLAR}M\" in a) echo hi ;; esac ; set +e
+          bash ${SUITE_PATH}
+          )" \
+    "1 行で開く:( case \"${DOLLAR}M\" in a) echo hi ;; esac ; set +e
+          bash ${SUITE_PATH} )" \
+    "ブレースを重ねる:( { case \"${DOLLAR}M\" in a) echo hi ;; esac ; set +e
+          bash ${SUITE_PATH} ; } )"
+do
+    assert_wired "部分シェルの中の set +e は親の errexit を消さない（${subsh_setoff_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${subsh_setoff_case#*:}"
+done
+
+# **POSIX の綴り（`(a)`）には触らないこと。** 開閉が揃っているので釣り合いは崩れておらず、
+# `drop_arm_head_close()` が `(` を含む見出しまで落とすと**本物の階層が 1 つ余分に開いたまま残る**。
+# 下の形はそれが fail-open として現れる: 部分シェルが閉じたのに階層が残るので、
+# 続く最上位の `set +e` が「子シェルの中」として捨てられ、**握り潰されたスイートが
+# 「ゲートしている」と読まれる**（実測で、門番を外した版は `wired`。実 bash は NOGATE）。
+# **`f() { ( case $X in (a) … ) }` のような形では固定できない**——あちらは門番の有無に
+# かかわらず `not-wired` なので、置いても何も見張らない（実測）
+assert_not_wired "POSIX の綴りのアーム見出しの後ろの set +e は最上位のまま" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ( case ${DOLLAR}X in (a) :;; esac )
+          set +e
+          bash ${SUITE_PATH}"
 
 assert_not_wired "実行ラッパの後ろに置いた偽と分かる分岐の本体" "name: ci
 jobs:
