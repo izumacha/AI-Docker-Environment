@@ -162,6 +162,22 @@ CI_WORKFLOW_BLOCK_BODY_START="^[[:space:]]*((do|then|else)[[:space:]]+)?${CI_WOR
 # 後段に行頭以外の照合を足すときはここを見直すこと
 CI_WORKFLOW_COMMENT_START='(^|[[:space:]])#'
 
+# **YAML のノードプロパティ（アンカー `&name` / タグ `!tag` `!!str`）の綴り。**
+# 鍵と値のあいだに置ける飾りで、値そのものではない（`run: &suites |` の `&suites`）。
+# 名前を終わらせる文字はフロー形式の区切り 4 種だけで、**`#` は含めない**
+# （`#` がコメントを始めるのは空白の後ろだけなので、`&a#b` の `#` は名前の一部）。
+# **綴りの源はこの 1 行で、3 つの読み手が同じものを読む**:
+#   - `emit_structural_lines()` の伏せ処理（1 文字ずつ歩く側。`prop_stop_re`）
+#   - `emit_structural_lines()` のブロックスカラーの開始判定（`prop_re`）
+#   - `ci_workflow_extract` の `run:` の読み取り（同じ `prop_re`）
+# 写しを持つと、どれか 1 つだけが古くなって「構造行では本文を読み飛ばすのに
+# 抽出側は値として読む」ような食い違いが生まれる（issue #126 で実際に起きた形）
+CI_WORKFLOW_PROP_STOP_CHARS='][{},'
+CI_WORKFLOW_PROP_STOP="[${CI_WORKFLOW_PROP_STOP_CHARS}]"
+# 名前に使える文字は上を**否定した**集合＋空白・引用符の除外。プロパティの後ろに
+# 空白を要求するのは YAML の規則（`&n|` は正しくない）で、伏せ処理側の条件と同じ
+CI_WORKFLOW_NODE_PROPERTY="([&!][^${CI_WORKFLOW_PROP_STOP_CHARS}[:space:]\"']+[[:space:]]+)*"
+
 # 抽出した「実行されるコマンド」を保持するファイル。1 行が
 # `<ジョブ名>#<ステップ番号><TAB><ゲートに効くか(1/0)><TAB><コマンドの断片>`
 CI_WORKFLOW_COMMANDS=""
@@ -201,7 +217,8 @@ emit_structural_lines() {
     # 引用符 2 種も名前を終わらせる（`dq` / `sq` は awk 変数なので、この集合とは別に判定する）
     awk -v dq='"' -v sq="'" -v flow_re='[][{},#]' -v flow_mask='~' \
         -v comment_re="${CI_WORKFLOW_COMMENT_START}" \
-        -v prop_stop_re='[][{},]' \
+        -v prop_stop_re="${CI_WORKFLOW_PROP_STOP}" \
+        -v prop_re="${CI_WORKFLOW_NODE_PROPERTY}" \
         -v tight_openers='{[,' '
         # 引用スカラーの中で、位置 i の 1 文字から始まるのが「終端ではない脱出表記」かどうかを返す。
         # 二重引用では `\` が次の 1 文字を脱出させ、単一引用では `'"'"''"'"'` が文字としてのアポストロフィ。
@@ -683,8 +700,14 @@ emit_structural_lines() {
             # 実在するスイートが「未配線」になる（**fail-closed**。実測で `NOT-WIRED` / 読み込み失敗）。
             # **いったんラッチすると同じファイル内に回復経路が無い**ので、引用が閉じていない行は
             # 引用スカラーの途中として扱う（＝ブロックスカラーに倒さない fail-closed 側）
+            # **鍵と指示子のあいだのノードプロパティ（`run: &suites |` / `run: !!str |`）も読む**
+            # （issue #126）。読まないとその行がブロックスカラーの開始と認められず、本文の
+            # シェルスクリプトが構造行として漏れて**実在するスイートが「未配線」になる**
+            # （fail-closed。`run: |` に `&suites ` を足すだけで答えが変わる）。
+            # 綴りは `prop_re`（シェル側の `CI_WORKFLOW_NODE_PROPERTY`）が唯一の源で、
+            # 伏せ処理が 1 文字ずつ歩くときの `prop_stop_re` と同じ集合から導いてある
             if (!was_continuation && open_type == "" \
-                && probe ~ /^[[:space:]]*(-[[:space:]]+)?[a-z_][a-z0-9_.-]*[[:space:]]*:[[:space:]]*[|>]([0-9]*[+-]?|[+-]?[0-9]*)[[:space:]]*$/) {
+                && probe ~ ("^[[:space:]]*(-[[:space:]]+)?[a-z_][a-z0-9_.-]*[[:space:]]*:[[:space:]]*" prop_re "[|>]([0-9]*[+-]?|[+-]?[0-9]*)[[:space:]]*$")) {
                 in_scalar = 1
                 # 本文の範囲は**鍵の桁**で決める。ダッシュの桁で決めると、
                 # `- if: >-` の本文だけでなく**同じ手順の兄弟キー**（次行の `uses:` 等）まで
@@ -748,6 +771,7 @@ ci_workflow_run_with_structure() {
     fi
     # 構造行の表を BEGIN で読み込んでから、呼び出し側のプログラムを続ける
     awk -v structural_file="${structural_file}" -v comment_re="${CI_WORKFLOW_COMMENT_START}" \
+        -v prop_re="${CI_WORKFLOW_NODE_PROPERTY}" \
         -f "${program_file}" "${workflow}"
     # awk の終了コードを控える（後始末で上書きされないように）
     local status=$?
@@ -3430,8 +3454,11 @@ ci_workflow_extract() {
                 next
             }
 
-            # `run: |` / `run: >` のブロック開始。以降の非構造行が本体
-            if (probe ~ /^[[:space:]]*-?[[:space:]]*run:[[:space:]]*[|>]/) {
+            # `run: |` / `run: >` のブロック開始。以降の非構造行が本体。
+            # **鍵と指示子のあいだのノードプロパティも読む**（issue #126）。構造行側だけを
+            # 直すと、本文は正しく読み飛ばされるのに**この判定が外れて下の 1 行書きの枝に落ち**、
+            # `&suites |` が値として読まれて `suites` という幻のコマンドが記録される（実測）
+            if (probe ~ ("^[[:space:]]*-?[[:space:]]*run:[[:space:]]*" prop_re "[|>]")) {
                 in_run = 1
                 # **明示字下げ指示子（`run: |2`）があれば、基準字下げはそちらが決める。**
                 # YAML では指示子の数値が「親ノードの字下げからの相対桁」を表すので、
@@ -3440,6 +3467,9 @@ ci_workflow_extract() {
                 # 本文中の字下げされた区切り語を終端と読む（＝本文が実行と読まれる。実測）
                 scalar_head = probe
                 sub(/^.*run:[[:space:]]*/, "", scalar_head)
+                # プロパティは指示子の手前の飾りなので落とす（残すと下の `^[|>]` に当たらず、
+                # 明示字下げ指示子（`run: &s |2`）が読めないまま基準字下げが未確定になる）
+                sub("^" prop_re, "", scalar_head)
                 # **指示子はヘッダの形に錨を打って読む。** `run:` の後ろから数字を拾い集めると、
                 # ヘッダの綴りが少しでも緩んだ瞬間に無関係な数字が指示子に化ける
                 # （`run: | # issue 108` → 基準字下げ 108 桁 → 字下げを丸ごと落として
@@ -3464,11 +3494,15 @@ ci_workflow_extract() {
                 # 呼び出しと結び付かず、握り潰された実行を「ゲートしている」と読む（レビューで実測）。
                 # 段落の区切り（空行）まで再現はしないので、そこでも繋いだ結果は
                 # 「握り潰されている」側＝より安全な方に倒れる
-                run_folded = (probe ~ /^[[:space:]]*-?[[:space:]]*run:[[:space:]]*>/)
+                run_folded = (probe ~ ("^[[:space:]]*-?[[:space:]]*run:[[:space:]]*" prop_re ">"))
                 next
             }
 
-            # 1 行で書かれた `run: <command>`
+            # 1 行で書かれた `run: <command>`。
+            # **上のブロック開始の枝が先に `next` するので、`run: &s |` はここへ来ない。**
+            # 判定の綴りをここでも足さないのは、2 か所で「プロパティを読む / 読まない」が
+            # 食い違うと同じ行が両方の枝に当たりうるため（順序に頼る代わりに、
+            # ブロック側の判定を唯一の入口にしてある）
             if (probe ~ /^[[:space:]]*-?[[:space:]]*run:[[:space:]]*[^|>[:space:]]/) {
                 text = probe
                 sub(/^[[:space:]]*-?[[:space:]]*run:[[:space:]]*/, "", text)

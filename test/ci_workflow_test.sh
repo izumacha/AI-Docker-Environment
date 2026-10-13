@@ -611,6 +611,81 @@ jobs:
         run: |-2
           bash ${SUITE_PATH}"
 
+# **鍵と指示子のあいだのノードプロパティ（アンカー `&name` / タグ `!tag` `!!str`）を挟んでも
+# ブロックスカラーとして読む**（issue #126）。読まないとその行が開始と認められず、本文の
+# シェルスクリプトが構造行として漏れて**実在するスイートが「未配線」になる**（fail-closed。
+# `run: |` に `&suites ` を足すだけで答えが変わる）。直す場所は 2 つあり、構造行側だけだと
+# 本文は読み飛ばされるのに抽出側の判定が外れ、`&suites |` が 1 行書きの値として読まれて
+# `suites` という幻のコマンドだけが記録される（実測）
+for node_prop_case in \
+    "アンカー:&suites |" \
+    "タグ:!!str |" \
+    "独自タグ:!custom |" \
+    "折りたたみ:&s >" \
+    "chomping つき:&s |-" \
+    "明示字下げ指示子つき:&s |2"
+do
+    assert_wired "ノードプロパティを挟んだブロックスカラー（${node_prop_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: ${node_prop_case#*:}
+            bash ${SUITE_PATH}"
+done
+
+# **折りたたみ（`>`）の判定にもプロパティを読ませる**（issue #126）。読まないと本文が
+# 1 行ずつ別のコマンドとして読まれ、**次の行に置いた `|| true` が呼び出しと結び付かず、
+# 握り潰された実行を「ゲートしている」と読む**（fail-open。ライブラリの `run_folded` の
+# コメントが同じ理由を記録している）。
+# **`bash` と パスを改行で割った形では固定できない**——畳まないと記録が 2 つに割れるが、
+# 片方がパスそのもの（`test/subject_test.sh`）になり、それは**直接実行の綴りとして
+# 正しく配線と数えられる**ので答えが変わらない（実測）
+assert_not_wired "ノードプロパティを挟んだ折りたたみブロックでは次行の || true が掛かる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: &s >
+          bash ${SUITE_PATH}
+          || true"
+
+# **明示字下げ指示子もプロパティの後ろから読む**（issue #126）。読まないと `|2` が指示子として
+# 認められず基準字下げが未確定になり、最初の非空行から測った分だけ落として**深い位置に置いた
+# 区切り語を終端と読む**（＝以降の本文が実行と読まれる）。上の「明示字下げ指示子つき」の対は
+# 本文が 1 行なのでこの区別を押さえられず、ここでしか固定されない
+assert_not_wired "プロパティ付きの明示字下げ指示子でも深い区切り語は終端ではない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: &s |2
+            cat <<MARK
+            one
+            MARK
+            bash ${SUITE_PATH}"
+
+# **締めすぎない側＝プロパティに見える綴りでブロックを始めないこと。**
+# `run: foo !bar |` は素のスカラー（`|` は指示子ではない）なので、本文の読み飛ばしを
+# 始めてはいけない。`run: &s|` はプロパティと値のあいだに空白が無く YAML として正しくないので、
+# 読まない側＝従来の姿へ倒す（fail-closed。伏せ処理が 1 文字ずつ歩くときの条件と同じ規則）
+for node_prop_dead_case in \
+    "素のスカラーの中の |:foo !bar |" \
+    "空白の無いプロパティ:&s|"
+do
+    assert_not_wired "プロパティに見えてもブロックを始めない（${node_prop_dead_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: ${node_prop_dead_case#*:}
+          bash ${SUITE_PATH}"
+done
+
 assert_not_wired "true || <suite>（そもそも走らない）" "name: ci
 jobs:
   type-check:
