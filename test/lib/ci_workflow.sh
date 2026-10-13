@@ -78,6 +78,23 @@ CI_WORKFLOW_COMMAND_PREFIXES='((sudo|env|nice|timeout|command|exec)[[:space:]]+|
 # 比較している検査（プログラムの大きさの回帰テスト）がその警告で落ちる。`mawk` は黙って
 # 受けるので**手元では通り CI だけが赤くなる**（実測。CI は gawk・この開発環境は mawk）
 CI_WORKFLOW_GROUP_OPENER='([(][[:space:]]*|[{][[:space:]]+)'
+# **先頭に置いたリダイレクト 1 つ分の綴り**（`> out` / `2>> log` / `&> log` / `>& 2` / `>| out`）。
+# 転送先までを 1 つとして数える。**`[<>]` 1 文字で書いてはいけない**（issue #177。実測）——
+# `>>` の 2 文字目が転送先として読まれるので `) >> log` が「コマンドを運ぶ記録」になり、
+# issue #152 の引き上げが飛ばされて**正しく配線されている綴りを未配線と報告する**
+# （`) > log` は wired なのに `) >> log` だけが not-wired になる非対称）。
+# **記号は 1 つずつ並べる**（`[<>][<>]?[<>]?` のような「`<` `>` の 1〜3 連」にしない）。
+# あの綴りは**どこで切るかが曖昧**で、実装によって答えが変わる——`<<< x set +e` を
+# mawk は `<<` ＋ 転送先 `<` と読んで前置きを落とし切れず、`set` を見失う（実測。
+# **手元が mawk・CI が gawk** というこのリポジトリの組み合わせでは、こういう曖昧さが
+# 「手元では通り CI だけが赤くなる」形で出る＝`CI_WORKFLOW_GROUP_OPENER` の注記と同じ理由）。
+# 並べたトークンなら切れ目が 1 通りに決まる。長いものを先に書くのは、最長一致でない
+# 実装（先頭から当てる実装）でも同じ答えになるようにするため。
+# **区間指定（`{1,3}`）は使わない**——このファイルは 1 つも使っておらず、`-v` で渡す値の
+# 逃がし列の扱いが awk 実装ごとに違う。
+# **残る境界**: `>| out` は `split_commands` が `|` をパイプの区切りとして切るのでここへ届かない
+# （issue #177 の境界。倒れる向きは「コマンドに数えない」側＝`main` と同じ扱い）
+CI_WORKFLOW_REDIRECT_LEAD='[0-9]*(<<<|&>>|<<|>>|&>|>&|<&|>[|]|[<>])[[:space:]]*[^[:space:]]+'
 CI_WORKFLOW_GROUP_OPENERS="${CI_WORKFLOW_GROUP_OPENER}*"
 
 # **コマンドの開始位置**を表す正規表現の断片（上の前置きを読み飛ばす）。
@@ -827,6 +844,7 @@ ci_workflow_run_with_structure() {
         -v prop_re="${CI_WORKFLOW_NODE_PROPERTY_BLOCK}" \
         -v prop_plain_re="${CI_WORKFLOW_NODE_PROPERTY}" \
         -v group_open_re="${CI_WORKFLOW_GROUP_OPENER}" \
+        -v redirect_lead_re="${CI_WORKFLOW_REDIRECT_LEAD}" \
         -f "${program_file}" "${workflow}"
     # awk の終了コードを控える（後始末で上書きされないように）
     local status=$?
@@ -1789,7 +1807,7 @@ ci_workflow_extract() {
                 # する（レビュー指摘、実測）。区別しないと `bash <スイート> && echo ok` の次の行に
                 # `> out` だけを置いた形で「連鎖がステップの最後」と読まれ、握り潰された実行が
                 # ゲートしていると報告される
-                if (closed) { sub(/^[0-9]*[<>]&?[[:space:]]*[^[:space:]]+[[:space:]]*/, "", s2) }
+                if (closed) { sub("^" redirect_lead_re "[[:space:]]*", "", s2) }
                 dropped = drop_close_word(s2)
                 if (dropped != s2) { closed = 1; s2 = dropped }
                 if (s2 == before) { break }
@@ -1920,7 +1938,7 @@ ci_workflow_extract() {
                 # `time` は計測するだけで、組み込み・関数は現在のシェルで走る
                 if (sub(/^time[[:space:]]+(-p[[:space:]]+)?/, "", probe)) { continue }
                 # 先頭に置いたリダイレクトも前置きであって別プロセスではない
-                if (sub(/^[0-9]*[<>]&?[[:space:]]*[^[:space:]]+[[:space:]]+/, "", probe)) { continue }
+                if (sub("^" redirect_lead_re "[[:space:]]+", "", probe)) { continue }
                 break
             }
             return probe
