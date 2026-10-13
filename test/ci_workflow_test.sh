@@ -3834,6 +3834,95 @@ jobs:
           ${subsh_setoff_case#*:}"
 done
 
+# **部分シェルの中の `set +e` は、同じ部分シェルの中の呼び出しへ効く**（issue #152。`main` 既存の
+# fail-open）。以前は `subshell == 0` で丸ごと捨てていたため、握り潰された呼び出しが
+# 「ゲートしている」と読まれていた（実 `bash -e` では失敗がジョブへ届かない）。
+# **部分シェルの終了状態は「最後に走ったコマンドの状態」**なので、握り潰しが効くのは
+# **後ろにコマンドが続くとき**だけ——続かなければ失敗はそのまま親へ伝わる。
+# したがって対は「後ろにコマンドがある／ない」で分かれる
+for subshell_weaken_case in \
+    "部分シェルの中のループ:( while true; do set +e; bash ${SUITE_PATH}; break; done )" \
+    "パイプの右のループ:echo x | while true; do set +e; bash ${SUITE_PATH}; break; done" \
+    "部分シェルの中で落として後ろに別のコマンド:(
+          set +e
+          bash ${SUITE_PATH}
+          echo done )" \
+    "部分シェルの中の if の中で落として後ろに別のコマンド:(
+          if true; then set +e; fi
+          bash ${SUITE_PATH}
+          echo done )"
+do
+    assert_not_wired "部分シェルの中の set +e は中の呼び出しへ効く（${subshell_weaken_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${subshell_weaken_case#*:}"
+done
+
+# **締めすぎない側。** 部分シェルの中の `set +e` を**親へ漏らす**と、正しくゲートしている
+# ステップを「握り潰されている」と誤報して必須ジョブが赤くなる（issue #152 が明示的に
+# 禁じている向き）。`( … )` を閉じたら入口の姿へ戻すこと・最後のコマンドは引き上げること・
+# 外側の `set +e` の下で内側の `set -e` を credit しないことの 3 つをここで固定する
+# （最後のものは、credit すると「部分シェルは自分の中で止まるだけで親は止まらない」のに
+#  ゲートしていると読む＝540 形の総当たりで 47 形が誤った。実測）
+for subshell_keep_case in \
+    "部分シェルを抜けた後ろ:( set +e; true )
+          bash ${SUITE_PATH}" \
+    "部分シェルのループの中で落として抜けた後ろ:( for f in a; do set +e; done )
+          bash ${SUITE_PATH}" \
+    "落として戻した部分シェルの中:( set +e; set -e; bash ${SUITE_PATH} )" \
+    "部分シェルの中の最後のコマンド:(
+          set +e
+          bash ${SUITE_PATH}
+          )" \
+    "ブレースを挟んだ部分シェルの中の最後のコマンド:( {
+          set +e
+          bash ${SUITE_PATH}
+          ; } )" \
+    "入れ子の部分シェルの中の最後のコマンド:( set +e; ( bash ${SUITE_PATH} ) )"
+do
+    assert_wired "部分シェルの中の set +e を漏らさない（${subshell_keep_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${subshell_keep_case#*:}"
+done
+
+# **`set` を開き括弧と同じ断片に書いた綴り（`( set +e`）は読まない**——
+# `strip_command_prefixes()` は `(` を落とさないので `set_probe` が空になる。
+# 向きは fail-open（握り潰しを見落とす）で `main` と同じなので本差分では変えていない。
+# この対は「読まないこと」を固定するためのもので、読むようにするなら
+# 「開く階層へ記録する／強める向きは credit しない」まで併せて設計が要る（別 issue）
+assert_wired "開き括弧と同じ断片の set +e は読まない（残る境界）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ( set +e
+          bash ${SUITE_PATH}
+          echo done )"
+
+assert_not_wired "外で落として部分シェルの中で戻しても credit しない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          set +e
+          (
+          set -e
+          bash ${SUITE_PATH}
+          echo done )"
+
 # **POSIX の綴り（`(a)`）には触らないこと。** 開閉が揃っているので釣り合いは崩れておらず、
 # `drop_arm_head_close()` が `(` を含む見出しまで落とすと**本物の階層が 1 つ余分に開いたまま残る**。
 # 下の形はそれが fail-open として現れる: 部分シェルが閉じたのに階層が残るので、
