@@ -3370,12 +3370,21 @@ ci_workflow_extract() {
                         # `set_forked` で除く（別プロセスなので親は終わらない）。
                         # **判定は `call_probe`（命令の位置を求めた写し）を使い回す**——継続語・
                         # アーム見出し・飾り（`{ ` / `!` / `time` / 代入）を落とす綴りの源を増やさない
-                        # **走らないブロックの中の脱出も数えない**が、ここに `dead_depth < 0` は
-                        # 置かない——`if false; then` のような偽と分かる開きは**階層として
-                        # `uncertain` も立てる**ので、下の `uncertain == 0` が先に除く
-                        # （実測で、この条件を足しても外しても 602 件すべて緑＝何も変えない門番だった。
-                        #  何も変えない仕掛けは保護に見えるので置かない）。`break` 側は自前で持つ。
-                        # 結び付きが崩れたら `偽と分かるブロックの中の exit` の対が落ちる
+                        # **走らないブロックの中の脱出も数えない。** ここには以前
+                        # 「`dead_depth < 0` は置かない——偽と分かる開きは `uncertain` も立てるので
+                        # `uncertain == 0` が先に除く。実測で足しても外しても 602 件すべて緑＝
+                        # 何も変えない門番だった」と書いてあったが、**その実測は不完全だった**
+                        # （issue #181）。死に体の印が付く経路は 2 つあり、**どちらも `uncertain` を
+                        # 立てない**:
+                        #   (a) **真と分かる条件の残りのアーム**（`if true; then …; else exit 1; fi` の
+                        #       `else` 側）。`true_at` の枝が `dead_depth` を付けるだけ。
+                        #   (b) **`break` / `continue` / `return` の後ろ**（下のアームが付ける）。
+                        # どちらも中の `exit` が `exit_seen` を立て、**以降ステップの全記録が
+                        # gate 0** になる（1 度も走らない `exit` のせいで、正しくゲートしている
+                        # スイートが「未配線」と逆の診断で赤くなる fail-closed。実測で
+                        # `if true; then echo a; else exit 1; fi` ＋ `bash <スイート>` も
+                        # `while true; do break; exit 1; done` ＋ `bash <スイート>` も
+                        # 実 `bash -e` で GATES なのに not-wired だった）
                         # **1 行に畳んだ `case` のアームの中も数えない**（`opens_case_here`）
                         # ——`case $X in a) exit 1 ;; esac` では `case` の階層が**この断片の
                         # 末尾**で開くので、判定の時点では `uncertain` がまだ 0 で上の門番を
@@ -3383,7 +3392,11 @@ ci_workflow_extract() {
                         # ので、ここで数えると**実際にはゲートしているスイートを「未配線」と
                         # 報告**する（レビューで実測。複数行に分けた同じ綴りは `case` の階層が
                         # 先に開くので `uncertain` が立ち、以前から正しく除かれていた）
-                        if (!set_forked && !unreachable && !opens_case_here \
+                        # **死に体の区間の中の脱出はどちらのアームも数えない**ので、条件は
+                        # ここに 1 つだけ置く（2 つのアームに書き写すと、脱出の綴りが増えたとき
+                        # 片方だけが古くなる——まさに issue #181 で `exit` と `break` の答えが
+                        # 食い違っていた形）
+                        if (!set_forked && !unreachable && !opens_case_here && dead_depth < 0 \
                             && prev_op != "&&" && prev_op != "||" \
                             && call_probe ~ /^(exit|break|continue|return)([[:space:]]+[^[:space:]]+)?[[:space:]]*$/) {
                             # `exit` はシェルごと終わるので、以降のすべての断片が到達不能。
@@ -3403,7 +3416,7 @@ ci_workflow_extract() {
                             # **その階層が閉じるまで**が到達不能（偽と分かる条件と同じ区間の形）。
                             # **`break 2` 以上は 1 階層ぶんしか見ない**——足りない側は `main` と
                             # 同じ（新しい穴は作らない）ので、残る境界として記録する
-                            else if (depth > 0 && dead_depth < 0) { dead_depth = depth - 1 }
+                            else if (depth > 0) { dead_depth = depth - 1 }
                         }
                         # **grouping を閉じた断片に付いた区切りは、その中身すべてに掛かる。**
                         # `( bash x ) || true` は中の `bash x` も「失敗が伝わらない」——
