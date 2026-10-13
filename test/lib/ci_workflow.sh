@@ -3370,12 +3370,19 @@ ci_workflow_extract() {
                         # `set_forked` で除く（別プロセスなので親は終わらない）。
                         # **判定は `call_probe`（命令の位置を求めた写し）を使い回す**——継続語・
                         # アーム見出し・飾り（`{ ` / `!` / `time` / 代入）を落とす綴りの源を増やさない
-                        # **走らないブロックの中の脱出も数えない**が、ここに `dead_depth < 0` は
-                        # 置かない——`if false; then` のような偽と分かる開きは**階層として
-                        # `uncertain` も立てる**ので、下の `uncertain == 0` が先に除く
-                        # （実測で、この条件を足しても外しても 602 件すべて緑＝何も変えない門番だった。
-                        #  何も変えない仕掛けは保護に見えるので置かない）。`break` 側は自前で持つ。
-                        # 結び付きが崩れたら `偽と分かるブロックの中の exit` の対が落ちる
+                        # **走らないブロックの中の脱出も数えない。** ここには以前
+                        # 「`dead_depth < 0` は置かない——偽と分かる開きは `uncertain` も立てるので
+                        # `uncertain == 0` が先に除く。実測で足しても外しても 602 件すべて緑＝
+                        # 何も変えない門番だった」と書いてあったが、**その実測は不完全だった**
+                        # （issue #181）。死に体の印は `uncertain` を立てない経路からも付く——
+                        # **真と分かる条件の残りのアーム**（`if true; then …; else exit 1; fi` の
+                        # `else` 側）は `true_at` の枝が `dead_depth` を付けるだけで `uncertain` は
+                        # 0 のままなので、その中の `exit` が `exit_seen` を立て、**以降ステップの
+                        # 全記録が gate 0** になる（1 度も走らない `exit` のせいで、正しく
+                        # ゲートしているスイートが「未配線」と逆の診断で赤くなる fail-closed。
+                        # 実測で `if true; then echo a; else exit 1; fi` ＋ `bash <スイート>` は
+                        # 実 `bash -e` で GATES なのに not-wired）。`break` 側が自前で
+                        # `dead_depth < 0` を持っているのと同じ条件を `exit` 側にも置く
                         # **1 行に畳んだ `case` のアームの中も数えない**（`opens_case_here`）
                         # ——`case $X in a) exit 1 ;; esac` では `case` の階層が**この断片の
                         # 末尾**で開くので、判定の時点では `uncertain` がまだ 0 で上の門番を
@@ -3397,7 +3404,7 @@ ci_workflow_extract() {
                                 # スイートを「未配線」と報告**する（実測で 2 形が化けた）。
                                 # `if true; then` / `while true; do` は `uncertain` を立てない側なので
                                 # ここを通る——狙っている穴はその 2 形
-                                if (uncertain == 0 && chain_depth == 0 && subshell == 0 && !in_fndef_here) { exit_seen = 1 }
+                                if (uncertain == 0 && dead_depth < 0 && chain_depth == 0 && subshell == 0 && !in_fndef_here) { exit_seen = 1 }
                             }
                             # `break` / `continue` / `return` はいちばん内側の階層を抜けるので、
                             # **その階層が閉じるまで**が到達不能（偽と分かる条件と同じ区間の形）。

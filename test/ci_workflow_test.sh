@@ -2671,6 +2671,9 @@ for reachable_after_exit_case in \
           esac" \
     "1 行に畳んだ case のアームの中:case \"${DOLLAR}M\" in a) exit 0 ;; esac" \
     "偽と分かるブロックの中:if false; then exit 1; fi" \
+    "真と分かる条件の else の中:if true; then echo a; else exit 1; fi" \
+    "真と分かる条件の elif の中:if true; then echo a; elif false; then exit 1; fi" \
+    "コロンで真と分かる条件の else の中:if :; then echo a; else exit 1; fi" \
     "部分シェルの中:( exit 0 )" \
     "パイプの構成要素:exit 0 | cat" \
     "呼ばれない関数の本文:f() { exit 0; }" \
@@ -2690,6 +2693,20 @@ jobs:
           ${reachable_after_exit_case#*:}
           bash ${SUITE_PATH}"
 done
+
+# **向きの対**: 真と分かる条件の **then** 側は必ず走るので、そこの `exit` は数える
+# （issue #181 の手当てを「`dead_depth` が付いていれば一律で数えない」へ広げすぎると、
+#  この形まで配線扱いになり、実 `bash -e` では 1 件も走らないスイートが「ゲートしている」
+#  と読まれる＝fail-open。実測で NOGATE）
+assert_not_wired "真と分かる条件の then の中の exit は後ろを死に体にする" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          if true; then exit 1; fi
+          bash ${SUITE_PATH}"
 
 # --- 先頭の飾り（同じシェルのまま `set` を呼ぶ書き方）------------------------------
 #
