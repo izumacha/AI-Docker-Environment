@@ -7013,5 +7013,39 @@ jobs:
 }
 awk_arg_limit_case
 
+# **awk へ `-v` で渡す綴りにバックスラッシュを含めない。**
+# `-v` の値は**逃がし列として解釈される**ので、`\{` のような綴りは実装ごとに扱いが違う——
+# `gawk` は「escape sequence `\{' treated as plain `{'」を**呼び出しごとに stderr へ出し**、
+# awk の出力を比較している上の検査がその警告で落ちる。`mawk` は黙って受けるので
+# **手元では通り CI だけが赤くなる**（実測。CI は gawk・この開発環境は mawk で、
+# issue #150 の対応中に実際に踏んだ）。括り（`[{]`）で書けばどちらでも同じに読める。
+# **対象はライブラリのソースから導く**（一覧を書くと、次に足した `-v` が黙って外れる）
+awk_v_backslash_case() {
+    # `-v <小文字の名前>="${CI_WORKFLOW_…}"` の形から、渡している定数の名前を集める
+    local -a passed_vars=()
+    mapfile -t passed_vars < <(grep -oE -- '-v [a-z_]+="\$\{CI_WORKFLOW_[A-Z_]+\}"' \
+        "${SCRIPT_DIR}/lib/ci_workflow.sh" | grep -oE 'CI_WORKFLOW_[A-Z_]+' | sort -u)
+    # 1 つも拾えなければ検出網が死んでいる（渡し方の綴りが変わった）ので落とす（fail-closed）
+    if [ "${#passed_vars[@]}" -eq 0 ]; then
+        report_fail "awk へ渡す綴りにバックスラッシュを含めない" \
+            "-v で渡している定数を 1 つも拾えませんでした（渡し方の綴りが変わった可能性）"
+        return
+    fi
+    # 拾った定数の値を 1 つずつ見て、バックスラッシュを含むものを名指しする
+    local var offenders=""
+    for var in "${passed_vars[@]}"; do
+        case "${!var-}" in
+            *\\*) offenders="${offenders}${offenders:+, }${var}" ;;
+        esac
+    done
+    if [ -z "${offenders}" ]; then
+        report 0 "awk へ渡す綴りにバックスラッシュを含めない（${#passed_vars[@]} 件）"
+    else
+        report_fail "awk へ渡す綴りにバックスラッシュを含めない" \
+            "逃がし列として解釈される値があります（${offenders}）。括り（例: [{]）で書き直してください"
+    fi
+}
+awk_v_backslash_case
+
 # 集計を出して、失敗が 1 件でもあれば非ゼロで終わる
 harness_summary

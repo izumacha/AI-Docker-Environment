@@ -71,8 +71,13 @@ CI_WORKFLOW_COMMAND_PREFIXES='((sudo|env|nice|timeout|command|exec)[[:space:]]+|
 # **`{` は空白を必須にする**——`{bash x;}` は bash として成り立たない綴りなので、
 # 許すと `${VAR}` のような無関係な綴りまで命令の位置と読む方向へ広がるだけ
 # **開き 1 つ分の綴り。** 下の「何個でも」はこれを繰り返したもので、
-# `chain_literal_status()` は 1 つずつ落とすのでこちらを読む（綴りを 2 か所に分けない）
-CI_WORKFLOW_GROUP_OPENER='([(][[:space:]]*|\{[[:space:]]+)'
+# `chain_literal_status()` は 1 つずつ落とすのでこちらを読む（綴りを 2 か所に分けない）。
+# **波括弧は `[{]`（括り）で書き、`\{`（逃がし）にしない。** この綴りは awk へ `-v` で渡すが、
+# `-v` の値は**逃がし列として解釈される**ので、`\{` は実装ごとに扱いが違う——`gawk` は
+# 「escape sequence `\{' treated as plain `{'」を**毎回 stderr へ出し**、awk の出力を
+# 比較している検査（プログラムの大きさの回帰テスト）がその警告で落ちる。`mawk` は黙って
+# 受けるので**手元では通り CI だけが赤くなる**（実測。CI は gawk・この開発環境は mawk）
+CI_WORKFLOW_GROUP_OPENER='([(][[:space:]]*|[{][[:space:]]+)'
 CI_WORKFLOW_GROUP_OPENERS="${CI_WORKFLOW_GROUP_OPENER}*"
 
 # **コマンドの開始位置**を表す正規表現の断片（上の前置きを読み飛ばす）。
