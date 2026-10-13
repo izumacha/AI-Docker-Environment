@@ -2663,24 +2663,6 @@ ci_workflow_extract() {
                         fndef_name_here = (fn_form == 2) ? function_name(struct_text) \
                                           : (was_pending_fndef ? pending_fndef_name \
                                              : enclosing_fndef_name(depth, fndef_at, fndef_name))
-                        # **同じ名前で定義し直したら、前の本文で控えた弱めは残らない。**
-                        # `f() { set +e; }` のあとに `f() { :; }` と書けば、呼んでも弱めない。
-                        # 消さないと古い記録が勝ち、正しくゲートしているステップを「未配線」と
-                        # 誤報して required なジョブを赤くする（レビューで実測。`main` は正しい）。
-                        # **本体を開く断片で消す**のが要点で、深さが増えるより前・かつ
-                        # この断片の `set` を記録するより前なので、1 行書きの
-                        # `f() { set +e; }` でも「消してから記録する」順序になる
-                        if ((fn_form == 2 || was_pending_fndef) && fndef_name_here != "") {
-                            fnweak_e[fndef_name_here] = 0
-                            fnweak_pipe[fndef_name_here] = 0
-                            # 無条件の `exit` の台帳も同じところで消す（issue #189）。
-                            # 残すと `f() { exit 0; }` のあとに `f() { :; }` と書き直しても
-                            # 古い記録が勝ち、**正しくゲートしているスイートを「未配線」と
-                            # 誤報**して required なジョブを赤くする（向きが逆の fail-closed）
-                            fnexit[fndef_name_here] = 0
-                            # 手前の `return` の控えも同じところで消す（同じ理由）
-                            fnret[fndef_name_here] = 0
-                        }
                         # 本文の先頭に立ちうる語を**繰り返し**剥がす（`then { set +e; }` のように
                         # 入れ子になるため 1 つでは足りない）。**ここで剥がす一覧には `if` /
                         # `elif` / `while` / `until` も入る**（条件の位置も現在のシェルで走るので
@@ -2744,6 +2726,14 @@ ci_workflow_extract() {
                             cmd_fndef = SET_OPEN_FNDEF
                             cmd_fnname = SET_OPEN_FNNAME
                             cmd_fnat = SET_OPEN_FNAT
+                            # **命令の位置の綴りも部分シェルを越えたかに関わらず控える**
+                            # （issue #189 のレビュー）。`SET_OPEN_SUB > 0` の中に置くと、
+                            # ブレースだけで越えた定義（`{ f() { exit 0`）で綴りが空のまま
+                            # 残り、名前は控えたのに本文の `exit` を誰も見ない——同じ意味の
+                            # `( f() { exit 0` だけが正しく答える非対称になっていた（実測で
+                            # 真値 NOGATE なのに wired。`main` も同じなので新しい穴では
+                            # ないが、片方だけ閉じた形は次の人を誤らせる）
+                            cmd_rest = SET_OPEN_REST
                             # **越えた部分シェルがあるときだけ覗く。** 越えていないなら
                             # `set_command(struct_text)` が既に同じ綴りを見ているので二度は見ない
                             if (SET_OPEN_SUB > 0) {
@@ -2753,10 +2743,7 @@ ci_workflow_extract() {
                                 # ——アーム走査——で見つかる `set` もその部分シェルの中で走るので
                                 # 同じ番号で正しい）
                                 if (set_probe != "") { set_crossed_sub = SET_OPEN_SUB }
-                                # 命令の位置の綴りと越えた深さは `set` が見つかったかに関わらず控える
-                                # （脱出の判定は `set` とは別の綴りを探すので、ここで切ると
-                                #   `( exit 0` が歩きの結果を 1 つも受け取れない）
-                                cmd_rest = SET_OPEN_REST
+                                # 越えた深さは `set` が見つかったかに関わらず控える
                                 cmd_sub = SET_OPEN_SUB
                             }
                         }
@@ -2768,6 +2755,36 @@ ci_workflow_extract() {
                         #  このファイルはコメントから推論して欠陥を見つける運用なので、
                         #  存在しない制御経路の説明は保守上の罠になる）。
                         # 強める向きを `set_probe == text` に限る理由はその定義の近くに書いてある
+                        # **同じ名前で定義し直したら、前の本文で控えた弱めは残らない。**
+                        # `f() { set +e; }` のあとに `f() { :; }` と書けば、呼んでも弱めない。
+                        # 消さないと古い記録が勝ち、正しくゲートしているステップを「未配線」と
+                        # 誤報して required なジョブを赤くする（レビューで実測。`main` は正しい）。
+                        # **本体を開く断片で消す**のが要点で、深さが増えるより前・かつ
+                        # この断片の `set` を記録するより前なので、1 行書きの
+                        # `f() { set +e; }` でも「消してから記録する」順序になる。
+                        # **歩きが越えた定義でも消す**（issue #189 のレビュー）。`fn_form` は
+                        # `^` 錨なので `{ f() { :; }` ・ `( f() { return 0; }` のように見出しの
+                        # 手前に括りがある綴りでは消しが走らず、古い「無条件に脱出する」記録が
+                        # 生き残って呼び出しの後ろを死に体にしていた（実測で真値 GATES が
+                        # wired → not-wired。`main` は正しく答えていた）。そのために**歩きの
+                        # 後ろへ移してある**——`cmd_fnname` は歩きが決めるので、元の位置
+                        # （`fndef_name_here` を決めた直後）では読めない。弱めの台帳
+                        # （`fnweak_*`）も同じところで消すが、あちらは**記録する側が越えた定義を
+                        # 見送る**ので、消しが広がっても「古い記録が残る」側だけが直り、
+                        # 緩む向きには動かない
+                        fn_name_here = (fn_form == 2 || was_pending_fndef) ? fndef_name_here \
+                                       : ((cmd_fndef == 1) ? cmd_fnname : "")
+                        if (fn_name_here != "") {
+                            fnweak_e[fn_name_here] = 0
+                            fnweak_pipe[fn_name_here] = 0
+                            # 無条件の `exit` の台帳も同じところで消す（issue #189）。
+                            # 残すと `f() { exit 0; }` のあとに `f() { :; }` と書き直しても
+                            # 古い記録が勝ち、**正しくゲートしているスイートを「未配線」と
+                            # 誤報**して required なジョブを赤くする（向きが逆の fail-closed）
+                            fnexit[fn_name_here] = 0
+                            # 手前の `return` の控えも同じところで消す（同じ理由）
+                            fnret[fn_name_here] = 0
+                        }
                         set_placed = (set_probe != "")
                         # **パイプの構成要素とバックグラウンドは子シェルで走る。** `true | set -e` も
                         # `set -e &` も親のオプションは変えないので、どちらの向きも反映しない
@@ -3128,7 +3145,14 @@ ci_workflow_extract() {
                         # **越えた深さは控えておく**（`call_sub`）。弱めの反映は部分シェルの中では
                         # 見送るので、`subshell` だけでなくこの値も門番に使う必要がある
                         call_sub = 0
-                        if (cmd_sub > 0 && call_probe !~ /^[A-Za-z_][A-Za-z0-9_]*/) {
+                        # **定義を越えたときは識別子で始まっていても取り直す。** 定義の見出し
+                        # （`f() { exit 0`）は識別子で始まるので、下の「識別子で始まらないとき」
+                        # の条件には当たらず、本文の `exit` が命令の位置として見えなかった
+                        if (cmd_fndef > 0 && cmd_rest != "") {
+                            call_probe = strip_command_prefixes(cmd_rest, 0)
+                            call_sub = cmd_sub
+                        }
+                        else if (cmd_sub > 0 && call_probe !~ /^[A-Za-z_][A-Za-z0-9_]*/) {
                             call_probe = strip_command_prefixes(cmd_rest, 0)
                             call_sub = cmd_sub
                         }
@@ -3144,7 +3168,17 @@ ci_workflow_extract() {
                         # のは誤り**——`apply_errexit()` は開く前の深さで記録するので
                         # `( quiet )` 改行 `bash <スイート>` の errexit が最上位で落ちたままになり、
                         # 真値 GATES を not-wired にする（その対はピンにしてある）
-                        if (dead_depth < 0 && !set_forked && !unreachable \
+                        # **この断片で死に体の区間が終わるなら、終わった側で読む**（issue #189 の
+                        # レビュー）。印の解除は閉じるループの後ろにあるのに、呼び出しの追跡は
+                        # ここ（閉じる前）なので、**区間が終わるその断片の呼び出しだけが
+                        # 追跡から落ちて**いた——`f() { exit 0; }` ＋ `( exit 0` 改行 `echo a )`
+                        # 改行 `f` 改行 `bash <スイート>` は実 bash でスイートが 1 行も走らないのに
+                        # wired（`main` も同じなので新しい穴ではないが、**3 行足すだけで必須
+                        # スイートを静かに外せる** fail-open）。素の `exit` の側は解除より後ろに
+                        # あるので同じずれが無く、2 つの経路で答えが割れていた。
+                        # ここの `depth` は閉じる前の値（＝下で `depth_in` に控えるのと同じもの）
+                        # なので、解除と同じ条件をコマンド持ちの断片について評価できる
+                        if ((dead_depth < 0 || depth <= dead_depth) && !set_forked && !unreachable \
                             && match(call_probe, /^[A-Za-z_][A-Za-z0-9_]*/)) {
                             # 先頭の識別子を呼び出し先の名前の候補として取り出す
                             fncall = substr(call_probe, 1, RLENGTH)
@@ -3773,9 +3807,17 @@ ci_workflow_extract() {
                         # 脱出を 1 つも覚えないので、ガード節（CI スクリプトの定型句）がそのまま
                         # 穴になる。`&&` で入った断片は下の脱出のアームが除くため、ここは
                         # アームより手前に置いて区切りを問わず控える
-                        if (in_fndef_here && !unreachable && dead_depth < 0 \
-                            && fndef_name_here != "" && esc_probe ~ /^return([[:space:]]|$)/) {
-                            fnret[fndef_name_here] = 1
+                        # **越えた定義の名前でも控える**（issue #189 のレビュー）。下の `exit` の
+                        # 台帳は `cmd_fndef == 1` の経路でも記録するのに、ここが `in_fndef_here`
+                        # だけを見ていたため、見出しと `return` が同じ断片に載る綴り
+                        # （`( f() { return 0; exit 1; }` ・ `{ f() { … }`）で控えが 1 件も
+                        # 入らず、続く `exit` だけが記録されて「無条件に脱出する関数」に
+                        # なっていた（実測で真値 GATES が wired → not-wired ＝正しくゲートして
+                        # いるワークフローを赤くする向き。`main` は正しく答えていた）
+                        if ((in_fndef_here || cmd_fndef == 1) && !unreachable && dead_depth < 0 \
+                            && esc_probe ~ /^return([[:space:]]|$)/) {
+                            fn_name_here = in_fndef_here ? fndef_name_here : cmd_fnname
+                            if (fn_name_here != "") { fnret[fn_name_here] = 1 }
                         }
                         if (!set_forked && !unreachable && !opens_case_here && dead_depth < 0 \
                             && prev_op != "&&" && prev_op != "||" \

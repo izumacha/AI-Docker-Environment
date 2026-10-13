@@ -2730,6 +2730,15 @@ for exit_inside_case in \
     "部分シェルの後ろに別のコマンド:( exit 0; bash ${SUITE_PATH} )
           echo done" \
     "飾りを前置きした部分シェル:time ( exit 0; bash ${SUITE_PATH} )" \
+    "死に体の区間が終わる断片の呼び出し:f() { exit 0; }
+          ( exit 0
+          echo a )
+          f
+          bash ${SUITE_PATH}" \
+    "ブレースだけで越えた定義の呼び出し:{ f() { exit 0; }
+          f
+          }
+          bash ${SUITE_PATH}" \
     "ブレースの中の部分シェル:{ ( exit 0; bash ${SUITE_PATH} ); }" \
     "無条件に exit する関数の呼び出し:f() { exit 0; }
           f
@@ -2863,6 +2872,22 @@ for exit_not_unconditional_case in \
           bash ${SUITE_PATH}" \
     "1 行に畳んだ入れ子の定義:outer() { inner() { exit 0; }; }
           outer
+          bash ${SUITE_PATH}" \
+    "部分シェルで越えた定義の手前の return:( f() { return 0; exit 1; }
+          f )
+          bash ${SUITE_PATH}" \
+    "ブレースで越えた定義の手前の return:{ f() { return 0; exit 1; }
+          f
+          }
+          bash ${SUITE_PATH}" \
+    "ブレースで越えた定義による再定義:f() { exit 0; }
+          { f() { :; }
+          f
+          }
+          bash ${SUITE_PATH}" \
+    "部分シェルで越えた定義による再定義:f() { exit 0; }
+          ( f() { return 0; }
+          f )
           bash ${SUITE_PATH}"
 do
     assert_wired "無条件でない脱出（${exit_not_unconditional_case%%:*}）は台帳へ入れない" "name: ci
