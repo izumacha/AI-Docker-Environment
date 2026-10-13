@@ -7021,10 +7021,13 @@ awk_arg_limit_case
 # issue #150 の対応中に実際に踏んだ）。括り（`[{]`）で書けばどちらでも同じに読める。
 # **対象はライブラリのソースから導く**（一覧を書くと、次に足した `-v` が黙って外れる）
 awk_v_backslash_case() {
-    # `-v <小文字の名前>="${CI_WORKFLOW_…}"` の形から、渡している定数の名前を集める
+    # `-v <小文字の名前>="${CI_WORKFLOW_…}"` の形から、渡している定数の名前を集める。
+    # **ライブラリだけでなくスイート側も見る**——`action_pin_test.sh` のように
+    # テストから直接 awk へ渡す箇所もあり、そこだけに渡される定数は片方だけの走査から外れる
     local -a passed_vars=()
-    mapfile -t passed_vars < <(grep -oE -- '-v [a-z_]+="\$\{CI_WORKFLOW_[A-Z_]+\}"' \
-        "${SCRIPT_DIR}/lib/ci_workflow.sh" | grep -oE 'CI_WORKFLOW_[A-Z_]+' | sort -u)
+    mapfile -t passed_vars < <(grep -ohE -- '-v [a-z_]+="\$\{CI_WORKFLOW_[A-Z_]+\}"' \
+        "${SCRIPT_DIR}/lib/ci_workflow.sh" "${SCRIPT_DIR}"/*_test.sh \
+        | grep -oE 'CI_WORKFLOW_[A-Z_]+' | sort -u)
     # 1 つも拾えなければ検出網が死んでいる（渡し方の綴りが変わった）ので落とす（fail-closed）
     if [ "${#passed_vars[@]}" -eq 0 ]; then
         report_fail "awk へ渡す綴りにバックスラッシュを含めない" \
