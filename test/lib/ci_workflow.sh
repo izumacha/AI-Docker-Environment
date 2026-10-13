@@ -3374,15 +3374,17 @@ ci_workflow_extract() {
                         # 「`dead_depth < 0` は置かない——偽と分かる開きは `uncertain` も立てるので
                         # `uncertain == 0` が先に除く。実測で足しても外しても 602 件すべて緑＝
                         # 何も変えない門番だった」と書いてあったが、**その実測は不完全だった**
-                        # （issue #181）。死に体の印は `uncertain` を立てない経路からも付く——
-                        # **真と分かる条件の残りのアーム**（`if true; then …; else exit 1; fi` の
-                        # `else` 側）は `true_at` の枝が `dead_depth` を付けるだけで `uncertain` は
-                        # 0 のままなので、その中の `exit` が `exit_seen` を立て、**以降ステップの
-                        # 全記録が gate 0** になる（1 度も走らない `exit` のせいで、正しく
-                        # ゲートしているスイートが「未配線」と逆の診断で赤くなる fail-closed。
-                        # 実測で `if true; then echo a; else exit 1; fi` ＋ `bash <スイート>` は
-                        # 実 `bash -e` で GATES なのに not-wired）。`break` 側が自前で
-                        # `dead_depth < 0` を持っているのと同じ条件を `exit` 側にも置く
+                        # （issue #181）。死に体の印が付く経路は 2 つあり、**どちらも `uncertain` を
+                        # 立てない**:
+                        #   (a) **真と分かる条件の残りのアーム**（`if true; then …; else exit 1; fi` の
+                        #       `else` 側）。`true_at` の枝が `dead_depth` を付けるだけ。
+                        #   (b) **`break` / `continue` / `return` の後ろ**（下のアームが付ける）。
+                        # どちらも中の `exit` が `exit_seen` を立て、**以降ステップの全記録が
+                        # gate 0** になる（1 度も走らない `exit` のせいで、正しくゲートしている
+                        # スイートが「未配線」と逆の診断で赤くなる fail-closed。実測で
+                        # `if true; then echo a; else exit 1; fi` ＋ `bash <スイート>` も
+                        # `while true; do break; exit 1; done` ＋ `bash <スイート>` も
+                        # 実 `bash -e` で GATES なのに not-wired だった）
                         # **1 行に畳んだ `case` のアームの中も数えない**（`opens_case_here`）
                         # ——`case $X in a) exit 1 ;; esac` では `case` の階層が**この断片の
                         # 末尾**で開くので、判定の時点では `uncertain` がまだ 0 で上の門番を
@@ -3390,7 +3392,11 @@ ci_workflow_extract() {
                         # ので、ここで数えると**実際にはゲートしているスイートを「未配線」と
                         # 報告**する（レビューで実測。複数行に分けた同じ綴りは `case` の階層が
                         # 先に開くので `uncertain` が立ち、以前から正しく除かれていた）
-                        if (!set_forked && !unreachable && !opens_case_here \
+                        # **死に体の区間の中の脱出はどちらのアームも数えない**ので、条件は
+                        # ここに 1 つだけ置く（2 つのアームに書き写すと、脱出の綴りが増えたとき
+                        # 片方だけが古くなる——まさに issue #181 で `exit` と `break` の答えが
+                        # 食い違っていた形）
+                        if (!set_forked && !unreachable && !opens_case_here && dead_depth < 0 \
                             && prev_op != "&&" && prev_op != "||" \
                             && call_probe ~ /^(exit|break|continue|return)([[:space:]]+[^[:space:]]+)?[[:space:]]*$/) {
                             # `exit` はシェルごと終わるので、以降のすべての断片が到達不能。
@@ -3404,13 +3410,13 @@ ci_workflow_extract() {
                                 # スイートを「未配線」と報告**する（実測で 2 形が化けた）。
                                 # `if true; then` / `while true; do` は `uncertain` を立てない側なので
                                 # ここを通る——狙っている穴はその 2 形
-                                if (uncertain == 0 && dead_depth < 0 && chain_depth == 0 && subshell == 0 && !in_fndef_here) { exit_seen = 1 }
+                                if (uncertain == 0 && chain_depth == 0 && subshell == 0 && !in_fndef_here) { exit_seen = 1 }
                             }
                             # `break` / `continue` / `return` はいちばん内側の階層を抜けるので、
                             # **その階層が閉じるまで**が到達不能（偽と分かる条件と同じ区間の形）。
                             # **`break 2` 以上は 1 階層ぶんしか見ない**——足りない側は `main` と
                             # 同じ（新しい穴は作らない）ので、残る境界として記録する
-                            else if (depth > 0 && dead_depth < 0) { dead_depth = depth - 1 }
+                            else if (depth > 0) { dead_depth = depth - 1 }
                         }
                         # **grouping を閉じた断片に付いた区切りは、その中身すべてに掛かる。**
                         # `( bash x ) || true` は中の `bash x` も「失敗が伝わらない」——

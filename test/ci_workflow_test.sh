@@ -2681,6 +2681,7 @@ for reachable_after_exit_case in \
     "連鎖で入ったブレースの中の exit:[ \"${DOLLAR}c\" -eq 2 ] || { echo \"FAIL\"; exit 1; }" \
     "連鎖で入った部分シェルの中の exit:[ \"${DOLLAR}c\" -eq 2 ] || ( echo \"FAIL\"; exit 1 )" \
     "ループを抜けた後ろ:while true; do break; done" \
+    "break の後ろ:while true; do break; exit 1; done" \
     "continue したループの後ろ:for i in 1; do continue; done"
 do
     assert_wired "脱出を数えない位置（${reachable_after_exit_case%%:*}）の後ろは配線のまま" "name: ci
@@ -2695,9 +2696,17 @@ jobs:
 done
 
 # **向きの対**: 真と分かる条件の **then** 側は必ず走るので、そこの `exit` は数える
-# （issue #181 の手当てを「`dead_depth` が付いていれば一律で数えない」へ広げすぎると、
-#  この形まで配線扱いになり、実 `bash -e` では 1 件も走らないスイートが「ゲートしている」
-#  と読まれる＝fail-open。実測で NOGATE）
+# （実 `bash -e` で NOGATE＝スイートは 1 件も走らない）。
+# **この対が何を捕まえるかは実測で決めた。** 当初ここには「issue #181 の手当てを
+# 『`dead_depth` が付いていれば一律で数えない』へ広げすぎると、この形まで配線扱いになる」と
+# 書いていたが**事実と違った**——その変異（門番を `dead_depth < 0` だけにする）では
+# この断片の時点で `dead_depth` が -1 なので**この対は緑のまま**通り、落ちるのは
+# 既存の 4 形（条件が読めない `if` / `case` のアーム / 呼ばれない関数の本文 /
+# 連鎖で入ったブレース）だった。この対が**単独で**捕まえるのは
+# 「階層が閉じたときに `exit_seen` を戻す」変異（`true_at[depth] = 0` の隣へ
+# `exit_seen = 0` を足す形）で、実測でこの 1 件だけが落ちる。
+# **理由を書くときは、その変異を実際に当てて確かめること**（issue #181 はまさに
+# 「実測が不完全なまま書かれたコメント」を直す差分だった）
 assert_not_wired "真と分かる条件の then の中の exit は後ろを死に体にする" "name: ci
 jobs:
   type-check:
