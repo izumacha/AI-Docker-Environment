@@ -4996,6 +4996,55 @@ jobs:
           f
           bash ${SUITE_PATH}"
 
+# **部分シェルを越えて見つけた握り潰しは「関数が弱める」として控えない**（issue #187）。
+# `f() { ( set +e; : ); }` の `set +e` は部分シェルと一緒に消えるので、呼び出し元の
+# errexit は立ったまま——控えると「この関数は弱める」と記録され、呼び出しより後ろの
+# スイートが**まるごと未配線**と報告される（真値 GATES なのに not-wired。正しくゲート
+# する綴りを赤くする）。実 `bash -e` は下の 7 形すべて GATES
+for fn_sub_set_case in \
+    "一行:f() { ( set +e; : ); }" \
+    "見出しが別行:f()
+          { ( set +e; : ); }" \
+    "function の綴り:function f { ( set +e; : ); }" \
+    "time の前置き:f() { time ( set +e; : ); }" \
+    "二重の部分シェル:f() { ( ( set +e; : ) ); }" \
+    "ブレース挟み:f() { { ( set +e; : ); }; }" \
+    "入れ子の定義:g() { f() { ( set +e; : ); }; }
+          g" \
+    "本文が複数行:f() {
+          ( set +e
+          :
+          )
+          }" \
+    "長い綴り:f() { ( set +o errexit; : ); }" \
+    "長い綴りの pipefail:f() { ( set +o pipefail; : ); }"
+do
+    assert_wired "部分シェルの中の set +e は関数の台帳へ載せない（${fn_sub_set_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${fn_sub_set_case#*:}
+          f
+          bash ${SUITE_PATH}
+          echo tail"
+done
+
+# 向きの対: 本文の素の `set +e` は（部分シェルの中ではないので）従来どおり台帳へ載る
+assert_not_wired "本文の素の set +e は呼べば効く（部分シェルを越えた分と区別する）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          f
+          bash ${SUITE_PATH}
+          echo tail"
+
 # 台帳の名前は「`set` を探す側がどの名前に帰属させるか」に合わせる。断片の先頭が
 # 定義でないとき（`{ f() { …`）まで外側の名前へ寄せると名無しになり、
 # 記録そのものが落ちて握り潰しが見えなくなる

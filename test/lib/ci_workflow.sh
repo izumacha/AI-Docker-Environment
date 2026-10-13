@@ -1499,6 +1499,17 @@ ci_workflow_extract() {
                 # （`open_stripped ~ /^[({]/` の門番）、ここで剥がさないと `time ( set +e` の
                 # 握り潰しが見つからないまま本体だけが階層を開き、**その部分シェルの中の
                 # 呼び出しがまるごと「合否に効く」と読まれる**（実測で真値 NOGATE なのに wired）。
+                # **この剥がしを兄弟の歩き（`last_deciding_open()` / `walk_opens_case()`）へは
+                # 入れていない**（issue #187 のレビュー指摘、測って入れなかった）。
+                # `subshell_open_re()` の説明は「4 つの歩きが同じ綴りを読む」ことを不変条件と
+                # 書いているが、同じ剥がしを両方へ足した版を作って測ったところ、構成した 7 形
+                # （`time ( case a in a) set +e` ・ `{ (` 版 ・ `time ( f() { set +e; } )` ・
+                # `time ( if false; …)` ・ `{ ( for …)` 等）で**答えが 1 件も変わらなかった**。
+                # 何も変えない仕掛けは置かない規約に従って入れていないが、**不変条件は
+                # いま厳密には成り立っていない**——`time (` / `{ (` の綴りで
+                # `walk_opens_case()` は部分シェルを越えないので `opens_case_here` が立たず、
+                # アーム走査が切れる（それが答えを変える綴りが見つかったら、1 つの補助関数に
+                # 切り出して 4 つの歩きすべてから呼ぶこと。片方だけ足し直さない）
                 # **剥がした先が素のグループ（`(` / `{`）のときだけ使う**——門番は本体の
                 # 開きループ（`open_stripped ~ /^[({]/`）と同じ綴りにそろえる。`{` も通すのは
                 # `time { ( set +e` のように飾り・ブレース・部分シェルが重なる綴りがあるため
@@ -1511,7 +1522,16 @@ ci_workflow_extract() {
                 leadn += LEAD_SUBSHELLS; n += LEAD_SUBSHELLS
                 # 越えた分があれば、その一番内側の深さを控える（上の説明）
                 if (LEAD_SUBSHELLS > 0) { sub_at = n }
-                k = open_form(probe, cached_fn_form, (use_cached && n == 0))
+                # **控えた `fn_form` を使うのは綴りが 1 文字も変わっていないときだけ**
+                # （issue #187 のレビュー指摘）。以前は `n == 0` を条件にしていたが、上の
+                # 飾りの剥がしは `n` を増やさずに `probe` を書き換えるので、**剥がした先の
+                # 綴りを「元の綴りで求めた `function_form()`」で分類**しうる。本体の開きループは
+                # `(open_probe == struct_text)` と綴りで比べている（issue #142 のレビュー）ので、
+                # 歩調もそちらへそろえる。**この直しにピンは無い**（`n == 0` へ戻しても 758 件
+                # すべて緑＝実測）——`function_form(t)` が非 0 になり、かつ上の剥がしが効く
+                # 綴りは `time () { … }` だけで、それは `bash -n` が構文エラーにする。
+                # 倒れる向きが「数え落とす側」なので残してあるが、テストは守っていない
+                k = open_form(probe, cached_fn_form, (use_cached && probe == t))
                 # 何も開かない綴りと見出しだけの綴りはここで終わり
                 if (k == 0 || k == 4) { break }
                 # `case` のアームの本文はその中で走る（`case` を数えてそこで終わり）
@@ -2658,7 +2678,7 @@ ci_workflow_extract() {
                         # `(` の手前にある綴り（`{ ( set +e` ・ `time ( set +e` ・ `{ { ( set +e`）で
                         # 1 つも越えられず、同じ fail-open が 3 形残っていた。深さを数える側と
                         # 同じ歩きなので、記録する深さと**その `set` が走る階層**が構造的にそろう。
-                        # **先頭に `(` が無い断片は歩かない。** `set_probe` が空の断片はほとんどなので、
+                        # **`(` を 1 つも含まない断片は歩かない。** `set_probe` が空の断片はほとんどなので、
                         # 門番を置かないと全断片が `paren_delta()` の 1 文字ずつの走査を払う（§8）。
                         # 門番を「断片が `(` を含むか」にしてあるのは、前置きの後ろに隠れた `(` も
                         # 拾う必要があるから（`subshell_open_re()` を使うと issue #187 の 3 形へ戻る）
@@ -2962,7 +2982,16 @@ ci_workflow_extract() {
                                 # 控えるのは弱める向きだけ（強める向きまで信用すると、
                                 # 呼ばれるとは限らない `set -e` が外側の握り潰しを隠す fail-open）
                                 # 短い綴りで落ちるのは errexit だけ（`pipefail` は長い綴りのみ）
-                                if (in_fndef_here && !seton) { record_fn_weaken(fndef_name_here, setbody ~ /e/, 0, fnweak_e, fnweak_pipe, fn_body_depth, fnweak_e_at, fnweak_pipe_at) }
+                                # **部分シェルを越えて見つけた握り潰しは控えない**（issue #187 のレビュー指摘、実測）。
+                                # `f() { ( set +e; : ); }` の `set +e` は部分シェルと一緒に消えるので、
+                                # 呼び出し元の errexit は立ったまま——控えると「この関数は弱める」と
+                                # 記録され、呼び出しより後ろのスイートが**まるごと未配線**と報告される
+                                # （真値 GATES なのに not-wired。正しくゲートする綴りを赤くする向きで、
+                                # 1 行書き・別行書き・`function f {`・`time (`・二重の部分シェル・
+                                # ブレース挟み・入れ子の定義の **7 形**で実測した）。打ち消し側
+                                # （`seton` の枝）は `fn_cancel_ok`（`set_probe == text`）が
+                                # 部分シェル越しの綴りを既に除くので、ここでは触らない
+                                if (in_fndef_here && !seton && set_crossed_sub == 0) { record_fn_weaken(fndef_name_here, setbody ~ /e/, 0, fnweak_e, fnweak_pipe, fn_body_depth, fnweak_e_at, fnweak_pipe_at) }
                                 # 同じ本文の同じ階層で戻していれば、その関数は呼んでも弱めない
                                 else if (in_fndef_here && seton && fn_cancel_ok) { clear_fn_weaken(fndef_name_here, setbody ~ /e/, 0, fnweak_e, fnweak_pipe, fn_body_depth, fnweak_e_at, fnweak_pipe_at) }
                                 # **末尾が `o` なら次の語が長い綴りの名前**（`-o errexit` / `-euo pipefail`）。
@@ -2980,7 +3009,8 @@ ci_workflow_extract() {
                                     # `pipefail` が立っていればパイプ越しでも失敗が伝わる
                                     else if (setname == "pipefail") { pipefail = set_flag(seton, strengthen_pipe_ok, weaken_ok, pipefail) }
                                     # 長い綴り（`+o errexit` / `+o pipefail`）も短い綴りと同じように控える
-                                    if (in_fndef_here && !seton) { record_fn_weaken(fndef_name_here, setname == "errexit", setname == "pipefail", fnweak_e, fnweak_pipe, fn_body_depth, fnweak_e_at, fnweak_pipe_at) }
+                                    # 長い綴りも同じ門番を通す（理由は短い綴り側のコメント）
+                                    if (in_fndef_here && !seton && set_crossed_sub == 0) { record_fn_weaken(fndef_name_here, setname == "errexit", setname == "pipefail", fnweak_e, fnweak_pipe, fn_body_depth, fnweak_e_at, fnweak_pipe_at) }
                                     else if (in_fndef_here && seton && fn_cancel_ok) { clear_fn_weaken(fndef_name_here, setname == "errexit", setname == "pipefail", fnweak_e, fnweak_pipe, fn_body_depth, fnweak_e_at, fnweak_pipe_at) }
                                 }
                             }
