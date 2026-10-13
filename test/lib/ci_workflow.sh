@@ -2085,7 +2085,7 @@ ci_workflow_extract() {
         # `chain_never_succeeds()` が共有する。§6 DRY——写しを 2 つ持つと、落とす綴りを
         # 直したときに片方だけが古くなる）。反転の偶奇は `CHAIN_PROBE_FLIP`、
         # 算術コマンドだったかは `CHAIN_PROBE_ARITH` に載せる
-        function chain_status_probe(t,   probe, before) {
+        function chain_status_probe(t,   probe, before, aprobe) {
             probe = t
             # 反転の回数（偶奇）を持つ。`! !` は打ち消し合う
             CHAIN_PROBE_FLIP = 0
@@ -2102,7 +2102,21 @@ ci_workflow_extract() {
                 # 読むと向きが逆の判定になり、`! (( true )) && set +e` の `set +e` を
                 # 「走らない」と数えて握り潰されたスイートを「ゲートしている」と読む
                 # （`main` には無い、この差分が入れかけた退行。レビューで実測）
-                if (probe ~ /^\(\(/) { CHAIN_PROBE_ARITH = 1; return "" }
+                # **算術コマンドは真偽を読まない**が、**本文は控える**（issue #183）。
+                # 読む側（`chain_never_succeeds()`）だけが、10 進の整数リテラルという
+                # 疑いの余地が無い形に限って使う。ここで真偽まで決めてしまうと
+                # `chain_literal_status()` 側の「読めないなら値を主張しない」が壊れる
+                if (probe ~ /^\(\(/) {
+                    CHAIN_PROBE_ARITH = 1
+                    CHAIN_PROBE_ARITH_BODY = ""
+                    aprobe = probe
+                    # `(( … ))` を両端から外せたときだけ本文として控える（外せない綴りは
+                    # 読めない扱い）。末尾の `;` は `split_commands` が落とし切らない形に備える
+                    if (sub(/^\(\(/, "", aprobe) && sub(/\)\)[[:space:]]*;?[[:space:]]*$/, "", aprobe)) {
+                        CHAIN_PROBE_ARITH_BODY = trim(aprobe)
+                    }
+                    return ""
+                }
                 # 先頭のグループの開きを 1 つ落とす。**綴りは `CI_WORKFLOW_GROUP_OPENER` が源**
                 # で、`{` の後ろの空白は必須（`{true` は bash として成り立たない綴りなので、
                 # 落とすと `{true && <呼び出し>` を「真と分かる」と読んでしまう。レビューで実測）
@@ -2120,6 +2134,16 @@ ci_workflow_extract() {
 
         function chain_literal_status(t,   probe) {
             probe = chain_status_probe(t)
+            # **ここでは算術コマンドを読まない**（`chain_never_succeeds()` は整数リテラルを
+            # 読むが、あちらとは問いが違う。issue #183）。この関数が決めるのは
+            # 「次の断片が走るか」で、読めない綴りで値を主張すると**走らない呼び出しを
+            # 実行の証拠に数える** fail-open になる（`chain_status_probe()` の説明が
+            # 記録している退行がまさにそれ）。
+            # **整数リテラルの読みをここへ広げる変異は、1 件もピンを落とさない**（実測）
+            # ——`(( 1 )) && <呼び出し>` のような形が未配線になる原因は連鎖側の
+            # `uncertain` で、真偽を読めても答えが変わらないため。**答えを変えないから
+            # 広げてよいのではなく、広げても得が無いうえ上の fail-open の口が開く**ので
+            # 広げない。ピンで止められない境界なので、規約とレビューで守る
             if (CHAIN_PROBE_ARITH) { return "" }
             # `true` / `:` は真、`false` は偽。反転されていれば入れ替える
             if (probe == "true" || probe == ":") { return CHAIN_PROBE_FLIP ? "f" : "t" }
@@ -2149,8 +2173,33 @@ ci_workflow_extract() {
         # ほぼすべてで、握り潰し扱いにすると上と同じ fail-closed になる
         function chain_never_succeeds(t,   probe) {
             probe = chain_status_probe(t)
-            # 算術コマンドは真偽を読まない（上と同じ理由）
-            if (CHAIN_PROBE_ARITH) { return 0 }
+            # **算術コマンドは 10 進の整数リテラルだけ読む**（issue #183）。算術コマンドの
+            # 終了状態は「値が 0 なら 1（失敗）・非 0 なら 0（成功）」で、リテラルなら
+            # 変数にも演算にも依らず確定する。読まないと `|| (( 0 ))` が握り潰し扱いになり、
+            # **並びはいつでも失敗する**のに未配線と報告する（実 `bash -e` は GATES。
+            # 正しく配線されている綴りを赤にする fail-closed）。
+            # **リテラル以外は `main` と同じ「成功しうる」側へ倒す**（`(( x ))` は変数次第、
+            # `(( 1-1 ))` は演算次第）。倒れる向きは握り潰し＝未配線で、**issue が書いていた
+            # 「読めないので位置の判定へ落とす」は採れない**——実測すると `|| (( 1 ))` が
+            # wired へ動き（実 `bash -e` は NOGATE）、**1 件も走らないスイートが
+            # 「ゲートしている」と読まれる fail-open** になる。向きを取り違えないこと
+            if (CHAIN_PROBE_ARITH) {
+                # **残る境界: 先頭が 0 の綴りは厳密には 8 進**（レビュー指摘、実測）。
+                # bash は `(( 08 ))` を "value too great for base" で**必ず失敗**させるので
+                # 正しい分類は「成功しえない」だが、ここでは非 0 として読む＝握り潰し側へ倒れる
+                # （答えは `main` と同じ not-wired。実 `bash -e` は GATES なので残る fail-closed）。
+                # **先頭 0 を読む対象から外す形も書いて測ったが、どちらの枝も「成功しうる」へ
+                # 倒れるので答えが 1 件も変わらなかった**——何も変えない仕掛けは置かない規約に
+                # 従って入れていない。直すなら 8 進の規則（`08` / `09` はエラーで失敗、
+                # `010` は 8 で成功）まで入れて、`(( 08 ))` が wired へ動くことをピンで固定する
+                if (CHAIN_PROBE_ARITH_BODY ~ /^[0-9]+$/) {
+                    # 0 は必ず失敗（`!` が付いていれば必ず成功）
+                    if (CHAIN_PROBE_ARITH_BODY ~ /^0+$/) { return CHAIN_PROBE_FLIP ? 0 : 1 }
+                    # 非 0 は必ず成功
+                    return CHAIN_PROBE_FLIP ? 1 : 0
+                }
+                return 0
+            }
             # 綴りから真偽が分かる形は `chain_literal_status()` と同じ規則で読む
             if (probe == "true" || probe == ":") { return CHAIN_PROBE_FLIP ? 1 : 0 }
             if (probe == "false") { return CHAIN_PROBE_FLIP ? 0 : 1 }
