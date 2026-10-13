@@ -3271,6 +3271,71 @@ jobs:
           echo done"
 done
 
+# **算術コマンド（`(( … ))`）の真偽は読まない**（issue #150 のレビューで実測）。
+# 丸括弧を 2 つ落とすと中身が「コマンドとしての `true`」に見えるが、算術の真偽は
+# **変数の値**で決まる——`(( true ))` は未設定の変数 `true` を 0 と読むので終了状態は 1（偽）。
+# 読むと向きが逆になり、`&&` の右辺の呼び出しを「必ず走る」と記録する（`bash -n` も通る綴り）
+for arith_chain_case in \
+    "空白あり:(( true ))" \
+    "空白なし:((true))" \
+    "コロン:(( : ))" \
+    "部分シェルで包む:( (( true )) )" \
+    "time 付き:time (( true ))"
+do
+    assert_not_wired "算術コマンドの連鎖（${arith_chain_case%%:*}）は実行の証拠にしない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${arith_chain_case#*:} && bash ${SUITE_PATH}
+          echo end"
+done
+
+# 同じ取り違えは**逆向き**にも効く（この差分が入れかけた退行）。`! (( true ))` を「偽」と読むと
+# 右辺の `set +e` が「走らない」ことになり、握り潰されたスイートが「ゲートしている」と読まれる
+assert_not_wired "算術コマンドの反転で set +e を取り落とさない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ! (( true )) && set +e
+          bash ${SUITE_PATH}
+          echo end"
+
+# **`{` の後ろの空白は必須**（issue #150 のレビューで実測）。`{true` は bash として
+# 成り立たない綴り（`{true` という名前のコマンドを探して 127 で終わる）なので、
+# グループの開きとして落とすと「真と分かる」に化ける。`&&` の左辺なので `set -e` も発動せず、
+# **ステップは緑のままスイートが 1 度も走らない**。綴りの源は `CI_WORKFLOW_GROUP_OPENER`
+for brace_chain_case in \
+    "空白なしの true:{true" \
+    "空白なしのコロン:{:" \
+    "閉じる前の区切りが無い:{ echo a; true }"
+do
+    assert_not_wired "開きとして読めないブレース（${brace_chain_case%%:*}）は実行の証拠にしない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${brace_chain_case#*:} && bash ${SUITE_PATH}
+          echo end"
+done
+
+# 締めすぎない側: **空白のあるブレースグループは従来どおり読む**（`{ true && <呼び出し>; }`）
+assert_wired "空白のあるブレースグループの中の真と分かる連鎖" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          { true && bash ${SUITE_PATH}; }"
+
 # **締めすぎない側＝短絡で結論が分かる連鎖は「必ず走る」のまま。**
 # 連鎖の有無だけで見送ると、実際に走る呼び出しを「未配線」と事実と逆に診断して CI を赤くする。
 # 真偽の判定は `chain_literal_status()` が持ち、**先頭のグループの開き（`( true`）・

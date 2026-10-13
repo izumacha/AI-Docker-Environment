@@ -70,7 +70,10 @@ CI_WORKFLOW_COMMAND_PREFIXES='((sudo|env|nice|timeout|command|exec)[[:space:]]+|
 # 重ねた開きを教えた側なので、**錨だけが追いついていない**状態だった）。
 # **`{` は空白を必須にする**——`{bash x;}` は bash として成り立たない綴りなので、
 # 許すと `${VAR}` のような無関係な綴りまで命令の位置と読む方向へ広がるだけ
-CI_WORKFLOW_GROUP_OPENERS='([(][[:space:]]*|\{[[:space:]]+)*'
+# **開き 1 つ分の綴り。** 下の「何個でも」はこれを繰り返したもので、
+# `chain_literal_status()` は 1 つずつ落とすのでこちらを読む（綴りを 2 か所に分けない）
+CI_WORKFLOW_GROUP_OPENER='([(][[:space:]]*|\{[[:space:]]+)'
+CI_WORKFLOW_GROUP_OPENERS="${CI_WORKFLOW_GROUP_OPENER}*"
 
 # **コマンドの開始位置**を表す正規表現の断片（上の前置きを読み飛ばす）。
 # **`shellcheck` の網だけがこれを使う**（`test/ci_coverage_test.sh`）。あちらは
@@ -818,6 +821,7 @@ ci_workflow_run_with_structure() {
     awk -v structural_file="${structural_file}" -v comment_re="${CI_WORKFLOW_COMMENT_START}" \
         -v prop_re="${CI_WORKFLOW_NODE_PROPERTY_BLOCK}" \
         -v prop_plain_re="${CI_WORKFLOW_NODE_PROPERTY}" \
+        -v group_open_re="${CI_WORKFLOW_GROUP_OPENER}" \
         -f "${program_file}" "${workflow}"
     # awk の終了コードを控える（後始末で上書きされないように）
     local status=$?
@@ -1911,13 +1915,25 @@ ci_workflow_extract() {
                 # `time` / `!` を剥がし、`!` を剥がしたぶんだけ真偽を反転する
                 probe = strip_struct_wrappers(probe)
                 if (STRUCT_INVERTED) { flip = !flip }
-                # 先頭のグループの開きを 1 つ落とす
-                sub(/^[[:space:]]*[({][[:space:]]*/, "", probe)
+                # **算術コマンド（`(( … ))`）は読まない。** 丸括弧を 2 つ落とすと中身が
+                # 「コマンドとしての `true`」に見えるが、算術の真偽は**変数の値**で決まる
+                # ——`(( true ))` は未設定の変数 `true` を 0 と読むので終了状態は 1（偽）。
+                # 読むと向きが逆の判定になり、`! (( true )) && set +e` の `set +e` を
+                # 「走らない」と数えて握り潰されたスイートを「ゲートしている」と読む
+                # （`main` には無い、この差分が入れかけた退行。レビューで実測）
+                if (probe ~ /^\(\(/) { return "" }
+                # 先頭のグループの開きを 1 つ落とす。**綴りは `CI_WORKFLOW_GROUP_OPENER` が源**
+                # で、`{` の後ろの空白は必須（`{true` は bash として成り立たない綴りなので、
+                # 落とすと `{true && <呼び出し>` を「真と分かる」と読んでしまう。レビューで実測）
+                sub("^[[:space:]]*" group_open_re, "", probe)
                 # 何も落ちなければ終わり（必ず短くなるので止まる）
                 if (probe == before) { break }
             }
-            # 末尾の閉じと区切りを落とす（`( true )` / `{ true; }` の中身を見るため）
-            sub(/[[:space:]]*[;)}[:space:]]*$/, "", probe)
+            # 末尾の閉じと区切りを落とす（`( true )` の中身を見るため）。
+            # **`}` は落とさない**——`{ true; }` は `;` で切られるので左辺は `}` だけの断片になり
+            # （下記の残る境界）、落として得るものが無い一方、`{ echo a; true } && …` のように
+            # **bash が解析できない綴り**を「真と分かる」と読む口になる（レビューで実測）
+            sub(/[[:space:]]*[;)]*[[:space:]]*$/, "", probe)
             probe = trim(probe)
             # `true` / `:` は真、`false` は偽。反転されていれば入れ替える
             if (probe == "true" || probe == ":") { return flip ? "f" : "t" }
