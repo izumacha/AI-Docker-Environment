@@ -2595,6 +2595,63 @@ jobs:
           done
           bash ${SUITE_PATH}"
 
+# **脱出する綴りの後ろは 1 つも走らない**（issue #151。`main` 既存の fail-open）。
+# `if true; then exit 0; bash <スイート>; fi` と `while true; do break; bash <スイート>; done` は
+# **2 トークンで必須スイートを止められる**のに「最上位で確実に走る」と記録されていた
+# （実 `bash -e` ではスイートが 1 行も走らない。`exit` の次の行も同じ）
+for unreachable_after_case in \
+    "if true の中の exit:if true; then exit 0; bash ${SUITE_PATH}; fi" \
+    "while true の中の break:while true; do break; bash ${SUITE_PATH}; done" \
+    "最上位の exit の後ろ:exit 0
+          bash ${SUITE_PATH}" \
+    "ループの中の continue の後ろ:for i in 1; do continue; bash ${SUITE_PATH}; done" \
+    "関数の本文の return の後ろ:f() { return 0; bash ${SUITE_PATH}; }
+          f" \
+    "連鎖のブロックを抜けた後ろの exit:[ -n \"${DOLLAR}X\" ] || { echo \"no X\"; }
+          exit 0
+          bash ${SUITE_PATH}"
+do
+    assert_not_wired "脱出の後ろ（${unreachable_after_case%%:*}）は実行の証拠にしない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${unreachable_after_case#*:}"
+done
+
+# **締めすぎない側＝走るかどうか分からない位置の脱出は数えない。**
+# 条件次第で走らない `exit` の後ろを死に体にすると、**実際にはゲートしているスイートを
+# 「未配線」と報告**する（CI では通過する早期ガードを持つワークフローが軒並み赤くなる）。
+# 部分シェル・パイプ・呼ばれない関数の本文の `exit` は親を終わらせないので同じく数えない
+for reachable_after_exit_case in \
+    "条件が読めない if の中:if [ -n \"${DOLLAR}X\" ]; then exit 0; fi" \
+    "case のアームの中:case \"${DOLLAR}M\" in
+            a) exit 0 ;;
+          esac" \
+    "1 行に畳んだ case のアームの中:case \"${DOLLAR}M\" in a) exit 0 ;; esac" \
+    "偽と分かるブロックの中:if false; then exit 1; fi" \
+    "部分シェルの中:( exit 0 )" \
+    "パイプの構成要素:exit 0 | cat" \
+    "呼ばれない関数の本文:f() { exit 0; }" \
+    "連鎖に守られた exit:[ -n \"${DOLLAR}X\" ] && exit 0" \
+    "連鎖で入ったブレースの中の exit:[ \"${DOLLAR}c\" -eq 2 ] || { echo \"FAIL\"; exit 1; }" \
+    "連鎖で入った部分シェルの中の exit:[ \"${DOLLAR}c\" -eq 2 ] || ( echo \"FAIL\"; exit 1 )" \
+    "ループを抜けた後ろ:while true; do break; done" \
+    "continue したループの後ろ:for i in 1; do continue; done"
+do
+    assert_wired "脱出を数えない位置（${reachable_after_exit_case%%:*}）の後ろは配線のまま" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${reachable_after_exit_case#*:}
+          bash ${SUITE_PATH}"
+done
+
 # --- 先頭の飾り（同じシェルのまま `set` を呼ぶ書き方）------------------------------
 #
 # 落としてよいのはブレースグループ / 変数代入 / `builtin` / `command` / `eval` だけ。

@@ -2039,7 +2039,7 @@ ci_workflow_extract() {
         # **ここでは出力しない**のが要点で、ジョブ単位の無効化キー（`if: false` 等）は
         # YAML のキー順が自由である以上 `steps:` の**後ろ**にも書ける。書いた時点で
         # 出力済みのステップは取り消せないため、ジョブ 1 つ分を溜めてから出す
-        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, closed_any, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, closed_subshell, closed_uncertain, chain_in, inverted, arm_masked, arm_at, arm_expected, case_scope, opens_case, opens_case_here, case_opens_at, close_probe, close_rest, close_first, open_head, esac_probe, esac_rest, esac_first, dead_probe, dead_lead, close_n) {
+        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, closed_any, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, closed_subshell, closed_uncertain, chain_in, inverted, arm_masked, arm_at, arm_expected, case_scope, opens_case, opens_case_here, case_opens_at, close_probe, close_rest, close_first, open_head, esac_probe, esac_rest, esac_first, dead_probe, dead_lead, close_n, exit_seen, chain_at, chain_depth) {
             # **シェルのオプションはステップごとにリセットする。** ステップは 1 つずつ
             # 別のシェルで走るので、前のステップの `set +e` / `pipefail` は引き継がれない。
             # **控えるのは `set` で明示された分だけ（-1 = 明示なし）。** シェルの既定と突き合わせるのは
@@ -2054,6 +2054,11 @@ ci_workflow_extract() {
             uncertain = 0
             # 偽と分かる条件のブロックに入った深さ（-1 = 入っていない）
             dead_depth = -1
+            # **無条件の `exit` を見たらこの先は 1 つも走らない**（issue #151）。
+            # ステップごとに戻す（シェルはステップ単位で新しくなる）
+            exit_seen = 0
+            # 連鎖（`&&` / `||`）で入った階層の数。脱出を数えてよいかの判断に使う
+            chain_depth = 0
             # `case` の入れ子の数（パターン末尾の `)` を見分けるために数える）
             case_depth = 0
             # 直前の断片の後ろに置かれた区切り（「そもそも走らない」形の判定に使う）
@@ -2815,6 +2820,7 @@ ci_workflow_extract() {
                             if (fndef_at[depth]) { fndef--; fndef_at[depth] = 0 }
                             true_at[depth] = 0
                             if (subshell_at[depth]) { subshell--; subshell_at[depth] = 0; closed_subshell = 1 }
+                            if (chain_at[depth]) { chain_depth--; chain_at[depth] = 0 }
                             group_start[depth] = -1
                             # 巻き戻し先はこの断片が閉じた**一番外側**の階層の入口。
                             # 閉じる順は内側からなので、上書きし続ければ最後に残るのが一番外側
@@ -2932,7 +2938,7 @@ ci_workflow_extract() {
                         # **リンタの照会（`top` を渡さない）は巻き込まない**のが要点で、
                         # `test -n "$FILES" && shellcheck $FILES` は正当な綴り——`gate` 側を
                         # 0 にすると、正しく設定されたリンタを「配線されていない」と報告する
-                        buf[nbuf] = step_id "\t" ops[j] "\t" ((dead_depth >= 0 || unreachable) ? 0 : errexit) "\t" pipefail "\t" (uncertain + (chain_in ? 1 : 0)) "\t" text
+                        buf[nbuf] = step_id "\t" ops[j] "\t" ((dead_depth >= 0 || unreachable || exit_seen) ? 0 : errexit) "\t" pipefail "\t" (uncertain + (chain_in ? 1 : 0)) "\t" text
                         # 偽と分かる条件のブロックに入るところを覚える（この深さより深い間は無効）
                         # **連鎖が続くなら条件は 1 語だけではない。** `split_commands` は `&&` / `||` で
                         # 切るので、`if false || true; then` の断片は `if false` になる。素直に
@@ -2987,6 +2993,53 @@ ci_workflow_extract() {
                                 if (dead_lead < 1) { dead_lead = 1 }
                                 dead_depth = depth + dead_lead - 1
                             }
+                        }
+                        # **脱出する綴りの後ろは 1 つも走らない**（issue #151。`main` 既存の fail-open）。
+                        # `if true; then exit 0; bash <スイート>; fi` と
+                        # `while true; do break; bash <スイート>; done` は**2 トークンで必須スイートを
+                        # 止められる**のに「最上位で確実に走る」と記録されていた（実 bash では
+                        # スイートが 1 行も走らないのに `wired`。`exit` の次の行も同じ）。
+                        # **見るのは無条件の脱出だけ。** `[ -z "$X" ] && exit 1` のような条件付きの
+                        # 脱出で後ろを死に体にすると、**CI では通過する早期ガード**を持つワークフローの
+                        # スイートがすべて「未配線」になり、正しい設定を赤くする（行き過ぎた fail-closed）。
+                        # 連鎖で入ってきた断片は `unreachable` と `prev_op` で除き、パイプ・背景は
+                        # `set_forked` で除く（別プロセスなので親は終わらない）。
+                        # **判定は `call_probe`（命令の位置を求めた写し）を使い回す**——継続語・
+                        # アーム見出し・飾り（`{ ` / `!` / `time` / 代入）を落とす綴りの源を増やさない
+                        # **走らないブロックの中の脱出も数えない**が、ここに `dead_depth < 0` は
+                        # 置かない——`if false; then` のような偽と分かる開きは**階層として
+                        # `uncertain` も立てる**ので、下の `uncertain == 0` が先に除く
+                        # （実測で、この条件を足しても外しても 602 件すべて緑＝何も変えない門番だった。
+                        #  何も変えない仕掛けは保護に見えるので置かない）。`break` 側は自前で持つ。
+                        # 結び付きが崩れたら `偽と分かるブロックの中の exit` の対が落ちる
+                        # **1 行に畳んだ `case` のアームの中も数えない**（`opens_case_here`）
+                        # ——`case $X in a) exit 1 ;; esac` では `case` の階層が**この断片の
+                        # 末尾**で開くので、判定の時点では `uncertain` がまだ 0 で上の門番を
+                        # すり抜ける。模様が当たるかは主語と照合しないと決まらない（issue #147）
+                        # ので、ここで数えると**実際にはゲートしているスイートを「未配線」と
+                        # 報告**する（レビューで実測。複数行に分けた同じ綴りは `case` の階層が
+                        # 先に開くので `uncertain` が立ち、以前から正しく除かれていた）
+                        if (!set_forked && !unreachable && !opens_case_here \
+                            && prev_op != "&&" && prev_op != "||" \
+                            && call_probe ~ /^(exit|break|continue|return)([[:space:]]+[^[:space:]]+)?[[:space:]]*$/) {
+                            # `exit` はシェルごと終わるので、以降のすべての断片が到達不能。
+                            # **部分シェルの中と定義の本文は除く**——`( exit 0 )` は親を終わらせず、
+                            # 定義しただけの本文は呼ばれるまで走らない（除かないと、呼ばれない
+                            # 関数に `exit` を書くだけでステップ全体が死に体になる＝fail-closed）
+                            if (call_probe ~ /^exit([[:space:]]|$)/) {
+                                # **走るかどうか分からない位置の `exit` は数えない**（`uncertain == 0`）。
+                                # `if [ -n "$X" ]; then exit 0; fi` や `case` のアームの中の `exit` は
+                                # 条件次第で走らないので、後ろを死に体にすると**実際にはゲートしている
+                                # スイートを「未配線」と報告**する（実測で 2 形が化けた）。
+                                # `if true; then` / `while true; do` は `uncertain` を立てない側なので
+                                # ここを通る——狙っている穴はその 2 形
+                                if (uncertain == 0 && chain_depth == 0 && subshell == 0 && !in_fndef_here) { exit_seen = 1 }
+                            }
+                            # `break` / `continue` / `return` はいちばん内側の階層を抜けるので、
+                            # **その階層が閉じるまで**が到達不能（偽と分かる条件と同じ区間の形）。
+                            # **`break 2` 以上は 1 階層ぶんしか見ない**——足りない側は `main` と
+                            # 同じ（新しい穴は作らない）ので、残る境界として記録する
+                            else if (depth > 0 && dead_depth < 0) { dead_depth = depth - 1 }
                         }
                         # **grouping を閉じた断片に付いた区切りは、その中身すべてに掛かる。**
                         # `( bash x ) || true` は中の `bash x` も「失敗が伝わらない」——
@@ -3229,6 +3282,15 @@ ci_workflow_extract() {
                             && case_before == 0 && !(ops[j] == "|" && case_depth > 0 && !pipe_in) \
                             && !subshell_at[depth_before + 1]) {
                             subshell_at[depth_before + 1] = 1; subshell++
+                        }
+                        # **連鎖で入った階層も控える**（issue #151 の実測）。
+                        # `[ "$c" -eq 2 ] || { echo "FAIL: …"; exit 1; }` の `exit` は `;` の後ろなので
+                        # **断片だけ見ると無条件に見える**が、囲っているブレースは `||` の右辺＝条件次第。
+                        # 実在の ci.yml がまさにこの形で、数えると**同じステップの後ろ全部が死に体**になった
+                        # （失敗経路の 6 記録が `gate` 1 → 0。次に足したスイートが黙って未配線になる）。
+                        # 控え方は上の部分シェルと同じ（階層ごとの旗＋件数。畳むのは閉じるループ 1 か所）
+                        if (depth > depth_before && chain_in && !chain_at[depth_before + 1]) {
+                            chain_at[depth_before + 1] = 1; chain_depth++
                         }
                         # **次の断片がアーム模様の位置か**を控える（上の括弧の勘定が読む）。
                         # `case` を開いた断片の直後だけが立ち、その断片が模様まで載せていれば立てない。
