@@ -5264,6 +5264,41 @@ jobs:
           ${and_live_case#*:}"
 done
 
+# **伏せ字の写しを省く素通しは、引用符だけでなく打ち消し（`\\`）も見る**（issue #166）。
+# `bash <スイート> \&& echo ok` の `\&` は**ただの引数**で、残る 1 つの `&` が
+# 並びごと背後へ回す（実 `bash -e` で NOGATE ＝実測）。伏せ字で `\&` を空白へ潰さないと
+# `&&` と読まれ、握り潰された実行が「ゲートしている」と報告される
+for mask_escape_case in \
+    "素の呼び出し:bash ${SUITE_PATH} \\&& echo ok" \
+    "部分シェルの後ろ:( bash ${SUITE_PATH} ) \\&& echo ok"
+do
+    assert_not_wired "打ち消した & は演算子に数えない（${mask_escape_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${mask_escape_case#*:}"
+done
+
+# **素通しは「引用符が閉じていないか」の控えも必ず 0 に戻す**（issue #166）。
+# あの控えはグローバルなので、落とさないと**前のステップの閉じていない引用符**が残り、
+# 引用符を 1 つも含まない次のステップの行が「論理行の途中」と読まれて後ろの行と
+# 連結される（実測で、握り潰されるはずの `&& echo ok` が wired に化ける fail-open）
+assert_not_wired "前のステップの閉じない引用符が次のステップへ漏れない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: first
+        run: |
+          echo \"unclosed
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} && echo ok
+          echo done"
+
 # **並びの途中で握り潰される形は位置を見る前に落とす**（レビュー指摘、実測）。
 # `&` が付いた並びは丸ごと背後へ回り、`||` の右辺が綴りから真と分かるなら並びの
 # 終了状態は 0 になる。どちらも実 `bash -e` で NOGATE。
