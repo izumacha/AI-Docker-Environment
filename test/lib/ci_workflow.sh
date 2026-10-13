@@ -935,9 +935,13 @@ ci_workflow_extract() {
             # 結果は入力と必ず一致する（`MASK_UNCLOSED` も 0）。`run:` の本文の大半が
             # これに当たり、呼び出しは断片ごとに何度も起きる
             # （`drop_arm_head_close` / `case_arm_consumed` / `strip_comment` / `starts_case_arm` 等）。
-            # **`\\` を条件に含めるのが要点**——打ち消された 2 文字は空白へ潰すので、
-            # `\\` を含む本文は素通しすると釣り合いもコメントの判定も変わる。
-            # 兄弟の `mask_quoted_flow_punctuation` が同じ理由で同じ素通しを持つ
+            # **`\\` を条件に含めるのが要点**——この関数は打ち消された 2 文字を空白へ潰すので、
+            # `\\` を含む本文を素通しすると釣り合いもコメントの判定も変わる
+            # （`bash <スイート> \&& echo ok` が `&&` と読まれる fail-open。レビューで実測）。
+            # **兄弟の `mask_quoted_flow_punctuation` は同じ形の素通しを持つが、条件に
+            # `\\` を含めていない——あちらは引用符の中でしか打ち消しを解釈せず、
+            # 引用符の外の `\\` は素の文字として残すので、含める必要が無いだけ。**
+            # 「揃っていない」と見て**こちらから落とすと上記の fail-open が開く**ので揃えない
             if (index(t, "\"") == 0 && index(t, "\047") == 0 && index(t, "\\") == 0) { MASK_UNCLOSED = 0; return t }
             out = ""; in_single = 0; in_double = 0
             for (i = 1; i <= length(t); i++) {
