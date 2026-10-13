@@ -3910,6 +3910,57 @@ jobs:
           bash ${SUITE_PATH}
           echo done )"
 
+# **部分シェルの同一性は深さの数値では測れない**（issue #152 のレビュー指摘）。
+# 閉じたブレースと同じ深さに開いた部分シェルを区別できないと、ブレースの中で落とした分が
+# 「この部分シェルの中で落とした」ことになり、内側の `set -e` を credit してしまう
+# （実 `bash -e` は NOGATE なのに `wired`＝握り潰されたスイートが「ゲートしている」と読まれる）。
+# 階層ごとに振る連番（`sub_id`）で見るので、下の 2 形はどちらも握り潰しのまま
+for sub_identity_case in \
+    "ブレースで落とす:{ set +e; }" \
+    "必ず走るブロックで落とす:if true; then set +e; fi"
+do
+    assert_not_wired "部分シェルの外で落とした分は中の set -e で戻せない（${sub_identity_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${sub_identity_case#*:}
+          (
+          set -e
+          bash ${SUITE_PATH}
+          echo done )"
+done
+
+# **入れ子の部分シェルでは引き上げ候補を外側へ引き継ぐ**（issue #152 のレビュー指摘）。
+# 内側の入口は外側の `set +e` を継いで 0 なので、そこで候補を捨てると
+# 「内側が外側の最後のコマンド」という伝播を見落とし、正しくゲートしている綴りを
+# 未配線と報告する（1 行書きの `( set +e; ( bash … ) )` とも答えが食い違う）。
+# **リダイレクトは終了状態を変えないのでコマンドに数えない**——数えると同じく引き上げを
+# 見送り、`) >/dev/null` を付けただけで正しい設定が赤くなる
+for sub_promote_case in \
+    "入れ子の部分シェル（複数行）:(
+          set +e
+          (
+          bash ${SUITE_PATH}
+          )
+          )" \
+    "閉じる断片のリダイレクト:(
+          set +e
+          bash ${SUITE_PATH}
+          ) >/dev/null"
+do
+    assert_wired "部分シェルの最後のコマンドを引き上げる（${sub_promote_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${sub_promote_case#*:}"
+done
+
 assert_not_wired "外で落として部分シェルの中で戻しても credit しない" "name: ci
 jobs:
   type-check:
