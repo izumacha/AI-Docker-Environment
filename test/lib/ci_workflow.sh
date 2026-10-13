@@ -2371,7 +2371,7 @@ ci_workflow_extract() {
         # **ここでは出力しない**のが要点で、ジョブ単位の無効化キー（`if: false` 等）は
         # YAML のキー順が自由である以上 `steps:` の**後ろ**にも書ける。書いた時点で
         # 出力済みのステップは取り消せないため、ジョブ 1 つ分を溜めてから出す
-        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_open_n, set_crossed_sub, set_sub, set_res_at, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, closed_any, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fnexit, fnret, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, closed_subshell, closed_uncertain, chain_in, inverted, arm_masked, arm_at, arm_expected, case_scope, opens_case, opens_case_here, case_opens_at, close_probe, close_rest, close_first, open_head, esac_probe, esac_rest, esac_first, dead_probe, dead_lead, close_n, exit_seen, chain_at, chain_depth, closed_sub_seen, closed_sub_e, closed_sub_p, sub_rec, sub_rec_level, prom_rec, sub_id, carry_level, open_stripped, head_inverted, inverted_at, closed_inverted, prop_op, sub_serial, prom_list, nprom, pi, closed_sub_and, sub_and_at, seg_prev_op, depth_in, cmd_rest, cmd_sub, cmd_fndef, cmd_fnname, cmd_fnat, fn_name_here, esc_probe, esc_sub, esc_lead, fn_lead, call_sub, exit_here, exit_sub) {
+        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_open_n, set_crossed_sub, set_sub, set_res_at, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, closed_any, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fnexit, fnret, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, closed_subshell, closed_uncertain, chain_in, inverted, arm_masked, arm_at, arm_expected, case_scope, opens_case, opens_case_here, case_opens_at, close_probe, close_rest, close_first, open_head, esac_probe, esac_rest, esac_first, dead_probe, dead_lead, close_n, exit_seen, chain_at, chain_depth, closed_sub_seen, closed_sub_e, closed_sub_p, sub_rec, sub_rec_level, prom_rec, sub_id, carry_level, open_stripped, head_inverted, inverted_at, closed_inverted, prop_op, sub_serial, prom_list, nprom, pi, closed_sub_and, sub_and_at, seg_prev_op, depth_in, cmd_rest, cmd_sub, cmd_fndef, cmd_fnname, cmd_fnat, fn_name_here, esc_probe, esc_sub, sub_lead_in, fn_lead, call_sub, exit_here, exit_sub) {
             # **シェルのオプションはステップごとにリセットする。** ステップは 1 つずつ
             # 別のシェルで走るので、前のステップの `set +e` / `pipefail` は引き継がれない。
             # **控えるのは `set` で明示された分だけ（-1 = 明示なし）。** シェルの既定と突き合わせるのは
@@ -3185,6 +3185,19 @@ ci_workflow_extract() {
                                     exit_here = 1
                                     exit_sub = call_sub
                                 }
+                                # **この断片で部分シェルを越えた呼び出しの弱めは反映しない**
+                                # （`call_sub == 0`）。弱めを記録する階層は `depth`＝部分シェルの
+                                # **外**なので、そのまま反映すると内側の `set -e` が打ち消せない
+                                # （`strengthen_base` は部分シェルの中では「その部分シェルの中で
+                                #   落とした記録か」を `weak_sub` で見るが、ここは `at_sub` を
+                                #   渡せない——その部分シェルの `sub_id` は開きを数えたあとに
+                                #   振られるので、この時点ではまだ存在しない）。
+                                # **門番の代償は fail-open で、外すだけでは直らない**（issue #200）:
+                                # 480 形の総当たりで、外すと `( quiet` 改行 `bash <スイート>` 改行
+                                # `echo x )` 等の **32 形が正しく not-wired になる一方、`( ( quiet`
+                                # 改行 `set -e` …の 16 形が fail-closed へ倒れた**（実測）。
+                                # 取り替えになるので、弱めを開きの後ろへ遅らせる形（旗を立てて
+                                # 1 か所で適用する `exit_here` と同じ）で閉じるまで据え置く
                                 if (!in_fndef_here && subshell == 0 && call_sub == 0) {
                                     # **呼び出しに着いた時点で畳み直す。** 定義の順序は自由なので、
                                     # 控えた時点では呼び先がまだ弱めると分かっていないことがある
@@ -3358,6 +3371,16 @@ ci_workflow_extract() {
                         # （下の `dead_depth` の解除）はこの値で行う——閉じた後の深さで照合すると、
                         # `( exit 0; bash <スイート> )` の 2 つ目の断片で印が**記録より前に**
                         # 解除され、1 行も走らないスイートが「必ず走る」と記録される（実測）
+                        # **囲っている部分シェルの階層も閉じる前に控える**（issue #189 のレビュー）。
+                        # 呼び出しから立った脱出の旗（`exit_here`）を適用するのは下の 1 か所で、
+                        # そこは閉じるループより**後ろ**。`f )` のように呼び出しと閉じ括弧が
+                        # 同じ断片に載る綴りでは、適用の時点で `subshell` がすでに 0 に戻って
+                        # いるため「部分シェルの中の脱出」が**シェルごとの脱出**として記録され、
+                        # 以降のすべての記録が gate 0 になる（実測で `f() { exit 0; }` ＋ `(` ＋
+                        # `f )` ＋ `bash <スイート>` が wired → not-wired ＝正しくゲートして
+                        # いるワークフローを赤くする fail-closed。`)` を別行に置いた綴りだけが
+                        # 正しく答えるという、改行の位置で答えが変わる形でもあった）
+                        sub_lead_in = (subshell > 0) ? enclosing_subshell_depth(depth, subshell_at) : 0
                         depth_in = depth
                         for (closing = 0; closing < close_n && depth > 0; closing++) {
                             if (uncertain_at[depth]) { uncertain--; uncertain_at[depth] = 0; closed_uncertain = 1 }
@@ -3827,7 +3850,12 @@ ci_workflow_extract() {
                                 # 必ず走る」と記録された（実測で真値 NOGATE なのに wired）。
                                 # 越えた部分シェルの位置が定義より**手前**なら本文の中の脱出
                                 # （控える）、**後ろ**なら部分シェルの中の脱出（控えない）
-                                else if (chain_depth == 0 && !opens_case_here \
+                                # **`case` を開く断片の門番はここに書かない**——囲っている
+                                # `if`（上の脱出のアームの入口）が同じ `!opens_case_here` を
+                                # 持っており、重ねても 1 つも答えが変わらない（変異で実測。
+                                # 外しても 798 件すべて緑・117 形の総当たりでも差分 0）。
+                                # 守っていない門番は読み手に守られていると誤解させるだけ（§6）
+                                else if (chain_depth == 0 \
                                          && (esc_sub == 0 || (cmd_fndef == 1 && esc_sub < cmd_fnat)) \
                                          && cmd_fndef <= 1 && (in_fndef_here || cmd_fndef == 1) \
                                          && !fnret[in_fndef_here ? fndef_name_here : cmd_fnname]) {
@@ -3858,13 +3886,11 @@ ci_workflow_extract() {
                         if (exit_here) {
                             # この断片で開いた部分シェルの後ろなら、その階層が閉じるまで死に体
                             if (exit_sub > 0) { dead_depth = depth + exit_sub - 1 }
-                            # 既に部分シェルの中にいるなら、一番内側の部分シェルが閉じるまで
-                            else if (subshell > 0) {
-                                # 区間の底は「その部分シェルを開いた深さ」の 1 つ外側
-                                esc_lead = enclosing_subshell_depth(depth, subshell_at)
-                                # 見つからない綴りでは何もしない（印に -1 を書き戻さない）
-                                if (esc_lead > 0) { dead_depth = esc_lead - 1 }
-                            }
+                            # 既に部分シェルの中にいるなら、一番内側の部分シェルが閉じるまで。
+                            # **読むのは閉じる前に控えた階層**（上の `sub_lead_in`）——閉じ括弧が
+                            # 同じ断片に載る綴りでも部分シェルの残りだけを死に体にできる。
+                            # 見つからない綴りでは何もしない（印に -1 を書き戻さない）
+                            else if (sub_lead_in > 0) { dead_depth = sub_lead_in - 1 }
                             # 部分シェルの外の脱出はシェルごと終わるので、以降の全記録が到達不能
                             else { exit_seen = 1 }
                         }
