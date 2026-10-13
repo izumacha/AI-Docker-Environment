@@ -1165,6 +1165,27 @@ permissions:
 jobs:
   j: {uses: org/repo/.github/workflows/verify.yml@main, secrets: inherit}'
 
+# **逐語タグ（`!<…>`）の中のフロー形式の区切りで `secrets:` が隠れてはならない**（issue #182。実測）。
+# YAML の逐語タグの中身は URI 文字で `,` を含んでよいが、ノードプロパティを読み飛ばす側が
+# `,` で名前を切っていたため、直後の引用符が「値の始まり」と認められず、値の中の `#` が
+# 伏せられないまま構造行へ残っていた。消費側はそこで行を切るので**後ろの本物の
+# `secrets: inherit` が捨てられ**、このワークフローが read-only と判定されて
+# **可変タグの検査（FR-9.6(b)）が丸ごと外れる**（`PyYAML` はこの綴りを正しく読む＝実測で
+# 鍵は `name` / `secrets` / `runs-on` の 3 つ）。
+# **短縮形のタグでも同じ隠し方ができてはならない**ので、`!!str` の形も並べて固定する
+for verbatim_tag_case in \
+    "逐語タグに区切りを含む:!<tag:x,2002:str>" \
+    "逐語タグに閉じ括弧を含む:!<tag:x}2002:str>" \
+    "短縮形のタグ:!!str"
+do
+    assert_privilege_classification privileged "secrets: inherit hidden behind a node property (${verbatim_tag_case%%:*})" \
+"name: X
+permissions:
+  contents: read
+jobs:
+  j: {name: ${verbatim_tag_case#*:} \"a #b\", secrets: inherit, runs-on: ubuntu-latest, steps: [{uses: actions/checkout@v7}]}"
+done
+
 # ジョブ単位でだけ書き込みを与える形（ワークフロー全体の宣言は読み取り専用）
 assert_privilege_classification privileged 'job-level write under a read-only workflow default' \
 'name: X
