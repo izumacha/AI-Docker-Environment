@@ -661,6 +661,18 @@ jobs:
 # （`PyYAML` は名前 `!x,` ＋ 値 `bash <スイート>` と読むが、**GitHub の解析器は PyYAML ではない**
 # ——確かめられない綴りで「ゲートしている」と言わない側へ倒す＝fail-closed。
 # このピンは `CI_WORKFLOW_PROP_STOP_CHARS` から `,` を外す変異で落ちる）
+# 同じく締めすぎない側。**逐語タグの中身に空白と二重引用符は含めない**（YAML の `ns-uri-char`）。
+# 含む綴りは `PyYAML` も受け付けない（`ScannerError`）ので、値として読むと
+# **走るか確かめられない綴りで「ゲートしている」と言い出す**（レビュー指摘。この差分の
+# 最初の版が `[^>]+` と書いていて実際にそうなっていた＝実測で `main` は not-wired）
+assert_not_wired "逐語タグの中身に二重引用符を含む綴りは値として読まない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: !<a\"b> bash ${SUITE_PATH}"
+
 assert_not_wired "短縮形のタグの名前に区切りを含む綴りは値として読まない" "name: ci
 jobs:
   type-check:
@@ -7443,6 +7455,8 @@ jobs:
       - name: "say \"hi\""
       - name: '"'"'don'"'"''"'"'t'"'"'
       - {"name":"e, f", "uses": ./local}
+      - {name: !<a'"'"'b> x, uses: ./local}
+      - {name: &anchor "h, i", uses: ./local}
       - name: "unclosed, g'
 printf '%s\n' "${quote_free_body}" > "${TMP_DIR}/quote-free.yml"
 # **まず出力を受け取ってから判定する。** `| grep -q` に直接つなぐと、解析器が壊れて 1 行も
