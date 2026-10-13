@@ -3100,6 +3100,18 @@ jobs:
             bash ${SUITE_PATH}
           fi"
 
+# **`!` を重ねると打ち消し合う。** `STRUCT_INVERTED` を「1 を代入する掛け金」にすると
+# `! ! if true; then <呼び出し>; fi` を「反転されている」と読み、実 bash では伝わる失敗を
+# 「伝わらない」と判定する（fail-closed。実測で `main` は `not-wired`・実 bash は GATES）
+assert_wired "! を重ねた if true の本体は実行の証拠になる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ! ! if true; then bash ${SUITE_PATH}; fi"
+
 # **締めすぎない側**: `!` の無い `time` は今までどおり証拠になること（`STRUCT_INVERTED` を
 # 「飾りが 1 つでも剥がれたか」にすると、計測するだけの `time` まで巻き込んで
 # 正しくゲートしている呼び出しが実行の証拠から外れる）
@@ -3403,7 +3415,9 @@ for arm_close_case in \
     "部分シェルの中:f() { ( case ${DOLLAR}X in a) :;; esac ; bash ${SUITE_PATH} ) }" \
     "部分シェルが外:( f() { case ${DOLLAR}X in a) :;; esac ; bash ${SUITE_PATH}; } )" \
     "呼び出しあり:f() { ( case ${DOLLAR}X in a) :;; esac ; bash ${SUITE_PATH} ) }
-          f"
+          f" \
+    "空白なしの開き:f() { (case ${DOLLAR}X in a) :;; esac ; bash ${SUITE_PATH} ) }" \
+    "タブで開く:f() { (	case ${DOLLAR}X in a) :;; esac ; bash ${SUITE_PATH} ) }"
 do
     assert_not_wired "裸のアーム見出しと関数の本体（${arm_close_case%%:*}）" "name: ci
 jobs:

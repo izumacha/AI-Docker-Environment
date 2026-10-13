@@ -1552,16 +1552,29 @@ ci_workflow_extract() {
         # 落として「命令の位置」を返すので、先頭の `(` まで消えて階層の数え方が割れる。
         # ここで落とすのは**閉じる `)` の 1 文字だけ**で、桁も開きもそのまま残る。
         # **POSIX の綴り（`(a)`）は触らない**——開閉が揃っているので釣り合いは崩れていない。
-        # **残る境界**: 同じ断片に裸の見出しが 2 つ以上並ぶ形（`( case $X in a) case $Y in b)`）は
-        # 1 つしか外さない。足りない側＝上限が小さい側は fail-closed（幻の階層が開かず
-        # 呼び出しが「未配線」に化ける）なので、迷ったらこの向きに倒す
-        function drop_arm_head_close(t,   masked, head, at) {
+        # **外すのは 1 つだけ**（`match()` は最初の見出ししか見ない）。ここに
+        # 「足りない側＝上限が小さい側は fail-closed なので迷ったらその向きへ」と書いてあったのは
+        # **誤りだった**（レビューで実測）——`f() { ( case $X in a) case $Y in b) : ;; esac ;; esac ; bash x ) }`
+        # は `wired` のままで、向きは塞ぎたかった fail-open そのもの。
+        # **ただし全部外す形に広げても、その綴りは `wired` のままだった**（実測）。原因は釣り合いではなく
+        # 「1 つの断片が開く `case` を 1 つしか分類しない」ことで、`;;` が断片を切る以上
+        # **裸の見出しが 2 つ並ぶのは `case X in a) case Y in b)` という入れ子の形しかなく、
+        # そこは必ずそちらの欠陥に当たる**（＝全部外す形は判定を 1 件も変えない）。
+        # 何も変えない仕掛けは「守られている」という誤解を生むので入れず、issue #154 で追う。
+        # **「外し足りない側は安全」とも書き戻さないこと。**
+        function drop_arm_head_close(t,   masked, head, at, kw) {
             masked = mask_quoted(t)
             # 見つからなければ触らない（釣り合いは生のまま＝これまでの挙動）
             if (!match(masked, arm_head_in_search_re())) { return t }
-            # **`RSTART` / `RLENGTH` は読んだ直後に控える**（後続の `index()` で壊れうる）
+            # **`RSTART` / `RLENGTH` は読んだ直後に控える**（後続の `substr()` / `index()` で壊れうる）
             at = RSTART + RLENGTH - 1
-            head = substr(masked, RSTART, RLENGTH)
+            kw = RSTART
+            # **探す綴りは `case` の手前の 1 文字（行頭・空白・`(`）も取り込む。**
+            # その 1 文字は見出しの一部ではないので、含めたまま `(` を探すと
+            # `(case $X in a)`（`(` と `case` のあいだに空白が無い形。bash では有効）が
+            # **POSIX の綴りと誤判定され**、issue #145 の fail-open がそのまま残る（レビューで実測）
+            if (substr(masked, kw, 4) != "case") { kw++ }
+            head = substr(masked, kw, at - kw + 1)
             # `(` を含む＝POSIX の綴りなので釣り合いは崩れていない
             if (index(head, "(") > 0) { return t }
             # 見出しを閉じる `)` の 1 文字だけを落とす（長さ以外は変えない）
@@ -1792,7 +1805,11 @@ ci_workflow_extract() {
                 # `time` は計測するだけで、後ろの制御構造はそのまま走る
                 if (sub(/^time[[:space:]]+(-p[[:space:]]+)?/, "", probe)) { continue }
                 # `!` は終了状態を反転するだけで、本体が走るかは変えない
-                if (sub(/^![[:space:]]+/, "", probe)) { STRUCT_INVERTED = 1; continue }
+                # **重ねた `!` は打ち消し合う**ので真偽を反転する（`1` を代入して掛け金に
+                # すると `! ! if true; then <呼び出し>; fi` を「反転されている」と読み、
+                # 実際には伝わる失敗を「伝わらない」と判定する——倒れる向きは fail-closed だが、
+                # このコメント自身が「`!` は終了状態を**反転**する」と書いているとおり偶奇の話）
+                if (sub(/^![[:space:]]+/, "", probe)) { STRUCT_INVERTED = !STRUCT_INVERTED; continue }
                 break
             }
             return probe
@@ -2736,10 +2753,15 @@ ci_workflow_extract() {
                         # そこへ継続語を剥がした本文を控えると、**1 度も走らない本体が
                         # 「最上位で確実に走る」**として記録される:
                         #     ( if false; then bash x; fi )   → 「配線されている」
-                        # 剥がさなければ `then bash x` のまま当たらないので、生の本文が受け皿になっている。
-                        # `CI_WORKFLOW_COMMAND_START` の説明にある「条件やループの本体に置いた
-                        # 呼び出しがゲートになるかは、その本体が何をするかを読まないと決まらない
-                        # ——読めない以上は主張しない（fail-closed）」は、この受け皿のことでもある。
+                        # 剥がさなければ `then bash x` のまま当たらない——**ただしそれが受け皿だったのは
+                        # issue #123 (3) までで、`ci_workflow_runs_script` の錨が継続語を許した時点で
+                        # この受け皿は消えた**（`CI_WORKFLOW_BLOCK_BODY_START` は `then ` / `do ` /
+                        # `else ` を許す）。いま畳んだ本体を止めているのは `uncertain` と `dead_depth`
+                        # の勘定だけで、**「生の本文なら当たらないから安全」と書き戻さないこと。**
+                        # なお `CI_WORKFLOW_COMMAND_START` の説明にあった同趣旨の一文は
+                        # issue #123 (3) で消えているので、そこを参照先にしないこと（いまの正本は
+                        # `CI_WORKFLOW_BLOCK_BODY_START` の説明と `test/ci_coverage_test.sh` の
+                        # 「錨は網ごとに選び分ける」）。
                         #
                         # **上の 4 形は開き側が読めるようになった**（issue #114 のレビュー）。
                         # `time` / `!` は `open_form()` が `strip_struct_wrappers()` を
@@ -2750,7 +2772,9 @@ ci_workflow_extract() {
                         # それでも**ここで控えるのは生の本文のまま**にする——`struct_text` を控えると
                         # 「0 回まわるループの中の呼び出し」まで最上位の実行として記録され、
                         # そちらは条件を読まずに判断できない（`for f in $EMPTY; do bash x; done`）。
-                        # つまり受け皿の役目は「死に体の除去」から「回数の分からない本体の除去」へ移った
+                        # つまりここで生の本文を控える理由は「死に体の除去」から
+                        # 「回数の分からない本体を `struct_text` 経由で持ち上げないこと」へ移った
+                        # （錨が継続語を許すようになったので、受け皿としての働きはもう無い）
                         buf[nbuf] = step_id "\t" ops[j] "\t" ((dead_depth >= 0 || unreachable) ? 0 : errexit) "\t" pipefail "\t" uncertain "\t" text
                         # 偽と分かる条件のブロックに入るところを覚える（この深さより深い間は無効）
                         # **連鎖が続くなら条件は 1 語だけではない。** `split_commands` は `&&` / `||` で
@@ -2915,7 +2939,10 @@ ci_workflow_extract() {
                             # ジョブは緑のまま終わる（`! if true; then bash <suite>; fi` を実 bash で
                             # 測ると rc=0）。この行は `open_form()` の**直後**に置くのが要点で、
                             # `STRUCT_INVERTED` はそこで通した `strip_struct_wrappers()` の結果
-                            # （以降で別の断片を剥がすと上書きされる）
+                            # （以降で別の断片を剥がすと上書きされる）。
+                            # **ここに到達するのは `open_form()` が種類を返した形だけ**で、
+                            # `! { … }` / `! ( … )` は階層を 1 つも開かないので**そもそも通らない**
+                            # （`main` から続く fail-open。issue #155 で追う）
                             inverted = STRUCT_INVERTED
                             # 必ず走る条件（`if true` / `while true`）。**連鎖に守られていればその限りではない**
                             # ——`split_commands` は `&&` で切るので `if true && [ -z "$SKIP" ]; then` の
