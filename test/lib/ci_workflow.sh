@@ -1478,8 +1478,8 @@ ci_workflow_extract() {
         # `(` を越える → 繰り返す）ので、同じ族がまとめて閉じる。
         # **控えるのは「最後に越えた部分シェル」の深さ**で、歩き終わりの深さではない
         # ——`( { set +e` は部分シェルが `+1`・ブレースが `+2` で、`set` が属するのは前者
-        function set_open_depth(t, cached_fn_form, use_cached,   n, k, probe, rest, cap, leadn, sub_at, lead_stripped) {
-            probe = t; n = 0; leadn = 0; sub_at = 0
+        function set_open_depth(t, cached_fn_form, use_cached,   n, k, probe, rest, cap, leadn, sub_at, lead_stripped, fnd) {
+            probe = t; n = 0; leadn = 0; sub_at = 0; fnd = 0
             # **上限はループの外で 1 度だけ求める**（`t` は変わらないので値は同じ）。
             # 兄弟の 2 つ（`last_deciding_open()` / `walk_opens_case()`）も同じ形で、
             # ここだけ中で呼ぶと開きが 1 つ増えるたびに断片全体の走査が 1 回増え、
@@ -1540,6 +1540,18 @@ ci_workflow_extract() {
                 if (k == 1) { break }
                 # ブレースと関数の本体は中で走る
                 n++
+                # **越えた関数定義の数を控える**（issue #189 のレビュー）。命令の位置が
+                # 定義の**本文**にあるかは `in_fndef_here` では分からない——あれは
+                # `function_form(struct_text)` 由来で `^` 錨なので、`( f() { exit 0` の
+                # ように手前に `(` が付くと定義を見られず 0 を返す。数えずに済ませると
+                # 「定義しただけの `exit`」を最上位の脱出として扱い、**呼んでいない関数の
+                # 本文のせいでその部分シェルの残りが死に体になる**（実測で真値 GATES なのに
+                # not-wired ＝正しくゲートしているスイートを赤くする fail-closed）
+                # **越えた関数定義は「何番目の階層か」も控える**（issue #189 のレビュー）。
+                # 部分シェルを越えた位置（`sub_at`）と比べて、その部分シェルが定義の
+                # **外**か**本文の中**かを呼び出し側が区別できるようにする
+                # （`( f() { exit 0` は外・`f() { ( exit 0` は中で、答えが逆になる）
+                if (k == 3) { fnd++; SET_OPEN_FNNAME = function_name(probe); SET_OPEN_FNAT = n }
                 rest = open_rest(probe, k)
                 if (rest == probe) { break }
                 probe = rest
@@ -1547,6 +1559,9 @@ ci_workflow_extract() {
             # **歩き終わった位置と越えた部分シェルを控える**（issue #187。上の説明）
             SET_OPEN_REST = probe
             SET_OPEN_SUB = sub_at
+            SET_OPEN_FNDEF = fnd
+            # 越えた定義が 1 つも無ければ名前と位置は持ち越さない（前の断片の値が残らないように）
+            if (fnd == 0) { SET_OPEN_FNNAME = ""; SET_OPEN_FNAT = 0 }
             return n
         }
 
@@ -2356,7 +2371,7 @@ ci_workflow_extract() {
         # **ここでは出力しない**のが要点で、ジョブ単位の無効化キー（`if: false` 等）は
         # YAML のキー順が自由である以上 `steps:` の**後ろ**にも書ける。書いた時点で
         # 出力済みのステップは取り消せないため、ジョブ 1 つ分を溜めてから出す
-        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_open_n, set_crossed_sub, set_sub, set_res_at, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, closed_any, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fnexit, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, closed_subshell, closed_uncertain, chain_in, inverted, arm_masked, arm_at, arm_expected, case_scope, opens_case, opens_case_here, case_opens_at, close_probe, close_rest, close_first, open_head, esac_probe, esac_rest, esac_first, dead_probe, dead_lead, close_n, exit_seen, chain_at, chain_depth, closed_sub_seen, closed_sub_e, closed_sub_p, sub_rec, sub_rec_level, prom_rec, sub_id, carry_level, open_stripped, head_inverted, inverted_at, closed_inverted, prop_op, sub_serial, prom_list, nprom, pi, closed_sub_and, sub_and_at, seg_prev_op, depth_in, cmd_rest, cmd_sub, esc_probe, esc_sub, esc_lead, fn_lead, call_sub, exit_here, exit_sub) {
+        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_open_n, set_crossed_sub, set_sub, set_res_at, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, closed_any, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fnexit, fnret, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, closed_subshell, closed_uncertain, chain_in, inverted, arm_masked, arm_at, arm_expected, case_scope, opens_case, opens_case_here, case_opens_at, close_probe, close_rest, close_first, open_head, esac_probe, esac_rest, esac_first, dead_probe, dead_lead, close_n, exit_seen, chain_at, chain_depth, closed_sub_seen, closed_sub_e, closed_sub_p, sub_rec, sub_rec_level, prom_rec, sub_id, carry_level, open_stripped, head_inverted, inverted_at, closed_inverted, prop_op, sub_serial, prom_list, nprom, pi, closed_sub_and, sub_and_at, seg_prev_op, depth_in, cmd_rest, cmd_sub, cmd_fndef, cmd_fnname, cmd_fnat, fn_name_here, esc_probe, esc_sub, esc_lead, fn_lead, call_sub, exit_here, exit_sub) {
             # **シェルのオプションはステップごとにリセットする。** ステップは 1 つずつ
             # 別のシェルで走るので、前のステップの `set +e` / `pipefail` は引き継がれない。
             # **控えるのは `set` で明示された分だけ（-1 = 明示なし）。** シェルの既定と突き合わせるのは
@@ -2663,6 +2678,8 @@ ci_workflow_extract() {
                             # 古い記録が勝ち、**正しくゲートしているスイートを「未配線」と
                             # 誤報**して required なジョブを赤くする（向きが逆の fail-closed）
                             fnexit[fndef_name_here] = 0
+                            # 手前の `return` の控えも同じところで消す（同じ理由）
+                            fnret[fndef_name_here] = 0
                         }
                         # 本文の先頭に立ちうる語を**繰り返し**剥がす（`then { set +e; }` のように
                         # 入れ子になるため 1 つでは足りない）。**ここで剥がす一覧には `if` /
@@ -2708,6 +2725,9 @@ ci_workflow_extract() {
                         # 部分シェルの深さを下の呼び出しの追跡（そこから脱出の判定）へ渡す
                         cmd_rest = ""
                         cmd_sub = 0
+                        cmd_fndef = 0
+                        cmd_fnname = ""
+                        cmd_fnat = 0
                         # **脱出の適用は 1 か所に寄せる**（issue #189）。素の `exit` と
                         # 「無条件に `exit` する関数の呼び出し」は区間の付け方がまったく同じなので、
                         # 見つけた側は旗を立てるだけにして、**死に体の印を解除したあと**で 1 度だけ
@@ -2717,6 +2737,13 @@ ci_workflow_extract() {
                         exit_sub = 0
                         if (set_probe == "" && index(struct_text, "(") > 0) {
                             set_open_n = set_open_depth(open_head, fn_form, (open_head == struct_text))
+                            # **越えた関数定義の数と名前は部分シェルを越えたかに関わらず控える。**
+                            # `SET_OPEN_SUB > 0` の中に置くと、部分シェルを含まない綴り
+                            # （`outer() { inner() { exit 0` ）で 1 件も控えられず、入れ子の
+                            # 脱出が外側の名前で台帳へ入る（実測）
+                            cmd_fndef = SET_OPEN_FNDEF
+                            cmd_fnname = SET_OPEN_FNNAME
+                            cmd_fnat = SET_OPEN_FNAT
                             # **越えた部分シェルがあるときだけ覗く。** 越えていないなら
                             # `set_command(struct_text)` が既に同じ綴りを見ているので二度は見ない
                             if (SET_OPEN_SUB > 0) {
@@ -3705,6 +3732,20 @@ ci_workflow_extract() {
                         # いるスイートを赤くする fail-closed。実測で `main` は wired）
                         esc_probe = call_probe
                         esc_sub = call_sub
+                        # **本文の手前に `return` があれば、そのあとの `exit` は無条件ではない**
+                        # （issue #189 のレビュー）。`f() { [ -z "$X" ] && return 0; exit 1; }` は
+                        # X が未設定なら戻るので、呼んだあともスイートは走って失敗が伝わる
+                        # （実測 GATES）。それでも台帳へ控えると以降の最上位の記録がすべて
+                        # gate 0 になり、**正しくゲートしているステップを「未配線」と誤報**する。
+                        # **条件付きの `return` も数える**のが要点——`uncertain` / `subshell` の
+                        # 門番は「その `exit` の時点で開いている階層」しか見ず、手前で起きた
+                        # 脱出を 1 つも覚えないので、ガード節（CI スクリプトの定型句）がそのまま
+                        # 穴になる。`&&` で入った断片は下の脱出のアームが除くため、ここは
+                        # アームより手前に置いて区切りを問わず控える
+                        if (in_fndef_here && !unreachable && dead_depth < 0 \
+                            && fndef_name_here != "" && esc_probe ~ /^return([[:space:]]|$)/) {
+                            fnret[fndef_name_here] = 1
+                        }
                         if (!set_forked && !unreachable && !opens_case_here && dead_depth < 0 \
                             && prev_op != "&&" && prev_op != "||" \
                             && esc_probe ~ /^(exit|break|continue|return)([[:space:]]+[^[:space:]]+)?[[:space:]]*$/) {
@@ -3727,7 +3768,12 @@ ci_workflow_extract() {
                                 # 実 `bash -e` では 1 行も走らないのに `wired` だった。
                                 # 隣のアーム（`break` / `continue` / `return`）が既に正しい形を
                                 # 持っているので、同じ「階層を限った `dead_depth`」へそろえる
-                                if (uncertain == 0 && chain_depth == 0 && !in_fndef_here) {
+                                # **歩きが関数定義を越えていたら、この `exit` は本文の中**
+                                # （issue #189 のレビュー）。`in_fndef_here` は `^` 錨の
+                                # `function_form()` 由来なので `( f() { exit 0` を定義と読めず、
+                                # 定義しただけの本文の脱出でその部分シェルの残りを死に体に
+                                # していた（実測で真値 GATES なのに not-wired）
+                                if (uncertain == 0 && chain_depth == 0 && !in_fndef_here && cmd_fndef == 0) {
                                     # 旗だけ立てて、下の 1 か所（呼び出し側と共通）で適用する
                                     exit_here = 1
                                     exit_sub = esc_sub
@@ -3752,8 +3798,32 @@ ci_workflow_extract() {
                                 # **本体の階層は `fn_body_depth` と同じ求め方にする**——定義を開く
                                 # 断片では階層が増えるのが断片の末尾なので、素の `depth` で測ると
                                 # 1 つ浅くなり、部分シェルの中で定義した綴りの判定が狂う
-                                else if (in_fndef_here && chain_depth == 0 && esc_sub == 0 \
-                                         && !opens_case_here) {
+                                # **越えた定義が 2 つ以上なら控えない**（issue #189 のレビュー）。
+                                # 1 行に畳んだ入れ子（`outer() { inner() { exit 0; }; }`）では
+                                # `function_body_rest()` が見出しをまとめて落とすので命令の位置が
+                                # `exit 0` になる一方、`fndef_name_here` は**いちばん外側**の名前
+                                # ——`fnexit["outer"]` が立ち、`outer` を呼んだだけで以降が死に体に
+                                # なる（実測で真値 GATES なのに not-wired）。複数行で書いた同じ
+                                # 入れ子は `fndef_at` の歩きで内側に紐づくので正しい。
+                                # ブレースを挟む綴り（`f() { { exit 0`）も 2 以上にはならないが、
+                                # **控えない側へ倒れる綴りがある**ことは残る境界として記録する
+                                # **名前は「この脱出を含む定義」から取る。** `in_fndef_here` が
+                                # 偽でも、歩きが定義を 1 つ越えていればその本文の中にいる
+                                # （`( f() { exit 0` ）。歩きが控えた名前を使えば、部分シェルの
+                                # 後ろで定義した関数も呼び出し側で引ける——ここを `in_fndef_here`
+                                # だけに頼ると、`( f() { exit 0; }` ＋ `f` の呼び出しが
+                                # 台帳に無く「スイートは必ず走る」と記録される（fail-open）
+                                # **部分シェルを越えたかどうかではなく、それが定義の外か中かで分ける。**
+                                # `esc_sub == 0` だけを条件にしていた版では `( f() { exit 0` が
+                                # 控えられず、`( f() { exit 0; }` ＋ `f` の呼び出しが「スイートは
+                                # 必ず走る」と記録された（実測で真値 NOGATE なのに wired）。
+                                # 越えた部分シェルの位置が定義より**手前**なら本文の中の脱出
+                                # （控える）、**後ろ**なら部分シェルの中の脱出（控えない）
+                                else if (chain_depth == 0 && !opens_case_here \
+                                         && (esc_sub == 0 || (cmd_fndef == 1 && esc_sub < cmd_fnat)) \
+                                         && cmd_fndef <= 1 && (in_fndef_here || cmd_fndef == 1) \
+                                         && !fnret[in_fndef_here ? fndef_name_here : cmd_fnname]) {
+                                    fn_name_here = in_fndef_here ? fndef_name_here : cmd_fnname
                                     fn_lead = (fn_form == 2 || was_pending_fndef) \
                                               ? depth + last_deciding_open(open_head, fn_form, (open_head == struct_text), was_pending_fndef) \
                                               : innermost_marked_depth(depth, fndef_at)
@@ -3764,7 +3834,7 @@ ci_workflow_extract() {
                                     # 本体より内側の部分シェルの中の脱出も控えない（親は終わらない）
                                     if (innermost_marked_depth(depth, uncertain_at) <= fn_lead \
                                         && innermost_marked_depth(depth, subshell_at) <= fn_lead \
-                                        && fndef_name_here != "") { fnexit[fndef_name_here] = 1 }
+                                        && fn_name_here != "") { fnexit[fn_name_here] = 1 }
                                 }
                             }
                             # `break` / `continue` / `return` はいちばん内側の階層を抜けるので、

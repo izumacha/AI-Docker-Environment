@@ -2829,6 +2829,42 @@ jobs:
           bash ${SUITE_PATH}"
 done
 
+# **「定義しただけ」「無条件ではない」脱出は台帳へ入れない**（issue #189 のレビューで見つけた
+# 4 形。どれもこの差分が一度入れた fail-closed で、`main` は正しく wired と答えていた）。
+# 本文は全文を与える（スイートが部分シェルの中にある形があるため、上の 2 ループのように
+# 末尾へ足す形にできない）
+for exit_not_unconditional_case in \
+    "部分シェルの後ろで定義だけして呼ばない:( f() { exit 0; }
+          bash ${SUITE_PATH} )" \
+    "部分シェルの後ろの function 見出しで定義だけする:( function f { exit 0; }
+          bash ${SUITE_PATH} )" \
+    "本文の手前に条件付きの return:f() { [ -z \"${DOLLAR}X\" ] && return 0
+            exit 1
+          }
+          f
+          bash ${SUITE_PATH}" \
+    "本文の手前に if の return:f() { if [ -z \"${DOLLAR}X\" ]; then return 0; fi
+            exit 1
+          }
+          f
+          bash ${SUITE_PATH}" \
+    "1 行で return のあとに exit:f() { return 0; exit 1; }
+          f
+          bash ${SUITE_PATH}" \
+    "1 行に畳んだ入れ子の定義:outer() { inner() { exit 0; }; }
+          outer
+          bash ${SUITE_PATH}"
+do
+    assert_wired "無条件でない脱出（${exit_not_unconditional_case%%:*}）は台帳へ入れない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${exit_not_unconditional_case#*:}"
+done
+
 # **弱める関数の反映は部分シェルの中では見送る**（issue #189 の配線）。呼び出しの名前を
 # 取り出す門番から `subshell == 0` を外した（無条件に `exit` する関数はその部分シェルを
 # 終わらせるので、部分シェルの中でも名前を引く必要がある）ぶん、**弱めを反映する側では
@@ -2838,7 +2874,9 @@ done
 for subshell_weaken_case in \
     "部分シェルの中で呼ぶ:( quiet; bash ${SUITE_PATH} )" \
     "部分シェルの中で呼び、後ろに別のコマンド:( quiet; bash ${SUITE_PATH} )
-          echo done"
+          echo done" \
+    "部分シェルの中で呼び、スイートは外:( quiet )
+          bash ${SUITE_PATH}"
 do
     assert_wired "弱める関数を部分シェルの中で呼んでも中の失敗は伝わる（${subshell_weaken_case%%:*}）" "name: ci
 jobs:
