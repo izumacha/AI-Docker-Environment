@@ -4065,7 +4065,29 @@ for lead_sub_set_case in \
     "一行:( set +e; bash ${SUITE_PATH}; echo done )" \
     "二重の部分シェル:( ( set +e
           bash ${SUITE_PATH}
-          echo done ) )"
+          echo done ) )" \
+    "ブレースの前置き:{ ( set +e
+          bash ${SUITE_PATH}
+          echo done )
+          }" \
+    "time の前置き:time ( set +e
+          bash ${SUITE_PATH}
+          echo done )" \
+    "ブレースと time:{ time ( set +e
+          bash ${SUITE_PATH}
+          echo done )
+          }" \
+    "time とブレース:time { ( set +e
+          bash ${SUITE_PATH}
+          echo done ) ; }" \
+    "入れ子のブレース:{ { ( set +e
+          bash ${SUITE_PATH}
+          echo done ) } }" \
+    "ブレースの前置きと二重の部分シェル:{ ( ( set +e
+          bash ${SUITE_PATH}
+          echo done ) )
+          }" \
+    "ブレースの前置きと一行:{ ( set +e; bash ${SUITE_PATH}; echo done ) ; }"
 do
     assert_not_wired "開き括弧と同じ断片の set +e を読む（${lead_sub_set_case%%:*}）" "name: ci
 jobs:
@@ -4081,6 +4103,35 @@ done
 # 階層ごとの連番（`sub_id`）は開き側のループで振られ、それはこの `set` の処理より
 # **後ろ**なので、素直に読むと親の番号になり同じ部分シェルの中の `set -e` が
 # 打ち消せない（実 `bash -e` は GATES なのに `not-wired`＝正しくゲートする綴りを赤くする）
+# **前置きの後ろでも打ち消せる**（issue #187）。覗きを広げるだけで予約の宛先を直さないと、
+# `{ ( set +e` の握り潰しが**ブレースの階層**へ結び付き、同じ部分シェルの中の `set -e` が
+# 打ち消せなくなる（wired → not-wired。正しくゲートする綴りを赤くする向きで、
+# issue #187 がレビューの実測として記録している退行）。実 `bash -e` はどちらも GATES
+for lead_sub_cancel_case in \
+    "ブレースの前置き:{ ( set +e
+          set -e
+          bash ${SUITE_PATH}
+          echo done )
+          }" \
+    "time の前置き:time ( set +e
+          set -e
+          bash ${SUITE_PATH}
+          echo done )" \
+    "入れ子のブレース:{ { ( set +e
+          set -e
+          bash ${SUITE_PATH}
+          echo done ) } }"
+do
+    assert_wired "前置きの後ろの set +e も中の set -e で戻せる（${lead_sub_cancel_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${lead_sub_cancel_case#*:}"
+done
+
 assert_wired "開き括弧と同じ断片の set +e は中の set -e で戻せる" "name: ci
 jobs:
   type-check:
@@ -4944,6 +4995,55 @@ jobs:
           f() { { set +e; set -e; }; }
           f
           bash ${SUITE_PATH}"
+
+# **部分シェルを越えて見つけた握り潰しは「関数が弱める」として控えない**（issue #187）。
+# `f() { ( set +e; : ); }` の `set +e` は部分シェルと一緒に消えるので、呼び出し元の
+# errexit は立ったまま——控えると「この関数は弱める」と記録され、呼び出しより後ろの
+# スイートが**まるごと未配線**と報告される（真値 GATES なのに not-wired。正しくゲート
+# する綴りを赤くする）。実 `bash -e` は下の 7 形すべて GATES
+for fn_sub_set_case in \
+    "一行:f() { ( set +e; : ); }" \
+    "見出しが別行:f()
+          { ( set +e; : ); }" \
+    "function の綴り:function f { ( set +e; : ); }" \
+    "time の前置き:f() { time ( set +e; : ); }" \
+    "二重の部分シェル:f() { ( ( set +e; : ) ); }" \
+    "ブレース挟み:f() { { ( set +e; : ); }; }" \
+    "入れ子の定義:g() { f() { ( set +e; : ); }; }
+          g" \
+    "本文が複数行:f() {
+          ( set +e
+          :
+          )
+          }" \
+    "長い綴り:f() { ( set +o errexit; : ); }" \
+    "長い綴りの pipefail:f() { ( set +o pipefail; : ); }"
+do
+    assert_wired "部分シェルの中の set +e は関数の台帳へ載せない（${fn_sub_set_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${fn_sub_set_case#*:}
+          f
+          bash ${SUITE_PATH}
+          echo tail"
+done
+
+# 向きの対: 本文の素の `set +e` は（部分シェルの中ではないので）従来どおり台帳へ載る
+assert_not_wired "本文の素の set +e は呼べば効く（部分シェルを越えた分と区別する）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          f() { set +e; }
+          f
+          bash ${SUITE_PATH}
+          echo tail"
 
 # 台帳の名前は「`set` を探す側がどの名前に帰属させるか」に合わせる。断片の先頭が
 # 定義でないとき（`{ f() { …`）まで外側の名前へ寄せると名無しになり、
