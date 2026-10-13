@@ -3012,7 +3012,14 @@ ci_workflow_extract() {
                         # （実測で、この条件を足しても外しても 602 件すべて緑＝何も変えない門番だった。
                         #  何も変えない仕掛けは保護に見えるので置かない）。`break` 側は自前で持つ。
                         # 結び付きが崩れたら `偽と分かるブロックの中の exit` の対が落ちる
-                        if (!set_forked && !unreachable \
+                        # **1 行に畳んだ `case` のアームの中も数えない**（`opens_case_here`）
+                        # ——`case $X in a) exit 1 ;; esac` では `case` の階層が**この断片の
+                        # 末尾**で開くので、判定の時点では `uncertain` がまだ 0 で上の門番を
+                        # すり抜ける。模様が当たるかは主語と照合しないと決まらない（issue #147）
+                        # ので、ここで数えると**実際にはゲートしているスイートを「未配線」と
+                        # 報告**する（レビューで実測。複数行に分けた同じ綴りは `case` の階層が
+                        # 先に開くので `uncertain` が立ち、以前から正しく除かれていた）
+                        if (!set_forked && !unreachable && !opens_case_here \
                             && prev_op != "&&" && prev_op != "||" \
                             && call_probe ~ /^(exit|break|continue|return)([[:space:]]+[^[:space:]]+)?[[:space:]]*$/) {
                             # `exit` はシェルごと終わるので、以降のすべての断片が到達不能。

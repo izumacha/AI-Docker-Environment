@@ -2630,6 +2630,7 @@ for reachable_after_exit_case in \
     "case のアームの中:case \"${DOLLAR}M\" in
             a) exit 0 ;;
           esac" \
+    "1 行に畳んだ case のアームの中:case \"${DOLLAR}M\" in a) exit 0 ;; esac" \
     "偽と分かるブロックの中:if false; then exit 1; fi" \
     "部分シェルの中:( exit 0 )" \
     "パイプの構成要素:exit 0 | cat" \
