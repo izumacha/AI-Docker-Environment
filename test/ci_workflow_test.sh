@@ -3454,6 +3454,53 @@ jobs:
             bash ${SUITE_PATH}
           fi"
 
+# **素のグループ（`( … )` / `{ … }`）に付いた `!` も同じ**（issue #155。`main` 既存の fail-open）。
+# `open_form()` のブレースの判定は剥がす前の綴りを見るので `! { … }` は何も開かず、
+# 先頭の `(` を越えるループも `^\(` を求めるので `! ( … )` では 1 度も回らない
+# ——どちらも階層が開かないので反転を見る行に**そもそも到達しなかった**。
+# **1 行に畳んだ `( … )` は閉じ括弧が呼び出しと同じ断片**なので、階層は記録より先に
+# 閉じる。閉じた階層が反転していたことを控えて記録へ載せる（`closed_inverted`）
+for bang_group_case in \
+    "ブレースグループ:! { : ; bash ${SUITE_PATH} ; }" \
+    "部分シェル:! ( : ; bash ${SUITE_PATH} )" \
+    "部分シェルの中にアーム見出し:! ( case \"${DOLLAR}X\" in a) :;; esac ; bash ${SUITE_PATH} )" \
+    "time と重ねたブレース:time ! { : ; bash ${SUITE_PATH} ; }" \
+    "ブレースの中の if true:! { if true; then bash ${SUITE_PATH}; fi; }" \
+    "部分シェルの中の if true:! ( if true; then bash ${SUITE_PATH}; fi )" \
+    "ブレースの中の部分シェル:! { : ; ( bash ${SUITE_PATH} ) ; }"
+do
+    assert_not_wired "! で反転した${bang_group_case%%:*}の中は実行の証拠にしない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${bang_group_case#*:}"
+done
+
+# **締めすぎない側。** `!` が付いていない素のグループは必ず走るので今までどおり証拠にする。
+# `time` だけの飾りも終了状態を通すので同じ（反転するのは `!` だけ）。
+# `!` の付いたグループを**抜けた後ろ**も、反転はそのグループの終了状態にしか掛からない
+for bang_group_live_case in \
+    "飾りなしのブレース:{ : ; bash ${SUITE_PATH} ; }" \
+    "飾りなしの部分シェル:( : ; bash ${SUITE_PATH} )" \
+    "time だけのブレース:time { : ; bash ${SUITE_PATH} ; }" \
+    "反転したブレースを抜けた後ろ:! { : ; }
+          bash ${SUITE_PATH}" \
+    "反転した部分シェルを抜けた後ろ:! ( : )
+          bash ${SUITE_PATH}"
+do
+    assert_wired "反転していないグループの中は証拠のまま（${bang_group_live_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${bang_group_live_case#*:}"
+done
+
 # **`!` を重ねると打ち消し合う。** `STRUCT_INVERTED` を「1 を代入する掛け金」にすると
 # `! ! if true; then <呼び出し>; fi` を「反転されている」と読み、実 bash では伝わる失敗を
 # 「伝わらない」と判定する（fail-closed。実測で `main` は `not-wired`・実 bash は GATES）
