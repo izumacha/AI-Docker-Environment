@@ -3020,7 +3020,10 @@ jobs:
 # 渡さないが広い錨を使う＝「`top` を渡さない照会はすべて狭い錨」ではない。
 # 選び分けの正本は `test/ci_coverage_test.sh` の「錨は網ごとに選び分ける」）。
 # 実 `bash -e`（末尾に成功する番兵を足して「失敗が中断させるか」を測る）を真値とした
-# 30 形の差分照合で、**7 形が改善し、新しい誤りは 0 形**だった
+# 30 形の差分照合で、**7 形が改善し、新しい誤りは 0 形**だった。
+# **その 30 形は「飾り」の軸を 1 つも含んでいない**ので、「新しい誤りは 0」を広い集合の
+# 結論として読まないこと——狙って当てた 15 形では `!` で反転された開き（下で閉じた）と
+# 複合コマンドを閉じた `fi` に付いた `&&`（issue #149 で追う）の 2 系統が出た
 for folded_certain_case in \
     "if true:if true; then bash ${SUITE_PATH}; fi" \
     "if コロン:if :; then bash ${SUITE_PATH}; fi" \
@@ -3061,6 +3064,54 @@ jobs:
           ${chain_guarded_case#*:}"
 done
 
+# **`!` で反転された `if true` / `while true` も「必ずゲートする」ではない**（レビューで実測）。
+# `open_form()` は `strip_struct_wrappers()` を通して分類するので `! if true; then` も
+# 「必ず走る」の種類になるが、`!` は終了状態を**反転**するので、本体が走って失敗しても
+# ジョブは緑のまま終わる（実 `bash -e` で `! if true; then bash <suite>; fi` は rc=0）。
+# ライブラリは `CI_WORKFLOW_COMMAND_PREFIXES` の説明で「`!` は入れない——あちらは終了状態を
+# 反転するので、本当にゲートしない」と宣言しているのに、**制御構造に付いた `!` だけが
+# その宣言から漏れていた**。1 行書きは錨を広げた時点で（issue #123 (3)）、複数行書きは
+# `main` の時点で `wired` になっていた（どちらも実測）。剥がしたかどうかは
+# `strip_struct_wrappers()` が `STRUCT_INVERTED` へ控える（綴りの一覧を呼び出し側へ写さない）。
+for bang_guarded_case in \
+    "1 行の if true:! if true; then bash ${SUITE_PATH}; fi" \
+    "1 行の while true:! while :; do bash ${SUITE_PATH}; break; done" \
+    "time と重ねた if true:! time if true; then bash ${SUITE_PATH}; fi" \
+    "time を手前に置いた if true:time ! if true; then bash ${SUITE_PATH}; fi"
+do
+    assert_not_wired "! で反転した${bang_guarded_case%%:*}の本体は実行の証拠にしない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${bang_guarded_case#*:}"
+done
+
+assert_not_wired "! で反転した if true の本体は実行の証拠にしない（複数行）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ! if true; then
+            bash ${SUITE_PATH}
+          fi"
+
+# **締めすぎない側**: `!` の無い `time` は今までどおり証拠になること（`STRUCT_INVERTED` を
+# 「飾りが 1 つでも剥がれたか」にすると、計測するだけの `time` まで巻き込んで
+# 正しくゲートしている呼び出しが実行の証拠から外れる）
+assert_wired "time を付けた if true の本体は実行の証拠になる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          time if true; then bash ${SUITE_PATH}; fi"
+
 # **アームの走査は丸括弧がいくつ並んでも必ず終わる**（issue #123 の補足で、到達不能だった
 # 「1 文字も進まないなら打ち切る」門番を外したことの対）。`match()` はどちらの選択肢も
 # `)` を 1 つ要求するので毎周必ず進むが、**止まらなければスイートが固まる**ので、
@@ -3080,9 +3131,15 @@ jobs:
           bash ${SUITE_PATH}"
 done
 
-# **締めすぎない側＝広げても開かないこと**（上と同じ 1 行書きで、実 bash では失敗が
-# 中断させない 5 形）。`top` の絞り込みが効いていることをここで固定する——
-# 錨だけを見て「継続語を許したら何でも通る」と読まないため
+# **締めすぎない側＝広げても開かないこと**（上と同じ 1 行書きで、**ライブラリには
+# 本体が走ると証明できない**形）。`top` の絞り込みが効いていることをここで固定する——
+# 錨だけを見て「継続語を許したら何でも通る」と読まないため。
+# **「実 bash では失敗が中断させない形」と書かないこと**——最後の 1 件
+# （連鎖に守られた `if true`）は `${DOLLAR}SKIP` が空なら**本体が走り、失敗はちゃんと
+# 中断させる**（実測で rc=1）。`assert_not_wired` が正しいのは「ライブラリが
+# `${DOLLAR}SKIP` を読めないので走ると主張しない」（fail-closed）からで、実 bash の
+# 挙動を理由にすると、将来条件を読めるようにした人がこの対を「本体は走らない」の
+# 根拠と読んで消しにかかる
 for folded_uncertain_case in \
     "0 回まわるループ:for i in ${DOLLAR}NEVERSET; do bash ${SUITE_PATH}; done" \
     "until true:until true; do bash ${SUITE_PATH}; done" \
@@ -3100,8 +3157,9 @@ jobs:
           ${folded_uncertain_case#*:}"
 done
 
-# 上の受け皿が外れると一斉に穴になる 4 形。**開き側が読めない語で始まる断片**の後ろの
-# 継続語を命令の位置として扱うと、走らない本体が最上位の実行として記録される
+# 上の受け皿が外れると一斉に穴になる形（**件数は書かない**——足すたびにこの数字だけが
+# 古くなる。実際 4 と書いたまま 5 件目が足されていた）。**開き側が読めない語で始まる断片**の
+# 後ろの継続語を命令の位置として扱うと、走らない本体が最上位の実行として記録される
 assert_not_wired "部分シェルの中の偽と分かる分岐の本体" "name: ci
 jobs:
   type-check:
@@ -3129,9 +3187,12 @@ jobs:
         run: |
           ( for f in a; do bash ${SUITE_PATH}; done )"
 
-# **上の 3 形は 1 行書きなので、受け皿（生の本文が `then` で始まり開始位置に当たらない）
-# でも止まる。** 複数行で書くと呼び出しの断片は素の `bash …` になるので、止めているのは
-# 深さの勘定だけになる——`open_form()` が `(` を読まないため、以前は `(` の後ろの
+# **上の 3 形も、止めているのは深さの勘定だけになった**（issue #123 (3) で
+# `ci_workflow_runs_script` の錨が継続語を許したため、生の本文が `then` で始まっても
+# 開始位置に当たる）。**「1 行書きなら受け皿でも止まる」と書かないこと**——この差分より前は
+# 二重の網だったが、いまはこの 3 形も複数行の綴りと同じく `dead_depth` / `uncertain` の
+# 1 枚だけで止まっている。複数行で書くと呼び出しの断片は素の `bash …` になるので、
+# もともと深さの勘定だけだった——`open_form()` が `(` を読まないため、以前は `(` の後ろの
 # 制御構造が**1 階層も開かないのに `fi` / `esac` だけが閉じていた**（issue #142 (3)）。
 # 実測では 3 形すべてが `main` で `wired`（＝条件次第でしか走らないスイートが
 # 「最上位で確実に走る」と報告される。1 文字で「最上位だけ」の絞り込みを迂回できた）

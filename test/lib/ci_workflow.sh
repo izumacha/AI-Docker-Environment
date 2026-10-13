@@ -103,7 +103,15 @@ CI_WORKFLOW_COMMAND_START="^[[:space:]]*${CI_WORKFLOW_GROUP_OPENERS}${CI_WORKFLO
 # 事実と逆の診断**になっていた（issue #123 (3)）。
 # 実 `bash -e`（末尾に成功する番兵を足して「失敗が中断させるか」を測る）を真値とした
 # 30 形の差分照合で、**7 形が改善し新しい誤りは 0 形**。対は `test/ci_workflow_test.sh` の
-# 「1 行の… の本体は実行の証拠になる / にしない」2 群（11 件）。
+# 「1 行の… の本体は実行の証拠になる / にしない」2 群。
+# **ただしこの 30 形は「飾り」の軸を 1 つも含んでいなかった**（レビューで実測）。狙って
+# 当てた 15 形では 2 系統の fail-open が見つかり、**`!` で反転された開き**はこの差分で閉じた
+# （下の `STRUCT_INVERTED`。複数行の綴りは `main` から開いていた既存の穴で、同時に閉じた）。
+# もう 1 系統＝**複合コマンドを閉じた `fi` に付いた `&&`** は閉じていない——あれは
+# 「ステップの最後のコマンドかどうかを見ない」という `main` からの判断がそのまま出たもので、
+# 素の `bash <スイート> && echo ok` と**まったく同じ振る舞い**（実測: どちらも最後の
+# コマンドなら GATES、後ろに 1 行あれば NOGATE）。位置を見る形へ直すのは別の差分（issue #149）。
+# **「新しい誤りは 0 形」を広い集合の結論として読まないこと。**
 # **`shellcheck` の網は引き続き `CI_WORKFLOW_COMMAND_START`**——あちらは `top` を
 # 渡さないので、錨を広げると 1 行書きの 0 回ループが配線に化ける（issue #146 に
 # 残っている穴が、より手軽な綴りで開く）。**`bash -n` の網はこちらを使う**
@@ -1717,14 +1725,22 @@ ci_workflow_extract() {
         # 落として「実際に走る命令」を返すので、ここで使うと**分類したい制御構造の語そのもの**が
         # 消える。ブレースグループ（`{ `）も落とさない——`open_form()` が階層として数える綴りで、
         # 剥がすと深さの勘定と食い違う
+        #
+        # **`!` を剥がしたかどうかは `STRUCT_INVERTED` へ控える**（`mask_quoted()` の
+        # `MASK_*` / `cross_lead_subshells()` の `LEAD_SUBSHELLS` と同じ、awk で
+        # 2 つ目の戻り値を返す形）。本体が走るかは変わらないが、**失敗がジョブへ伝わるかは
+        # 変わる**ので、「必ず走る」の印（`true_at`）を置く側がこれを見る必要がある。
+        # 呼び出し側で綴りを書き写して判定しないこと——この関数が剥がす綴りの唯一の源だから
         function strip_struct_wrappers(t,   probe) {
             probe = t
+            # 前の呼び出しの結果が残らないよう、毎回ここで戻す（fail-closed 側は 0）
+            STRUCT_INVERTED = 0
             # 剥がせるものが無くなるまで繰り返す（`! time if false` のように重なる）
             while (1) {
                 # `time` は計測するだけで、後ろの制御構造はそのまま走る
                 if (sub(/^time[[:space:]]+(-p[[:space:]]+)?/, "", probe)) { continue }
                 # `!` は終了状態を反転するだけで、本体が走るかは変えない
-                if (sub(/^![[:space:]]+/, "", probe)) { continue }
+                if (sub(/^![[:space:]]+/, "", probe)) { STRUCT_INVERTED = 1; continue }
                 break
             }
             return probe
@@ -1815,7 +1831,7 @@ ci_workflow_extract() {
         # **ここでは出力しない**のが要点で、ジョブ単位の無効化キー（`if: false` 等）は
         # YAML のキー順が自由である以上 `steps:` の**後ろ**にも書ける。書いた時点で
         # 出力済みのステップは取り消せないため、ジョブ 1 つ分を溜めてから出す
-        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, closed_any, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, closed_subshell, closed_uncertain, chain_in, arm_masked, arm_at, arm_expected, case_scope, opens_case, opens_case_here, case_opens_at, close_probe, close_rest, close_first, open_head, esac_probe, esac_rest, esac_first, dead_probe, dead_lead, close_n) {
+        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, closed_any, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, closed_subshell, closed_uncertain, chain_in, inverted, arm_masked, arm_at, arm_expected, case_scope, opens_case, opens_case_here, case_opens_at, close_probe, close_rest, close_first, open_head, esac_probe, esac_rest, esac_first, dead_probe, dead_lead, close_n) {
             # **シェルのオプションはステップごとにリセットする。** ステップは 1 つずつ
             # 別のシェルで走るので、前のステップの `set +e` / `pipefail` は引き継がれない。
             # **控えるのは `set` で明示された分だけ（-1 = 明示なし）。** シェルの既定と突き合わせるのは
@@ -2833,18 +2849,26 @@ ci_workflow_extract() {
                             # 片方の意味を変えたときに**別の本文に対する `fn_form`** を渡してしまう
                             # （`f() { { :; }` の内側の `{` を関数の本体と誤分類し、閉じない階層が残る）
                             open_kind = open_form(open_probe, fn_form, (open_probe == struct_text))
+                            # **`!` で反転された開きも「必ずゲートする」ではない。** `open_form()` は
+                            # `strip_struct_wrappers()` を通して分類するので `! if true; then` も
+                            # 種類 1 になるが、`!` は終了状態を**反転**するので本体が走って失敗しても
+                            # ジョブは緑のまま終わる（`! if true; then bash <suite>; fi` を実 bash で
+                            # 測ると rc=0）。この行は `open_form()` の**直後**に置くのが要点で、
+                            # `STRUCT_INVERTED` はそこで通した `strip_struct_wrappers()` の結果
+                            # （以降で別の断片を剥がすと上書きされる）
+                            inverted = STRUCT_INVERTED
                             # 必ず走る条件（`if true` / `while true`）。**連鎖に守られていればその限りではない**
                             # ——`split_commands` は `&&` で切るので `if true && [ -z "$SKIP" ]; then` の
                             # 断片は `if true` になる。素直に「必ず走る」と読むと、2 トークン足すだけで
                             # 走るとは限らない本体が「最上位で確実に走る」に化ける（fail-open。実測）
-                            if (open_kind == 1 && !chain_in && ops[j] != "&&" && ops[j] != "||") {
+                            if (open_kind == 1 && !chain_in && !inverted && ops[j] != "&&" && ops[j] != "||") {
                                 depth++; true_at[depth] = 1
                                 # **必ず走る入れ子なので grouping と同じ扱い。** 開始位置を控えないと、
                                 # 閉じた `fi` / `done` に付いた `|| true` が中身へ伝わらず、
                                 # 握り潰された実行が「ゲートしている」と読まれる
                                 group_start[depth] = nbuf
                             }
-                            # 走るか分からない制御構造（連鎖に守られた `if true` もここへ落ちる）
+                            # 走るか分からない制御構造（連鎖に守られた `if true` と、`!` で反転された `if true` もここへ落ちる）
                             else if (open_kind == 1 || open_kind == 2) {
                                 depth++; uncertain++; uncertain_at[depth] = 1
                                 # **`case` の入れ子はここで数える。** 断片の先頭とは限らない
@@ -3619,7 +3643,8 @@ ci_workflow_runs_script() {
     # 本体が走るかどうかは錨ではなく `top` の絞り込み（`uncertain == 0`）が答える:
     # `if false` は `dead_depth`、条件の読めない `if` と `for … do` は `uncertain` を立てるので
     # 渡ってこない。`if true; then` / `while true; do` だけが通り、そこは実際に必ず走る
-    # （issue #123 (3)。実 bash を真値とした 30 形の差分照合で改善 7 形・新しい誤り 0 形）。
+    # （issue #123 (3)。実 bash を真値とした 30 形の差分照合で改善 7 形・新しい誤り 0 形。
+    # **その 30 形に `!` / 後置の `&&` は入っていない**——上の定数の説明を参照）。
     # 開始位置の綴りは 1 か所（`CI_WORKFLOW_BLOCK_BODY_START`）に置いてある
     # パスの直後は空白（引数・リダイレクトが続く）か `)` か断片の終わり。
     # **直後の演算子までここで見ようとしない**のが要点で、`bash x 2>&1 | tee log` のように
