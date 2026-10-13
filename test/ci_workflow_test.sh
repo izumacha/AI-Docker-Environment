@@ -4209,6 +4209,56 @@ for sub_and_chain_case in \
     "内側の部分シェルに && が付く:(
           set +e
           ( bash ${SUITE_PATH} ) && echo ok
+          )" \
+    "&& の右辺として開いた部分シェル:(
+          set +e
+          bash ${SUITE_PATH} && (
+          echo x
+          )
+          )" \
+    "&& の右辺の部分シェルを閉じる断片がコマンドを持つ:(
+          set +e
+          bash ${SUITE_PATH} && (
+          echo x )
+          )" \
+    "&& の右辺の部分シェルを 1 断片で書く:(
+          set +e
+          bash ${SUITE_PATH} && ( echo x )
+          )" \
+    "並びの右辺がパイプライン:(
+          set +e
+          bash ${SUITE_PATH} && echo ok | cat
+          )" \
+    "並びの右辺が 2 段のパイプライン:(
+          set +e
+          bash ${SUITE_PATH} && echo ok | cat | wc -l
+          )" \
+    "部分シェルの中で && が続く:(
+          set +e
+          (
+          bash ${SUITE_PATH} &&
+          echo ok )
+          )" \
+    "&& の右辺の部分シェルの中でも && が続く:(
+          set +e
+          true && (
+          bash ${SUITE_PATH} &&
+          echo ok )
+          )" \
+    "pipefail つきのパイプの左:(
+          set +e
+          set -o pipefail
+          bash ${SUITE_PATH} | cat
+          )" \
+    "pipefail つきのパイプの左のあと &&:(
+          set +e
+          set -o pipefail
+          bash ${SUITE_PATH} | cat && echo ok
+          )" \
+    "pipefail を部分シェルの外で立てる:set -o pipefail
+          (
+          set +e
+          bash ${SUITE_PATH} | cat
           )"
 do
     assert_wired "&& の連鎖が部分シェルの最後なら引き上げる（${sub_and_chain_case%%:*}）" "name: ci
@@ -4246,7 +4296,33 @@ for sub_and_chain_swallowed_case in \
           )" \
     "閉じ括弧の断片が || で拾う:(
           set +e
-          bash ${SUITE_PATH} && echo ok || echo bad )"
+          bash ${SUITE_PATH} && echo ok || echo bad )" \
+    "パイプで握り潰す:(
+          set +e
+          bash ${SUITE_PATH} | cat
+          )" \
+    "パイプで握り潰したあと && でつなぐ:(
+          set +e
+          bash ${SUITE_PATH} | cat && echo ok
+          )" \
+    "&& の右辺の部分シェルの中で後ろにもう 1 行:(
+          set +e
+          true && (
+          bash ${SUITE_PATH}
+          echo ok )
+          )" \
+    "部分シェルの中で後ろにもう 1 行:(
+          set +e
+          (
+          bash ${SUITE_PATH}
+          echo ok )
+          )" \
+    "部分シェルより手前で終わる:(
+          set +e
+          bash ${SUITE_PATH}
+          (
+          echo x )
+          )"
 do
     assert_not_wired "&& の連鎖でも握り潰される側（${sub_and_chain_swallowed_case%%:*}）" "name: ci
 jobs:
