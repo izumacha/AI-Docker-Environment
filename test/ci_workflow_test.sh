@@ -5194,6 +5194,76 @@ jobs:
       - name: subject
         run: timeout 300 bash ${SUITE_PATH}"
 
+# **後置の `&&` は位置で決まる**（issue #149。`main` 既存の fail-open）。POSIX は
+# AND-OR の並びのうち**最後以外**を `-e` の対象外とするので、`bash <スイート> && echo ok`
+# の失敗はその場では捨てられる。**ただし並び自身がステップの最後のコマンドなら**、
+# 並びの終了状態（＝スイートの失敗）がステップの終了状態になって伝わる
+# （実 `bash -e` で、本文がその 1 行だけなら GATES・後ろに 1 行足すと NOGATE ＝実測）。
+# 以前は `&&` を一律「伝わる」側に倒していたので、**スイートをワークフローから外して
+# `&& echo ok` と 1 行を足すだけ**で `ci_coverage_test.sh` が緑のまま通った。
+# **閉じ語だけの記録（`}` / `fi` / `done` / `)`）は「後ろのコマンド」に数えない**
+# **閉じた部分シェルに付いた `&&` は「部分シェルの中だから伝わる」と読んではいけない**
+# ——免除が起きるのは閉じた**外側**なので、伝えるときは記録の「部分シェルの中か」の
+# 旗も落とす（落とさないと `( bash <スイート> ) && echo ok` ＋後ろの 1 行が
+# 位置によらず wired に化ける＝実測で、この対が無いと変異が素通りした）
+for and_absorbed_case in \
+    "素の &&:bash ${SUITE_PATH} && echo ok
+          echo done" \
+    "ブレースの中:{ bash ${SUITE_PATH} && echo ok ; }
+          echo done" \
+    "if の本体:if true; then bash ${SUITE_PATH} && echo ok ; fi
+          echo done" \
+    "fi に付いた &&:if true; then bash ${SUITE_PATH} ; fi && echo ok
+          echo done" \
+    "連鎖の途中:true && bash ${SUITE_PATH} && echo ok
+          echo done" \
+    "閉じたブレースに付いた &&:{ bash ${SUITE_PATH} ; } && echo ok
+          echo done" \
+    "閉じた部分シェルに付いた &&:( bash ${SUITE_PATH} ) && echo ok
+          echo done" \
+    "複数行で閉じた部分シェルに付いた &&:( bash ${SUITE_PATH}
+          ) && echo ok
+          echo done"
+do
+    assert_not_wired "後ろに行がある && の左辺は合否に効かない（${and_absorbed_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${and_absorbed_case#*:}"
+done
+
+# **締めすぎない側。** 並びがステップの最後なら伝わる（上の各形から後ろの 1 行を抜いたもの）。
+# **部分シェルの中の `&&` は位置によらず伝わる**——`( … && … )` の終了状態は親で検査されるので
+# 免除が及ばない（実 `bash -e` で後ろに 1 行足しても GATES ＝実測）
+for and_live_case in \
+    "素の && が最後:bash ${SUITE_PATH} && echo ok" \
+    "ブレースの中が最後:{ bash ${SUITE_PATH} && echo ok ; }" \
+    "if の本体が最後:if true; then bash ${SUITE_PATH} && echo ok ; fi" \
+    "fi に付いた && が最後:if true; then bash ${SUITE_PATH} ; fi && echo ok" \
+    "閉じたブレースに付いた && が最後:{ bash ${SUITE_PATH} ; } && echo ok" \
+    "閉じた部分シェルに付いた && が最後:( bash ${SUITE_PATH} ) && echo ok" \
+    "部分シェルの中の &&（後ろに行あり）:( bash ${SUITE_PATH} && echo ok )
+          echo done" \
+    "複数行で閉じた部分シェルに付いた && が最後:( bash ${SUITE_PATH}
+          ) && echo ok" \
+    "&& の右辺:true && bash ${SUITE_PATH}" \
+    "閉じ語だけが後ろにある:{
+          bash ${SUITE_PATH} && echo ok
+          }"
+do
+    assert_wired "並びが最後なら && の左辺も合否に効く（${and_live_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${and_live_case#*:}"
+done
+
 assert_wired "空白の無い && の直前" "name: ci
 jobs:
   type-check:

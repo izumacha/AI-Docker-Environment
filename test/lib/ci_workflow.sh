@@ -2952,7 +2952,7 @@ ci_workflow_extract() {
                             if (prom_rec > 0 && !carries_command(text)) {
                                 if (closed_sub_e != 0) {
                                     split(buf[prom_rec], inner, "\t")
-                                    buf[prom_rec] = inner[1] "\t" inner[2] "\t" closed_sub_e "\t" inner[4] "\t" inner[5] "\t" inner[6]
+                                    buf[prom_rec] = inner[1] "\t" inner[2] "\t" closed_sub_e "\t" inner[4] "\t" inner[5] "\t" inner[6] "\t" inner[7]
                                 }
                                 # **外側でもまだ握り潰されているなら、引き上げ候補を外側へ引き継ぐ**
                                 # （issue #152 のレビュー指摘）。入れ子の部分シェルでは内側の
@@ -3059,7 +3059,7 @@ ci_workflow_extract() {
                         # **リンタの照会（`top` を渡さない）は巻き込まない**のが要点で、
                         # `test -n "$FILES" && shellcheck $FILES` は正当な綴り——`gate` 側を
                         # 0 にすると、正しく設定されたリンタを「配線されていない」と報告する
-                        buf[nbuf] = step_id "\t" ops[j] "\t" ((dead_depth >= 0 || unreachable || exit_seen) ? 0 : errexit) "\t" pipefail "\t" (uncertain + (chain_in ? 1 : 0) + (closed_inverted ? 1 : 0)) "\t" text
+                        buf[nbuf] = step_id "\t" ops[j] "\t" ((dead_depth >= 0 || unreachable || exit_seen) ? 0 : errexit) "\t" pipefail "\t" (uncertain + (chain_in ? 1 : 0) + (closed_inverted ? 1 : 0)) "\t" text "\t" ((subshell > 0 || paren > 0) ? 1 : 0)
                         # **部分シェルの中で握り潰したコマンドのうち、最後のものを控える**（issue #152）。
                         # 部分シェルの終了状態は「最後に走ったコマンドの状態」なので、握り潰しても
                         # それが最後なら失敗はそのまま親へ伝わる（`( set +e; bash <スイート> )` は
@@ -3179,10 +3179,18 @@ ci_workflow_extract() {
                         # **開いた断片そのものも中身になりうる。** `( bash x; ) || true` では
                         # `(` と呼び出しが同じ断片に載るので、控えた位置の**次**から書き換えると
                         # 呼び出しだけが取り残され、握り潰された実行が「ゲートしている」と読まれる
-                        if (closed_group_start >= 0 && (ops[j] == "||" || ops[j] == "&" || ops[j] == "|")) {
+                        # **`&&` も伝える**（issue #149）。`if true; then bash <スイート>; fi && echo ok`
+                        # の `&&` は `fi` に付くので、中身の記録は自分の区切りしか見ていない。
+                        # 伝えないと中の呼び出しが「合否に効く」と読まれる（実 `bash -e` は
+                        # NOGATE ＝AND の並びの左辺なので errexit が免除する）。
+                        # **伝えるときは 7 列目（部分シェルの中か）を 0 へ落とす**——免除が
+                        # 起きるのは**閉じた外側**なので、`( bash <スイート> ) && echo ok` の
+                        # 中身を「部分シェルの中だから伝わる」と読んではいけない
+                        # （実 `bash -e` でも NOGATE。中に `&&` がある形＝`( … && … )` だけが伝わる）
+                        if (closed_group_start >= 0 && (ops[j] == "||" || ops[j] == "&" || ops[j] == "|" || ops[j] == "&&")) {
                             for (k = closed_group_start; k <= nbuf; k++) {
                                 split(buf[k], inner, "\t")
-                                buf[k] = inner[1] "\t" ops[j] "\t" inner[3] "\t" inner[4] "\t" inner[5] "\t" inner[6]
+                                buf[k] = inner[1] "\t" ops[j] "\t" inner[3] "\t" inner[4] "\t" inner[5] "\t" inner[6] "\t" (ops[j] == "&&" ? 0 : inner[7])
                             }
                         }
                         # 次の断片から見た「直前」を控える
@@ -3490,7 +3498,7 @@ ci_workflow_extract() {
         # ステップ番号にジョブ名を冠するのは、呼び出し側が「どのジョブが実行するか」まで
         # 問えるようにするため（env は同じジョブからしか見えないので、ジョブを跨いだ
         # 分割は「配線されている」と答えてはいけない）
-        function flush_job(   i, parts, shell_name, errexit_on, pipefail_on, gate) {
+        function flush_job(   i, parts, shell_name, errexit_on, pipefail_on, gate, last_cmd, chain_end, chain_parts) {
             # 未確定のステップをジョブの控えへ移してから判断する
             flush_step()
             # **env の記録は無効化に関わらず出す。** これは「何が実行されるか」ではなく
@@ -3500,6 +3508,13 @@ ci_workflow_extract() {
             for (i = 1; i <= nenv; i++) { print jobname "#" envbuf[i] }
             # ジョブごと止められていなければ、コマンドの控えをまとめて出す。
             # **ここで初めて実効シェルが確定する**（ステップ自身の指定 > ジョブの既定 > ワークフローの既定）
+            # **ステップごとに「最後に走るコマンドの記録」を先に求める**（issue #149）。
+            # `&&` の免除が効くかは「その並びがステップの最後か」で決まるので、
+            # 並び順を 1 度なめてから判断する
+            for (i = 1; i <= nbuf; i++) {
+                split(buf[i], parts, "\t")
+                if (carries_command(parts[6])) { last_cmd[parts[1]] = i }
+            }
             if (!job_disabled) {
                 for (i = 1; i <= nbuf; i++) {
                     # 控えた 1 件を「ステップ番号・直後の区切り・errexit・pipefail・本文」に分ける
@@ -3514,6 +3529,33 @@ ci_workflow_extract() {
                     # 直後の区切りから、その失敗が job に伝わるかを決める
                     gate = 1
                     if (parts[2] == "||" || parts[2] == "&") { gate = 0 }
+                    # **`&&` の左辺の失敗は errexit が免除する**（issue #149。POSIX:
+                    # AND-OR の並びのうち最後以外は `-e` の対象外で、bash も
+                    # `set -e; false && echo x; echo after` で `after` を出す＝実測）。
+                    # 同じシェルの中ならその失敗はそのまま捨てられるので、
+                    # `bash <スイート> && echo ok` は `|| true` と同じく合否に効かない
+                    # （以前は `&&` を一律「伝わる」側に倒しており、スイートを
+                    #  ワークフローから外して `&& echo ok` を 1 つ足すだけで
+                    #  `ci_coverage_test.sh` が緑のまま通った）。
+                    # **部分シェルの中だけは伝わる**——`( … && … )` の終了状態は
+                    # 親で検査されるので免除が及ばない（実 `bash -e` で
+                    # `( bash <スイート> && echo ok )` は GATES ＝実測）
+                    # **位置で決まる**（issue #149）——免除されるのは「並びの最後以外」なので、
+                    # その並び自身がステップの最後のコマンドなら並びの終了状態＝失敗が
+                    # ステップの終了状態になって伝わる。実 `bash -e` で、`bash <スイート> && echo ok`
+                    # だけの本文は GATES・後ろに 1 行足すと NOGATE（＝実測）。
+                    # **閉じ語だけの記録（`}` / `fi` / `done` / `)`）は数えない**——コマンドを
+                    # 走らせないので終了状態を上書きしない
+                    if (parts[2] == "&&" && parts[7] != "1") {
+                        chain_end = i
+                        while (chain_end <= nbuf) {
+                            split(buf[chain_end], chain_parts, "\t")
+                            if (chain_parts[1] != parts[1]) { break }
+                            if (chain_parts[2] != "&&" && chain_parts[2] != "||") { break }
+                            chain_end++
+                        }
+                        gate = (chain_end == last_cmd[parts[1]]) ? 1 : 0
+                    }
                     if (parts[2] == "|") { gate = pipefail_on }
                     if (!errexit_on) { gate = 0 }
                     # 断片は trim 済みでタブを含まないので、6 列目がそのまま本文
@@ -3525,6 +3567,8 @@ ci_workflow_extract() {
             nenv = 0
             for (i = 1; i <= nbuf; i++) { delete buf[i] }
             nbuf = 0
+            # ステップごとの「最後のコマンド」はジョブをまたいで持ち越さない
+            for (i in last_cmd) { delete last_cmd[i] }
             # ステップごとのシェル指定はジョブをまたいで持ち越さない
             for (i in shells) { delete shells[i] }
             job_disabled = 0
