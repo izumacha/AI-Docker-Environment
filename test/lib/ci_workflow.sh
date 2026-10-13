@@ -1466,8 +1466,13 @@ ci_workflow_extract() {
         # ここだけに閉じる。
         # 素の「開いた数」ではない点は下記のとおり変わらない（`if set +e; then` の `set` は
         # 条件の位置にあるので `if` の階層は数えない）
-        function set_open_depth(t, cached_fn_form, use_cached,   n, k, probe, rest, leadn) {
+        function set_open_depth(t, cached_fn_form, use_cached,   n, k, probe, rest, cap, leadn) {
             probe = t; n = 0; leadn = 0
+            # **上限はループの外で 1 度だけ求める**（`t` は変わらないので値は同じ）。
+            # 兄弟の 2 つ（`last_deciding_open()` / `walk_opens_case()`）も同じ形で、
+            # ここだけ中で呼ぶと開きが 1 つ増えるたびに断片全体の走査が 1 回増え、
+            # 3 つの歩調がずれる起点になる
+            cap = lead_subshell_cap(t)
             while (1) {
                 # **上限は越えた数（`leadn`）で数える**（`n` と共有すると手前の `{` だけで
                 # 上限に当たる。理由は `cross_lead_subshells()` の説明）。
@@ -1477,7 +1482,7 @@ ci_workflow_extract() {
                 # 取り消し（`weak_depth > depth`）が読む値が嘘になるため。いまは打ち消しが
                 # 成立しなくても `at_uncertain == 0` の側で同じ答えになるので差が出ないだけで、
                 # そこを締める変更が入った瞬間に静かな fail-closed になる
-                probe = cross_lead_subshells(probe, lead_subshell_cap(t) - leadn)
+                probe = cross_lead_subshells(probe, cap - leadn)
                 leadn += LEAD_SUBSHELLS; n += LEAD_SUBSHELLS
                 k = open_form(probe, cached_fn_form, (use_cached && n == 0))
                 # 何も開かない綴りと見出しだけの綴りはここで終わり
@@ -2565,8 +2570,12 @@ ci_workflow_extract() {
                         # ＋ `)` は実 `bash -e` で NOGATE なのに wired。**4 トークンでスイートを
                         # ゲートから外せる fail-open**）。越えた分の階層は `set_open_depth()` が
                         # 同じ `cross_lead_subshells()` で数えるので、記録する深さもそろう
+                        # **先頭が `(` でない断片は釣り合いの走査すら要らない。** `set_probe` が
+                        # 空の断片はほとんどなので、門番を置かないと全断片が `paren_delta()` の
+                        # 1 文字ずつの走査を払う（`cross_lead_subshells()` は同じ綴りで即座に
+                        # 諦めるので上限は使われない）。答えは変わらない（§8）
                         set_lead_n = 0
-                        if (set_probe == "") {
+                        if (set_probe == "" && struct_text ~ subshell_open_re()) {
                             set_lead_rest = cross_lead_subshells(struct_text, lead_subshell_cap(struct_text))
                             # **越えた数を控える**（下の `set_sub` が使う）。ここで
                             # `set` が見つからなくても 0 へ戻す必要は無い——予約は
@@ -3527,8 +3536,7 @@ ci_workflow_extract() {
                                 # 記録がどの階層とも結び付かず、同じ部分シェルの中の `set -e` で
                                 # 打ち消せない（正しくゲートする綴りを赤くする）
                                 subshell_at[depth] = 1; subshell++
-                                if (sub_id[depth] && set_res_at == i ":" j) { }
-                                else { sub_serial++; sub_id[depth] = sub_serial }
+                                if (!(sub_id[depth] && set_res_at == i ":" j)) { sub_serial++; sub_id[depth] = sub_serial }
                                 # **`!` で反転された部分シェルの中は実行の証拠にしない**（issue #155）。
                                 # 走りはするので**リンタの照会（`top` を渡さない）では数えてよい**
                                 # ——`uncertain` を立てる形なら実行の照会だけに効く（issue が
