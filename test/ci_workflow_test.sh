@@ -611,6 +611,188 @@ jobs:
         run: |-2
           bash ${SUITE_PATH}"
 
+# **鍵と指示子のあいだのノードプロパティ（アンカー `&name` / タグ `!tag` `!!str`）を挟んでも
+# ブロックスカラーとして読む**（issue #126）。読まないとその行が開始と認められず、本文の
+# シェルスクリプトが構造行として漏れて**実在するスイートが「未配線」になる**（fail-closed。
+# `run: |` に `&suites ` を足すだけで答えが変わる）。直す場所は 2 つあり、構造行側だけだと
+# 本文は読み飛ばされるのに抽出側の判定が外れ、`&suites |` が 1 行書きの値として読まれて
+# `suites` という幻のコマンドだけが記録される（実測）
+for node_prop_case in \
+    "アンカー:&suites |" \
+    "タグ:!!str |" \
+    "独自タグ:!custom |" \
+    "折りたたみ:&s >" \
+    "chomping つき:&s |-" \
+    "明示字下げ指示子つき:&s |2"
+do
+    assert_wired "ノードプロパティを挟んだブロックスカラー（${node_prop_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: ${node_prop_case#*:}
+            bash ${SUITE_PATH}"
+done
+
+# **折りたたみ（`>`）の判定にもプロパティを読ませる**（issue #126）。読まないと本文が
+# 1 行ずつ別のコマンドとして読まれ、**次の行に置いた `|| true` が呼び出しと結び付かず、
+# 握り潰された実行を「ゲートしている」と読む**（fail-open。ライブラリの `run_folded` の
+# コメントが同じ理由を記録している）。
+# **`bash` と パスを改行で割った形では固定できない**——畳まないと記録が 2 つに割れるが、
+# 片方がパスそのもの（`test/subject_test.sh`）になり、それは**直接実行の綴りとして
+# 正しく配線と数えられる**ので答えが変わらない（実測）
+assert_not_wired "ノードプロパティを挟んだ折りたたみブロックでは次行の || true が掛かる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: &s >
+          bash ${SUITE_PATH}
+          || true"
+
+# **明示字下げ指示子もプロパティの後ろから読む**（issue #126）。読まないと `|2` が指示子として
+# 認められず基準字下げが未確定になり、最初の非空行から測った分だけ落として**深い位置に置いた
+# 区切り語を終端と読む**（＝以降の本文が実行と読まれる）。上の「明示字下げ指示子つき」の対は
+# 本文が 1 行なのでこの区別を押さえられず、ここでしか固定されない
+assert_not_wired "プロパティ付きの明示字下げ指示子でも深い区切り語は終端ではない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: &s |2
+            cat <<MARK
+            one
+            MARK
+            bash ${SUITE_PATH}"
+
+# **`shell:` の値からもプロパティを落とす**（issue #126 のレビューで実測）。
+# `shell: &s bash` は値が `bash` の正当な YAML なのに、残すと「未知のシェル」に転んで
+# 実際に走ってゲートしているステップが「未配線」になる（`run:` 側と同じ鍵と値の非対称）
+for shell_prop_case in "アンカー:&s bash" "タグ:!!str bash"
+do
+    assert_wired "shell: の値のプロパティは落とす（${shell_prop_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        shell: ${shell_prop_case#*:}
+        run: bash ${SUITE_PATH}"
+done
+
+# **`if:` の値からも落とす**（同じレビュー）。`if: &a true` は PyYAML も `True` と読むのに、
+# 残すと「真偽を評価できない」側へ落ちてゲートしているステップが「未配線」になる
+for cond_prop_case in "アンカー:&a true" "タグ:!!bool true"
+do
+    assert_wired "if: の値のプロパティは落とす（${cond_prop_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        if: ${cond_prop_case#*:}
+        run: bash ${SUITE_PATH}"
+done
+
+# 締めすぎない側: プロパティを落としても**無効化の判定は効いたまま**
+# （`continue-on-error: &a true` は握り潰しなので「配線されている」と言ってはいけない）
+assert_not_wired "continue-on-error: のプロパティ付きの true は握り潰しのまま" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        continue-on-error: &a true
+        run: bash ${SUITE_PATH}"
+
+# **アンカーの名前は PyYAML / libyaml の実装に合わせて狭く読む**（issue #126 のレビューで実測）。
+# 英数字・`-`・`_` は読み、それ以外を含む綴りは**読まない側＝fail-closed**へ落とす——
+# `&a:b` は PyYAML が名前を `a` で切って値を `:b bash …` と読むので、広い集合で読むと
+# 「走らないスイートをゲートしていると言う」fail-open になる
+assert_wired "アンカーの名前に - と _ は使える" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: &a-b_1 |
+          bash ${SUITE_PATH}"
+
+for narrow_anchor_case in "コロンを含む:&a:b" "ドットを含む:&shell.files"
+do
+    assert_not_wired "実装が受け付けないアンカー名は読まない（${narrow_anchor_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: ${narrow_anchor_case#*:} bash ${SUITE_PATH}"
+done
+
+# **素のスカラーに置いたプロパティも値から落とす**（issue #126 のレビューで実測）。
+# `run: &suites bash test/x.sh` は値が `bash test/x.sh` の正当な YAML なのに、落とさないと
+# `suites bash test/x.sh` という幻のコマンドが記録され、実行しているスイートが「未配線」になる
+# （fail-closed。`main` から続く既存の穴）。**枝の選び分けではプロパティを読まない**ままにして、
+# 値の取り出しでだけ落とす（2 か所で読む / 読まないが食い違うと同じ行が両方の枝に当たる）。
+# **名前の無い `!` はここでは落とさない**（下の「! 経由の呼び出し」と同じ綴りになり、
+# ランナーがシェルへ渡す側だと終了状態が反転してゲートしない＝fail-open）
+for plain_prop_case in \
+    "アンカー:&suites bash ${SUITE_PATH}" \
+    "タグ:!!str bash ${SUITE_PATH}"
+do
+    assert_wired "素のスカラーのプロパティは値から落とす（${plain_prop_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: ${plain_prop_case#*:}"
+done
+
+# **`!` は名前なしでもよい**（YAML の非特定タグ。`run: ! |` は PyYAML も通す）。
+# 名前を 1 文字以上に揃えると、この綴りだけ issue #126 の手当てから外れる
+assert_wired "名前の無い非特定タグを挟んだブロックスカラー" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: ! |
+          bash ${SUITE_PATH}"
+
+# **締めすぎない側＝素の `&` はプロパティとして読まないこと**（`{name: & "b"}` は PyYAML も
+# エラーにする綴り）。読むと後ろの引用が開いて**本物の `, secrets:` を伏せる**ので、
+# `!` との非対称は意図したもの（伏せ処理側の `propend > i || ch == "!"` と対で保つ）
+assert_not_wired "名前の無いアンカーはブロックスカラーを始めない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: & |
+          bash ${SUITE_PATH}"
+
+# **締めすぎない側＝プロパティに見える綴りでブロックを始めないこと。**
+# `run: foo !bar |` は素のスカラー（`|` は指示子ではない）なので、本文の読み飛ばしを
+# 始めてはいけない。`run: &s|` はプロパティと値のあいだに空白が無く YAML として正しくないので、
+# 読まない側＝従来の姿へ倒す（fail-closed。伏せ処理が 1 文字ずつ歩くときの条件と同じ規則）
+for node_prop_dead_case in \
+    "素のスカラーの中の |:foo !bar |" \
+    "空白の無いプロパティ:&s|"
+do
+    assert_not_wired "プロパティに見えてもブロックを始めない（${node_prop_dead_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: ${node_prop_dead_case#*:}
+          bash ${SUITE_PATH}"
+done
+
 assert_not_wired "true || <suite>（そもそも走らない）" "name: ci
 jobs:
   type-check:
@@ -4778,6 +4960,20 @@ jobs:
     runs-on: ubuntu-latest
     env:
       LIST: >-2
+        a.sh
+    steps:
+      - name: subject
+        run: bash ${SUITE_PATH}" "type-check,|a.sh,"
+
+# **鍵と指示子のあいだのノードプロパティを挟んでも読む**（issue #126 のレビューで実測）。
+# 構造行側は `&files >-` をブロックの開始と認めて本文を読み飛ばすので、ここが読まないと
+# 定義が 1 件も記録されず `ci_coverage_test.sh` が「定義が 0 か所」という事実と違う診断で落ちる
+assert_env_block "ノードプロパティを挟んだ env の折りたたみブロックを読む" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    env:
+      LIST: &files >-
         a.sh
     steps:
       - name: subject

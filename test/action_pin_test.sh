@@ -1479,6 +1479,15 @@ permissions: read-all
 jobs:
   j: {name: !!str "a #b", secrets: inherit, runs-on: ubuntu-latest}'
 
+# **名前の無いタグ（非特定タグ `!`）でも塞がっていること**（`{name: ! "a #b"}` は PyYAML も通す）。
+# 名前を 1 文字以上要求すると、この 1 文字だけで引用が開かず後ろの `, secrets:` が伏せられ、
+# ワークフローが read-only と判定されて SHA ピンの強制が丸ごと外れる（issue #124 と同じ経路）
+assert_privilege_classification privileged 'a hash inside a value with a bare non-specific tag does not hide a later secrets key' \
+'name: X
+permissions: read-all
+jobs:
+  j: {name: ! "a #b", secrets: inherit, runs-on: ubuntu-latest}'
+
 # アンカーとタグを両方並べた形（YAML はどちらの順でも許す）でも塞がっていること
 assert_privilege_classification privileged 'a hash inside a value with both an anchor and a tag does not hide a later secrets key' \
 'name: X
@@ -1732,6 +1741,39 @@ jobs:
       - name: "compare pinning, uses: policy"
         run: echo hi
       - uses: ./.github/actions/local'
+
+# issue #126 を検査経路の端から端まで固定する。鍵と指示子のあいだにノードプロパティを挟むと
+# （`run: &suites |`）ブロックスカラーの開始と認められず、**本文のシェルスクリプトが構造行として
+# 漏れて**その中の `uses: evil/action@v1` が幻の参照として報告されていた（実測で違反 1 件）。
+# 実在するスイートが「未配線」になる側は `ci_workflow_test.sh` が固定するので、
+# ここでは**問題の無いワークフローが赤くならない**という結末そのものを表明する。
+# 上流への問い合わせを避けるため、参照はローカル action にする（同スイートの方針）
+assert_pin_enforcement accepted 'a node property before a block scalar does not leak its body' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: note
+        run: &suites |
+          cat > generated.yml <<EOF
+          - uses: evil/action@v1
+          EOF
+      - uses: ./.github/actions/local'
+
+# **締めすぎない側**: 素のスカラーの中の `|` はブロックの指示子ではないので、
+# 本文の読み飛ばしを始めてはいけない（始めると次の行の本物の `uses:` が検査から消える＝fail-open）
+assert_pin_enforcement enforced 'a plain scalar containing a bar still exposes the next ref' \
+'name: X
+permissions: write-all
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: note
+        run: foo !bar |
+      - uses: actions/checkout@v4'
 
 # 1 行 1 件のときは、行末の版注記をその参照のものとして渡す（従来どおりの正常系）
 assert_split_output 'a single ref keeps its own trailing version marker' \
