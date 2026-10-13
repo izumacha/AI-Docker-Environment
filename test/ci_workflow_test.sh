@@ -2717,6 +2717,234 @@ jobs:
           if true; then exit 1; fi
           bash ${SUITE_PATH}"
 
+# **部分シェルの中・呼ばれた関数の中の無条件の `exit` も後ろを死に体にする**
+# （issue #189。`main` 既存の fail-open）。`exit_seen` の門番にあった `subshell == 0` は
+# 「ステップ全体を死に体にしない」ことだけを守っていて**その部分シェルの残りを死に体に
+# する手当てが無く**、`!in_fndef_here` は「定義しただけ」を正しく無視する一方
+# **呼ばれた時点では何も効かなかった**——どちらも実 `bash -e` でスイートが 1 行も
+# 走らないのに `wired`。**3 トークンで必須スイートを静かに外せた**
+for exit_inside_case in \
+    "1 行の部分シェル:( exit 0; bash ${SUITE_PATH} )" \
+    "複数行の部分シェル:( exit 0
+          bash ${SUITE_PATH} )" \
+    "部分シェルの後ろに別のコマンド:( exit 0; bash ${SUITE_PATH} )
+          echo done" \
+    "飾りを前置きした部分シェル:time ( exit 0; bash ${SUITE_PATH} )" \
+    "死に体の区間が終わる断片の呼び出し:f() { exit 0; }
+          ( exit 0
+          echo a )
+          f
+          bash ${SUITE_PATH}" \
+    "ブレースだけで越えた定義の呼び出し:{ f() { exit 0; }
+          f
+          }
+          bash ${SUITE_PATH}" \
+    "部分シェルの中の再定義は親の関数を置き換えない:f() { exit 0; }
+          ( f() { :; }
+          )
+          f
+          bash ${SUITE_PATH}" \
+    "部分シェルの中の再定義（1 断片）:f() { exit 0; }
+          ( f() { :; } )
+          f
+          bash ${SUITE_PATH}" \
+    "ブレースの中の部分シェル:{ ( exit 0; bash ${SUITE_PATH} ); }" \
+    "無条件に exit する関数の呼び出し:f() { exit 0; }
+          f
+          bash ${SUITE_PATH}" \
+    "複数行で書いた本文:f() {
+            exit 0
+          }
+          f
+          bash ${SUITE_PATH}" \
+    "見出しが別行の本文:f()
+          {
+            exit 0
+          }
+          f
+          bash ${SUITE_PATH}" \
+    "function 見出しの本文:function f {
+            exit 0
+          }
+          f
+          bash ${SUITE_PATH}" \
+    "本文の真と分かる条件の中:f() { if true; then exit 0; fi; }
+          f
+          bash ${SUITE_PATH}" \
+    "連鎖の左辺の呼び出し:f() { exit 0; }
+          f || true
+          bash ${SUITE_PATH}" \
+    "部分シェルの中の呼び出し:f() { exit 0; }
+          ( f; bash ${SUITE_PATH} )" \
+    "真と分かる条件の中の呼び出し:f() { exit 0; }
+          if true; then f; fi
+          bash ${SUITE_PATH}" \
+    "ブレースの中の呼び出し:f() { exit 0; }
+          { f; }
+          bash ${SUITE_PATH}" \
+    "部分シェルの中で定義して呼ぶ:( f() { exit 0; }
+          f
+          bash ${SUITE_PATH} )"
+do
+    assert_not_wired "無条件の脱出（${exit_inside_case%%:*}）の後ろは実行の証拠にしない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${exit_inside_case#*:}"
+done
+
+# **締めすぎない側。** 部分シェルの外・呼ばれない関数・条件付きの脱出・本文の部分シェルの中は
+# どれも後ろが走るので、死に体にすると**正しくゲートしているスイートを「未配線」と報告**する。
+# **素の `( exit 0 )` と `f() { exit 0; }`（呼ばない）はここに置かない**——上の
+# `reachable_after_exit_case`（issue #151 の「脱出を数えない位置」）が同じ YAML を持っており、
+# 同じ綴りを 2 度ピンすると、片方を直したときにもう片方が残って齟齬の出どころになる
+for exit_scoped_case in \
+    "本文の部分シェルの中で脱出する関数の呼び出し:f() { ( exit 0 ); }
+          f" \
+    "本文の部分シェルを複数行で書いた関数の呼び出し:f() {
+            ( exit 0 )
+          }
+          f" \
+    "同じ名前で定義し直した関数の呼び出し:f() { exit 0; }
+          f() { :; }
+          f" \
+    "本文の条件付きの脱出:f() { if [ -n \"${DOLLAR}X\" ]; then exit 0; fi; }
+          f" \
+    "部分シェルの中の条件付きの脱出:( if [ -n \"${DOLLAR}X\" ]; then exit 0; fi )" \
+    "部分シェルの中の届かない脱出:( true || exit 0 )" \
+    "呼ばれた関数が部分シェルの中だけを終わらせる:f() { exit 0; }
+          ( f )" \
+    "呼び出しと閉じ括弧を同じ断片に置く:f() { exit 0; }
+          (
+          f )" \
+    "部分シェルの中で定義して同じ断片で閉じる:( f() { exit 0; }
+          f )" \
+    "本文の部分シェルを 3 行で書いた関数の呼び出し:f() {
+            (
+            exit 0
+            )
+          }
+          f" \
+    "本文の部分シェルを開いたまま改行した関数の呼び出し:f() {
+            ( exit 0
+            )
+          }
+          f" \
+    "部分シェルの中の脱出の後ろ（最上位へ戻る）:( exit 0
+          echo inner )" \
+    "1 行に畳んだ case のアームの中の呼び出し:f() { exit 0; }
+          case \"${DOLLAR}M\" in a) f ;; esac" \
+    "本文の 1 行 case のアームの中の脱出:f() { case \"${DOLLAR}M\" in a) exit 0 ;; esac; }
+          f" \
+    "本文の複数行 case のアームの中の脱出:f() {
+            case \"${DOLLAR}M\" in
+              a) exit 0 ;;
+            esac
+          }
+          f"
+do
+    assert_wired "脱出の及ばない位置（${exit_scoped_case%%:*}）の後ろは配線のまま" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${exit_scoped_case#*:}
+          bash ${SUITE_PATH}"
+done
+
+# **「定義しただけ」「無条件ではない」脱出は台帳へ入れない**（issue #189 のレビューで見つけた
+# 4 形。どれもこの差分が一度入れた fail-closed で、`main` は正しく wired と答えていた）。
+# 本文は全文を与える（スイートが部分シェルの中にある形があるため、上の 2 ループのように
+# 末尾へ足す形にできない）
+for exit_not_unconditional_case in \
+    "部分シェルの後ろで定義だけして呼ばない:( f() { exit 0; }
+          bash ${SUITE_PATH} )" \
+    "部分シェルの後ろの function 見出しで定義だけする:( function f { exit 0; }
+          bash ${SUITE_PATH} )" \
+    "本文の手前に条件付きの return:f() { [ -z \"${DOLLAR}X\" ] && return 0
+            exit 1
+          }
+          f
+          bash ${SUITE_PATH}" \
+    "本文の手前に if の return:f() { if [ -z \"${DOLLAR}X\" ]; then return 0; fi
+            exit 1
+          }
+          f
+          bash ${SUITE_PATH}" \
+    "1 行で return のあとに exit:f() { return 0; exit 1; }
+          f
+          bash ${SUITE_PATH}" \
+    "1 行に畳んだ入れ子の定義:outer() { inner() { exit 0; }; }
+          outer
+          bash ${SUITE_PATH}" \
+    "部分シェルで越えた定義の手前の return:( f() { return 0; exit 1; }
+          f )
+          bash ${SUITE_PATH}" \
+    "ブレースで越えた定義の手前の return:{ f() { return 0; exit 1; }
+          f
+          }
+          bash ${SUITE_PATH}" \
+    "ブレースで越えた定義による再定義:f() { exit 0; }
+          { f() { :; }
+          f
+          }
+          bash ${SUITE_PATH}" \
+    "部分シェルで越えた定義による再定義:f() { exit 0; }
+          ( f() { return 0; }
+          f )
+          bash ${SUITE_PATH}"
+do
+    assert_wired "無条件でない脱出（${exit_not_unconditional_case%%:*}）は台帳へ入れない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${exit_not_unconditional_case#*:}"
+done
+
+# **弱める関数の反映は部分シェルの中では見送る**（issue #189 の配線）。呼び出しの名前を
+# 取り出す門番から `subshell == 0` を外した（無条件に `exit` する関数はその部分シェルを
+# 終わらせるので、部分シェルの中でも名前を引く必要がある）ぶん、**弱めを反映する側では
+# `subshell` と「この断片で越えた部分シェル」の両方を見る**必要がある。見落とすと
+# `set +e` を部分シェルの中へ持ち込んで、部分シェルの終了状態として伝わる失敗を
+# 「握り潰された」と読む（正しくゲートしているスイートを赤くする fail-closed）。
+# **この門番には逆向きの代償がある**（issue #200）: 部分シェルの中で弱めてから
+# スイートを呼び、後ろに別のコマンドを置く綴り（`( quiet` 改行 `bash <スイート>` 改行
+# `echo x )`）は握り潰されているのに wired と答える。480 形の総当たりで、門番を
+# 外すと 32 形が正しくなる代わりに 16 形が上の fail-closed へ倒れた＝取り替えなので、
+# 弱めを開きの後ろへ遅らせる形で閉じるまで据え置く（そちらの形はピンしていない）
+for subshell_weaken_case in \
+    "部分シェルの中で呼ぶ:( quiet; bash ${SUITE_PATH} )" \
+    "部分シェルの中で呼び、後ろに別のコマンド:( quiet; bash ${SUITE_PATH} )
+          echo done" \
+    "部分シェルの中で呼び、スイートは外:( quiet )
+          bash ${SUITE_PATH}" \
+    "部分シェルを開いたまま改行して呼び、スイートは外:( quiet
+          )
+          bash ${SUITE_PATH}" \
+    "部分シェルの中で弱めてから同じ階層で戻す:( quiet
+          set -e
+          bash ${SUITE_PATH}
+          echo x )"
+do
+    assert_wired "弱める関数を部分シェルの中で呼んでも中の失敗は伝わる（${subshell_weaken_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          quiet() { set +e; }
+          ${subshell_weaken_case#*:}"
+done
+
 # --- 先頭の飾り（同じシェルのまま `set` を呼ぶ書き方）------------------------------
 #
 # 落としてよいのはブレースグループ / 変数代入 / `builtin` / `command` / `eval` だけ。
