@@ -3246,6 +3246,121 @@ jobs:
           ${chain_guarded_case#*:}"
 done
 
+# **連鎖に守られているのは `if true` の本体だけではない**（issue #150。`main` 既存の fail-open）。
+# `test -n "${DOLLAR}RUN" && bash <スイート>` は `$RUN` が空なら 1 度も走らないのに「最上位で
+# 確実に走る」と記録されていた——**2 トークンで必須スイートを無効化できる**形で、素の呼び出し・
+# ブレースグループ・部分シェル・`||` の右辺・2 段の連鎖のどれでも同じだった
+# （`if true` を挟んだ形だけが PR #148 で閉じていた）。記録の 5 列目（走ると証明できない
+# 理由の数）に連鎖の分を足して、実行の照会から外す
+for chain_call_case in \
+    "素の呼び出し:test -n \"${DOLLAR}RUN\" && bash ${SUITE_PATH}" \
+    "ブレースグループ:test -n \"${DOLLAR}RUN\" && { bash ${SUITE_PATH}; }" \
+    "部分シェル:test -n \"${DOLLAR}RUN\" && ( bash ${SUITE_PATH} )" \
+    "|| の右辺:test -z \"${DOLLAR}RUN\" || bash ${SUITE_PATH}" \
+    "2 段の連鎖:test -n \"${DOLLAR}RUN\" && test -n \"${DOLLAR}ALSO\" && bash ${SUITE_PATH}" \
+    "反転された真:! true && bash ${SUITE_PATH}"
+do
+    assert_not_wired "連鎖の右辺（${chain_call_case%%:*}）は実行の証拠にしない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${chain_call_case#*:}
+          echo done"
+done
+
+# **算術コマンド（`(( … ))`）の真偽は読まない**（issue #150 のレビューで実測）。
+# 丸括弧を 2 つ落とすと中身が「コマンドとしての `true`」に見えるが、算術の真偽は
+# **変数の値**で決まる——`(( true ))` は未設定の変数 `true` を 0 と読むので終了状態は 1（偽）。
+# 読むと向きが逆になり、`&&` の右辺の呼び出しを「必ず走る」と記録する（`bash -n` も通る綴り）
+for arith_chain_case in \
+    "空白あり:(( true ))" \
+    "空白なし:((true))" \
+    "コロン:(( : ))" \
+    "部分シェルで包む:( (( true )) )" \
+    "time 付き:time (( true ))"
+do
+    assert_not_wired "算術コマンドの連鎖（${arith_chain_case%%:*}）は実行の証拠にしない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${arith_chain_case#*:} && bash ${SUITE_PATH}
+          echo end"
+done
+
+# 同じ取り違えは**逆向き**にも効く（この差分が入れかけた退行）。`! (( true ))` を「偽」と読むと
+# 右辺の `set +e` が「走らない」ことになり、握り潰されたスイートが「ゲートしている」と読まれる
+assert_not_wired "算術コマンドの反転で set +e を取り落とさない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ! (( true )) && set +e
+          bash ${SUITE_PATH}
+          echo end"
+
+# **`{` の後ろの空白は必須**（issue #150 のレビューで実測）。`{true` は bash として
+# 成り立たない綴り（`{true` という名前のコマンドを探して 127 で終わる）なので、
+# グループの開きとして落とすと「真と分かる」に化ける。`&&` の左辺なので `set -e` も発動せず、
+# **ステップは緑のままスイートが 1 度も走らない**。綴りの源は `CI_WORKFLOW_GROUP_OPENER`
+for brace_chain_case in \
+    "空白なしの true:{true" \
+    "空白なしのコロン:{:" \
+    "閉じる前の区切りが無い:{ echo a; true }"
+do
+    assert_not_wired "開きとして読めないブレース（${brace_chain_case%%:*}）は実行の証拠にしない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${brace_chain_case#*:} && bash ${SUITE_PATH}
+          echo end"
+done
+
+# 締めすぎない側: **空白のあるブレースグループは従来どおり読む**（`{ true && <呼び出し>; }`）
+assert_wired "空白のあるブレースグループの中の真と分かる連鎖" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          { true && bash ${SUITE_PATH}; }"
+
+# **締めすぎない側＝短絡で結論が分かる連鎖は「必ず走る」のまま。**
+# 連鎖の有無だけで見送ると、実際に走る呼び出しを「未配線」と事実と逆に診断して CI を赤くする。
+# 真偽の判定は `chain_literal_status()` が持ち、**先頭のグループの開き（`( true`）・
+# 末尾の閉じ（`( true )`）・飾り（`time` / `!`）を落としてから**比べる——生の綴りで
+# `true` と比べていた版では、この 8 形（`( … )` と `{ … }` の中）が `not-wired` に化けた（実測）
+for chain_known_case in \
+    "真と分かる &&:true && bash ${SUITE_PATH}" \
+    "コロンの &&:: && bash ${SUITE_PATH}" \
+    "偽の && から || へ:false && echo mid || bash ${SUITE_PATH}" \
+    "真の || から && へ:true || echo mid && bash ${SUITE_PATH}" \
+    "部分シェルの中の真:( true && bash ${SUITE_PATH} )" \
+    "閉じた部分シェル:( true ) && bash ${SUITE_PATH}" \
+    "反転された偽:! false && bash ${SUITE_PATH}" \
+    "time 付きの真:time true && bash ${SUITE_PATH}"
+do
+    assert_wired "結論の分かる連鎖（${chain_known_case%%:*}）は実行の証拠になる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${chain_known_case#*:}"
+done
+
 # **`!` で反転された `if true` / `while true` も「必ずゲートする」ではない**（レビューで実測）。
 # `open_form()` は `strip_struct_wrappers()` を通して分類するので `! if true; then` も
 # 「必ず走る」の種類になるが、`!` は終了状態を**反転**するので、本体が走って失敗しても
@@ -5061,6 +5176,19 @@ jobs:
     steps:
       - name: lint
         run: shellcheck ${DOLLAR}LIST" \
+    ci_workflow_command_matches "" '(^|[;&|(][[:space:]]*)shellcheck([^[:alnum:]_])' '[$][{]?LIST[}]?([^[:alnum:]_]|$)'
+
+# **連鎖の右辺でもリンタの網は見る**（issue #150）。実行の照会は「走ると証明できない」として
+# 外すが、`test -n "${DOLLAR}LIST" && shellcheck ${DOLLAR}LIST` は正当な綴りなので、
+# こちらで外すと**正しく設定されたリンタを「配線されていない」と報告**する（照会ごとに
+# 意味が違うので、記録の 5 列目を見るのは `top` を渡す側だけ）
+assert_matcher match "コマンド単位: 連鎖の右辺のコマンドも見る" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: lint
+        run: test -n \"${DOLLAR}LIST\" && shellcheck ${DOLLAR}LIST" \
     ci_workflow_command_matches "" '(^|[;&|(][[:space:]]*)shellcheck([^[:alnum:]_])' '[$][{]?LIST[}]?([^[:alnum:]_]|$)'
 
 assert_matcher no-match "コマンド単位: 別々のコマンドに散っていれば満たさない" "name: ci
@@ -6884,6 +7012,43 @@ jobs:
     fi
 }
 awk_arg_limit_case
+
+# **awk へ `-v` で渡す綴りにバックスラッシュを含めない。**
+# `-v` の値は**逃がし列として解釈される**ので、`\{` のような綴りは実装ごとに扱いが違う——
+# `gawk` は「escape sequence `\{' treated as plain `{'」を**呼び出しごとに stderr へ出し**、
+# awk の出力を比較している上の検査がその警告で落ちる。`mawk` は黙って受けるので
+# **手元では通り CI だけが赤くなる**（実測。CI は gawk・この開発環境は mawk で、
+# issue #150 の対応中に実際に踏んだ）。括り（`[{]`）で書けばどちらでも同じに読める。
+# **対象はライブラリのソースから導く**（一覧を書くと、次に足した `-v` が黙って外れる）
+awk_v_backslash_case() {
+    # `-v <小文字の名前>="${CI_WORKFLOW_…}"` の形から、渡している定数の名前を集める。
+    # **ライブラリだけでなくスイート側も見る**——`action_pin_test.sh` のように
+    # テストから直接 awk へ渡す箇所もあり、そこだけに渡される定数は片方だけの走査から外れる
+    local -a passed_vars=()
+    mapfile -t passed_vars < <(grep -ohE -- '-v [a-z_]+="\$\{CI_WORKFLOW_[A-Z_]+\}"' \
+        "${SCRIPT_DIR}/lib/ci_workflow.sh" "${SCRIPT_DIR}"/*_test.sh \
+        | grep -oE 'CI_WORKFLOW_[A-Z_]+' | sort -u)
+    # 1 つも拾えなければ検出網が死んでいる（渡し方の綴りが変わった）ので落とす（fail-closed）
+    if [ "${#passed_vars[@]}" -eq 0 ]; then
+        report_fail "awk へ渡す綴りにバックスラッシュを含めない" \
+            "-v で渡している定数を 1 つも拾えませんでした（渡し方の綴りが変わった可能性）"
+        return
+    fi
+    # 拾った定数の値を 1 つずつ見て、バックスラッシュを含むものを名指しする
+    local var offenders=""
+    for var in "${passed_vars[@]}"; do
+        case "${!var-}" in
+            *\\*) offenders="${offenders}${offenders:+, }${var}" ;;
+        esac
+    done
+    if [ -z "${offenders}" ]; then
+        report 0 "awk へ渡す綴りにバックスラッシュを含めない（${#passed_vars[@]} 件）"
+    else
+        report_fail "awk へ渡す綴りにバックスラッシュを含めない" \
+            "逃がし列として解釈される値があります（${offenders}）。括り（例: [{]）で書き直してください"
+    fi
+}
+awk_v_backslash_case
 
 # 集計を出して、失敗が 1 件でもあれば非ゼロで終わる
 harness_summary

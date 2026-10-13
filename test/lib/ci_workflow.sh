@@ -70,7 +70,15 @@ CI_WORKFLOW_COMMAND_PREFIXES='((sudo|env|nice|timeout|command|exec)[[:space:]]+|
 # 重ねた開きを教えた側なので、**錨だけが追いついていない**状態だった）。
 # **`{` は空白を必須にする**——`{bash x;}` は bash として成り立たない綴りなので、
 # 許すと `${VAR}` のような無関係な綴りまで命令の位置と読む方向へ広がるだけ
-CI_WORKFLOW_GROUP_OPENERS='([(][[:space:]]*|\{[[:space:]]+)*'
+# **開き 1 つ分の綴り。** 下の「何個でも」はこれを繰り返したもので、
+# `chain_literal_status()` は 1 つずつ落とすのでこちらを読む（綴りを 2 か所に分けない）。
+# **波括弧は `[{]`（括り）で書き、`\{`（逃がし）にしない。** この綴りは awk へ `-v` で渡すが、
+# `-v` の値は**逃がし列として解釈される**ので、`\{` は実装ごとに扱いが違う——`gawk` は
+# 「escape sequence `\{' treated as plain `{'」を**毎回 stderr へ出し**、awk の出力を
+# 比較している検査（プログラムの大きさの回帰テスト）がその警告で落ちる。`mawk` は黙って
+# 受けるので**手元では通り CI だけが赤くなる**（実測。CI は gawk・この開発環境は mawk）
+CI_WORKFLOW_GROUP_OPENER='([(][[:space:]]*|[{][[:space:]]+)'
+CI_WORKFLOW_GROUP_OPENERS="${CI_WORKFLOW_GROUP_OPENER}*"
 
 # **コマンドの開始位置**を表す正規表現の断片（上の前置きを読み飛ばす）。
 # **`shellcheck` の網だけがこれを使う**（`test/ci_coverage_test.sh`）。あちらは
@@ -818,6 +826,7 @@ ci_workflow_run_with_structure() {
     awk -v structural_file="${structural_file}" -v comment_re="${CI_WORKFLOW_COMMENT_START}" \
         -v prop_re="${CI_WORKFLOW_NODE_PROPERTY_BLOCK}" \
         -v prop_plain_re="${CI_WORKFLOW_NODE_PROPERTY}" \
+        -v group_open_re="${CI_WORKFLOW_GROUP_OPENER}" \
         -f "${program_file}" "${workflow}"
     # awk の終了コードを控える（後始末で上書きされないように）
     local status=$?
@@ -1891,6 +1900,60 @@ ci_workflow_extract() {
             return probe
         }
 
+        # **連鎖（`&&` / `||`）の左辺が真偽どちらに決まるかを返す**（`"t"` / `"f"` / 不明なら `""`）。
+        # 判定の前に**先頭のグループの開き（`(` / `{`）・末尾の閉じ・飾り（`time` / `!`）を落とす**
+        # のが要点。生の綴りで `true` と比べていた頃は、`( true && <呼び出し>` の左辺が
+        # 「真と分かる」に当たらず、連鎖を「走るか分からない」に数える側（issue #150）が
+        # **実際には必ず走る呼び出しを「未配線」と報告**していた（実測で `( … )` と `{ … }` の
+        # 8 形。`&&` / `||` の向きが分かる形はすべてここを通る）。
+        # **`!` は真偽を反転する**（`! true && x` の `x` は走らない。実 bash で確認済み）。
+        # 落とす綴りの源は `strip_struct_wrappers()` と `CI_WORKFLOW_GROUP_OPENERS` 側にあり、
+        # ここでは「開きと閉じの記号」だけを自分で見る——`split_commands` が切った断片は
+        # 釣り合っていないことがあるので、釣り合いの判定には使えない（開きの数は数えない）
+        function chain_literal_status(t,   probe, flip, before) {
+            probe = t
+            # 反転の回数（偶奇）を持つ。`! !` は打ち消し合う
+            flip = 0
+            # 剥がせるものが無くなるまで交互に落とす（`( ! true` のように重なる）
+            while (1) {
+                before = probe
+                # `time` / `!` を剥がし、`!` を剥がしたぶんだけ真偽を反転する
+                probe = strip_struct_wrappers(probe)
+                if (STRUCT_INVERTED) { flip = !flip }
+                # **算術コマンド（`(( … ))`）は読まない。** 丸括弧を 2 つ落とすと中身が
+                # 「コマンドとしての `true`」に見えるが、算術の真偽は**変数の値**で決まる
+                # ——`(( true ))` は未設定の変数 `true` を 0 と読むので終了状態は 1（偽）。
+                # 読むと向きが逆の判定になり、`! (( true )) && set +e` の `set +e` を
+                # 「走らない」と数えて握り潰されたスイートを「ゲートしている」と読む
+                # （`main` には無い、この差分が入れかけた退行。レビューで実測）
+                if (probe ~ /^\(\(/) { return "" }
+                # 先頭のグループの開きを 1 つ落とす。**綴りは `CI_WORKFLOW_GROUP_OPENER` が源**
+                # で、`{` の後ろの空白は必須（`{true` は bash として成り立たない綴りなので、
+                # 落とすと `{true && <呼び出し>` を「真と分かる」と読んでしまう。レビューで実測）
+                sub("^[[:space:]]*" group_open_re, "", probe)
+                # 何も落ちなければ終わり（必ず短くなるので止まる）
+                if (probe == before) { break }
+            }
+            # 末尾の閉じと区切りを落とす（`( true )` の中身を見るため）。
+            # **`}` は落とさない**——`{ true; }` は `;` で切られるので左辺は `}` だけの断片になり
+            # （下記の残る境界）、落として得るものが無い一方、`{ echo a; true } && …` のように
+            # **bash が解析できない綴り**を「真と分かる」と読む口になる（レビューで実測）
+            sub(/[[:space:]]*[;)]*[[:space:]]*$/, "", probe)
+            probe = trim(probe)
+            # `true` / `:` は真、`false` は偽。反転されていれば入れ替える
+            if (probe == "true" || probe == ":") { return flip ? "f" : "t" }
+            if (probe == "false") { return flip ? "t" : "f" }
+            # それ以外は読めない（`""`＝走るか分からない側へ倒す。fail-closed）。
+            # **残っている境界**: `{ true; } && <呼び出し>` は左辺が `}` だけの断片になるので
+            # 読めない（`split_commands` が `;` で切る）。グループの終了状態は最後に走った
+            # コマンドのものなので「直前の状態を引き継ぐ」形は書けるが、**連鎖の切れ目を
+            # 判定する側（`prev_op` が `&&` / `||` でなければ状態を捨てる）が先に走るので
+            # 引き継ぎだけでは何も変わらない**（実測。1 度入れて外した）。
+            # 切れ目の判定ごと変えると `set` の到達判定まで動くので、この 1 形は
+            # fail-closed のまま残す（`( true ) && …` は括弧が同じ断片に載るので読める）
+            return ""
+        }
+
         # **`eval` はここに入れない**（レビューで実測した fail-closed）。`eval` に複合コマンドを
         # 渡す書き方は引用で包むので `split_commands` が中の `;` で切らず、
         # `eval "if false; then echo skipped; fi"` が**1 断片で自己完結する**。
@@ -2302,7 +2365,14 @@ ci_workflow_extract() {
                         #  レビューで実測。`&&` / `||` の並びは `set -e` を発動させない）。
                         # **`prev_op` を下で読み直してはいけない**——`prev_op` は断片の処理中に
                         # 自分の区切りへ更新されるので、開き側まで持たない（`pipe_in` と同じ事情）
-                        chain_in = (prev_op == "&&" || prev_op == "||")
+                        # **結論の分かる連鎖は「走るか分からない」に数えない。** 短絡で向きが
+                        # 決まっている形（`false && echo mid || bash <スイート>` の `||` の右・
+                        # `true || echo mid && bash <スイート>` の `&&` の右）は**必ず走る**ので、
+                        # 連鎖の有無だけで見送ると実行される呼び出しを「未配線」と事実と逆に
+                        # 診断する（その 2 形は対で固定済み。実測で落ちた）。
+                        # 逆向き（`&&` の手前が偽・`||` の手前が真）は上で `unreachable` が立ち、
+                        # 記録の `gate` が 0 になるのでここでは触らない
+                        chain_in = ((prev_op == "&&" && chain_status != "t") || (prev_op == "||" && chain_status != "f"))
                         # **入ってきた `|` が模様の区切りなのは、模様の位置にいたときだけ。**
                         # `set_arm_here` だけで見送ると、`echo x | { case zz in zz) set +e` の
                         # ように**本物のパイプ**で入ってきた断片がたまたまアーム見出しを含む場合まで
@@ -2811,11 +2881,9 @@ ci_workflow_extract() {
                         # 「直前が `||`／`&&` なら伝播を続ける」とだけ書くと、走る呼び出しを
                         # 「未配線」と事実と逆に診断して赤くする（レビューで実測）。
                         # 走らなかった断片は連鎖の状態を変えない（判定は最後に走った結果で決まる）
-                        if (!unreachable && dead_depth < 0) {
-                            if (text == "true" || text == ":") { chain_status = "t" }
-                            else if (text == "false") { chain_status = "f" }
-                            else { chain_status = "" }
-                        }
+                        # **判定は `chain_literal_status()` が持つ**（先頭のグループの開きや
+                        # `!` を見てから真偽を決める。生の綴りで比べると `( true` が読めない）
+                        if (!unreachable && dead_depth < 0) { chain_status = chain_literal_status(text) }
                         # ジョブの控えへ積む。**判定に要る材料（直後の区切り・`set` の明示・深さ）ごと**渡し、
                         # ゲートかどうかの結論はジョブが確定するときに出す
                         nbuf++
@@ -2851,7 +2919,20 @@ ci_workflow_extract() {
                         # つまりここで生の本文を控える理由は「死に体の除去」から
                         # 「回数の分からない本体を `struct_text` 経由で持ち上げないこと」へ移った
                         # （錨が継続語を許すようになったので、受け皿としての働きはもう無い）
-                        buf[nbuf] = step_id "\t" ops[j] "\t" ((dead_depth >= 0 || unreachable) ? 0 : errexit) "\t" pipefail "\t" uncertain "\t" text
+                        # **手前の `&&` / `||` も「走るか分からない」印に数える。** 5 列目は
+                        # 「走ると証明できない理由の数」で、制御構造の深さ（`uncertain`）に
+                        # 連鎖の分を足す——実行の照会（`top`）はこの列が 0 の記録だけを通すので、
+                        # `test -n "$RUN" && bash <スイート>` が「最上位で確実に走る」として
+                        # 数えられなくなる（実 `bash -e` では `$RUN` が空なら 1 度も走らないのに
+                        # `wired` だった＝**2 トークンで必須スイートを無効化できる fail-open**。
+                        # issue #150。`main` 既存で、素の呼び出し・ブレース・部分シェルの 3 形）。
+                        # **`chain_in` を見るのは `true_at` の枝だけでは足りない**——あちらは
+                        # 「`if true` の本体を最上位へ持ち上げるか」の判定で、持ち上げない形
+                        # （素の呼び出し）には掛からない。記録を書き出すこの 1 か所で見る。
+                        # **リンタの照会（`top` を渡さない）は巻き込まない**のが要点で、
+                        # `test -n "$FILES" && shellcheck $FILES` は正当な綴り——`gate` 側を
+                        # 0 にすると、正しく設定されたリンタを「配線されていない」と報告する
+                        buf[nbuf] = step_id "\t" ops[j] "\t" ((dead_depth >= 0 || unreachable) ? 0 : errexit) "\t" pipefail "\t" (uncertain + (chain_in ? 1 : 0)) "\t" text
                         # 偽と分かる条件のブロックに入るところを覚える（この深さより深い間は無効）
                         # **連鎖が続くなら条件は 1 語だけではない。** `split_commands` は `&&` / `||` で
                         # 切るので、`if false || true; then` の断片は `if false` になる。素直に
