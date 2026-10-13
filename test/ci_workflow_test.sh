@@ -668,6 +668,70 @@ jobs:
             MARK
             bash ${SUITE_PATH}"
 
+# **`shell:` の値からもプロパティを落とす**（issue #126 のレビューで実測）。
+# `shell: &s bash` は値が `bash` の正当な YAML なのに、残すと「未知のシェル」に転んで
+# 実際に走ってゲートしているステップが「未配線」になる（`run:` 側と同じ鍵と値の非対称）
+for shell_prop_case in "アンカー:&s bash" "タグ:!!str bash"
+do
+    assert_wired "shell: の値のプロパティは落とす（${shell_prop_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        shell: ${shell_prop_case#*:}
+        run: bash ${SUITE_PATH}"
+done
+
+# **`if:` の値からも落とす**（同じレビュー）。`if: &a true` は PyYAML も `True` と読むのに、
+# 残すと「真偽を評価できない」側へ落ちてゲートしているステップが「未配線」になる
+for cond_prop_case in "アンカー:&a true" "タグ:!!bool true"
+do
+    assert_wired "if: の値のプロパティは落とす（${cond_prop_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        if: ${cond_prop_case#*:}
+        run: bash ${SUITE_PATH}"
+done
+
+# 締めすぎない側: プロパティを落としても**無効化の判定は効いたまま**
+# （`continue-on-error: &a true` は握り潰しなので「配線されている」と言ってはいけない）
+assert_not_wired "continue-on-error: のプロパティ付きの true は握り潰しのまま" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        continue-on-error: &a true
+        run: bash ${SUITE_PATH}"
+
+# **アンカーの名前は PyYAML / libyaml の実装に合わせて狭く読む**（issue #126 のレビューで実測）。
+# 英数字・`-`・`_` は読み、それ以外を含む綴りは**読まない側＝fail-closed**へ落とす——
+# `&a:b` は PyYAML が名前を `a` で切って値を `:b bash …` と読むので、広い集合で読むと
+# 「走らないスイートをゲートしていると言う」fail-open になる
+assert_wired "アンカーの名前に - と _ は使える" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: &a-b_1 |
+          bash ${SUITE_PATH}"
+
+for narrow_anchor_case in "コロンを含む:&a:b" "ドットを含む:&shell.files"
+do
+    assert_not_wired "実装が受け付けないアンカー名は読まない（${narrow_anchor_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: ${narrow_anchor_case#*:} bash ${SUITE_PATH}"
+done
+
 # **素のスカラーに置いたプロパティも値から落とす**（issue #126 のレビューで実測）。
 # `run: &suites bash test/x.sh` は値が `bash test/x.sh` の正当な YAML なのに、落とさないと
 # `suites bash test/x.sh` という幻のコマンドが記録され、実行しているスイートが「未配線」になる
@@ -4896,6 +4960,20 @@ jobs:
     runs-on: ubuntu-latest
     env:
       LIST: >-2
+        a.sh
+    steps:
+      - name: subject
+        run: bash ${SUITE_PATH}" "type-check,|a.sh,"
+
+# **鍵と指示子のあいだのノードプロパティを挟んでも読む**（issue #126 のレビューで実測）。
+# 構造行側は `&files >-` をブロックの開始と認めて本文を読み飛ばすので、ここが読まないと
+# 定義が 1 件も記録されず `ci_coverage_test.sh` が「定義が 0 か所」という事実と違う診断で落ちる
+assert_env_block "ノードプロパティを挟んだ env の折りたたみブロックを読む" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    env:
+      LIST: &files >-
         a.sh
     steps:
       - name: subject
