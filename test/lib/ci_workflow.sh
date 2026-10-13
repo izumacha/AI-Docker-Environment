@@ -3512,7 +3512,7 @@ ci_workflow_extract() {
         # ステップ番号にジョブ名を冠するのは、呼び出し側が「どのジョブが実行するか」まで
         # 問えるようにするため（env は同じジョブからしか見えないので、ジョブを跨いだ
         # 分割は「配線されている」と答えてはいけない）
-        function flush_job(   i, parts, shell_name, errexit_on, pipefail_on, gate, last_cmd, chain_end, chain_parts) {
+        function flush_job(   i, parts, shell_name, errexit_on, pipefail_on, gate, last_cmd, chain_end, chain_parts, absorbed, rhs_parts) {
             # 未確定のステップをジョブの控えへ移してから判断する
             flush_step()
             # **env の記録は無効化に関わらず出す。** これは「何が実行されるか」ではなく
@@ -3560,15 +3560,37 @@ ci_workflow_extract() {
                     # だけの本文は GATES・後ろに 1 行足すと NOGATE（＝実測）。
                     # **閉じ語だけの記録（`}` / `fi` / `done` / `)`）は数えない**——コマンドを
                     # 走らせないので終了状態を上書きしない
-                    if (parts[2] == "&&" && parts[7] != "1") {
+                    # **並びの途中で握り潰される形は位置を見る前に落とす**（レビュー指摘、実測）。
+                    # (a) `&` が付いた並びは丸ごと背後へ回り、その場の終了状態は 0
+                    # （`bash <スイート> && echo ok &` は実 `bash -e` で NOGATE）。
+                    # (b) `||` の右辺が**綴りから真と分かる**（`true` / `:`）なら並びの
+                    # 終了状態は 0 になる（`bash <スイート> && echo ok || true` も NOGATE）。
+                    # 読めない右辺は現状どおり位置だけで決める——`|| false` のように
+                    # **必ず失敗する右辺なら実際には伝わる**ので、一律に握り潰し扱いへ倒すと
+                    # 正しくゲートしている綴りを未配線と報告する（実測で GATES）。
+                    # **握り潰しの判定は部分シェルの中でも効かせる**——`( … || true )` は
+                    # 部分シェルの終了状態そのものが 0 になるので、親で検査されても伝わらない
+                    # （実 `bash -e` で NOGATE。位置の判定だけを部分シェルで飛ばす）
+                    # **パイプラインは並びの 1 要素なので跨ぐ**——`bash <スイート> && echo ok | cat`
+                    # の並びはパイプラインで終わるので、跨がないと連鎖の終端が
+                    # 「ステップの最後のコマンド」に届かず、正しくゲートしている綴りを
+                    # 未配線と報告する（実測で GATES。`main` は wired と答えていた）
+                    if (parts[2] == "&&") {
+                        absorbed = 0
                         chain_end = i
                         while (chain_end <= nbuf) {
                             split(buf[chain_end], chain_parts, "\t")
                             if (chain_parts[1] != parts[1]) { break }
-                            if (chain_parts[2] != "&&" && chain_parts[2] != "||") { break }
+                            if (chain_parts[2] == "&") { absorbed = 1; break }
+                            if (chain_parts[2] == "||" && chain_end < nbuf) {
+                                split(buf[chain_end + 1], rhs_parts, "\t")
+                                if (rhs_parts[1] == parts[1] && chain_literal_status(rhs_parts[6]) == "t") { absorbed = 1; break }
+                            }
+                            if (chain_parts[2] != "&&" && chain_parts[2] != "||" && chain_parts[2] != "|") { break }
                             chain_end++
                         }
-                        gate = (chain_end == last_cmd[parts[1]]) ? 1 : 0
+                        if (absorbed) { gate = 0 }
+                        else if (parts[7] != "1") { gate = (chain_end == last_cmd[parts[1]]) ? 1 : 0 }
                     }
                     if (parts[2] == "|") { gate = pipefail_on }
                     if (!errexit_on) { gate = 0 }
@@ -3581,8 +3603,6 @@ ci_workflow_extract() {
             nenv = 0
             for (i = 1; i <= nbuf; i++) { delete buf[i] }
             nbuf = 0
-            # ステップごとの「最後のコマンド」はジョブをまたいで持ち越さない
-            for (i in last_cmd) { delete last_cmd[i] }
             # ステップごとのシェル指定はジョブをまたいで持ち越さない
             for (i in shells) { delete shells[i] }
             job_disabled = 0

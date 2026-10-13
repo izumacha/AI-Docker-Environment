@@ -5264,6 +5264,47 @@ jobs:
           ${and_live_case#*:}"
 done
 
+# **並びの途中で握り潰される形は位置を見る前に落とす**（レビュー指摘、実測）。
+# `&` が付いた並びは丸ごと背後へ回り、`||` の右辺が綴りから真と分かるなら並びの
+# 終了状態は 0 になる。どちらも実 `bash -e` で NOGATE。
+# **部分シェルの中でも効く**——`( … || true )` は部分シェルの終了状態そのものが 0 になる
+for and_swallowed_case in \
+    "|| true が後ろ:bash ${SUITE_PATH} && echo ok || true" \
+    "コロンの no-op が後ろ:bash ${SUITE_PATH} && echo ok || :" \
+    "並びを背後へ回す:bash ${SUITE_PATH} && echo ok &" \
+    "パイプラインで終わる並び＋後ろの行:bash ${SUITE_PATH} && echo ok | cat
+          echo done" \
+    "パイプラインの並びを背後へ回す:bash ${SUITE_PATH} && echo ok | cat &" \
+    "部分シェルの中の || true:( bash ${SUITE_PATH} && echo ok || true )"
+do
+    assert_not_wired "並びの途中で握り潰される（${and_swallowed_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${and_swallowed_case#*:}"
+done
+
+# 締めすぎない側。**パイプラインは並びの 1 要素なので跨ぐ**（跨がないと連鎖の終端が
+# 「ステップの最後のコマンド」に届かず、正しくゲートしている綴りを未配線と報告する）。
+# **読めない右辺の `||` は握り潰し扱いにしない**——`|| false` は必ず失敗するので
+# 実 `bash -e` では伝わる（実測で GATES）
+for and_pipeline_case in \
+    "パイプラインで終わる並びが最後:bash ${SUITE_PATH} && echo ok | cat" \
+    "読めない右辺の ||:bash ${SUITE_PATH} && echo ok || false"
+do
+    assert_wired "並びの終端まで届けば合否に効く（${and_pipeline_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${and_pipeline_case#*:}"
+done
+
 # **`&&` を伝えるとき、中の記録が既に持つ強い抑制を上書きしない**（レビュー指摘、実測）。
 # `{ bash <スイート> || true; } && echo ok` の呼び出しは `||` で握り潰されていて外へ 1 つも
 # 漏れないのに、閉じ括弧に付いた区切りで一律に塗り替えると `&&` になり、位置の判定を
@@ -7430,6 +7471,51 @@ awk_v_backslash_case() {
     fi
 }
 awk_v_backslash_case
+
+# **ケースの一覧のラベルにコロンを含めない。** この近くの検査は `"ラベル:本文"` という
+# 1 つの文字列を `${case%%:*}` と `${case#*:}` で割るので、**ラベル側にコロンが入ると
+# 本文の先頭にラベルの残りが混ざる**。混ざった本文は bash の綴りとして成り立たない語に
+# なるため呼び出しが見つからず、`assert_not_wired` のケースは**何も見張らないまま緑**で
+# 通る（実測。`"|| : が後ろ:bash <スイート> …"` が本文 ` が後ろ:bash …` に化けて、
+# 仕掛けを壊す変異でも落ちなかった）。**本文が日本語で始まることを印として落とす**
+# ——正しい本文はコマンド（ASCII）で始まる。
+# **対象はこのファイル自身のソースから導く**（一覧を書くと次に足したループが黙って外れる）
+case_label_colon_case() {
+    local out
+    # `for <名前> in \` から `do` までを一覧の本体とみなし、`"` で始まる行を 1 ケースとして読む。
+    # **近似**: 本文が複数行のケースは 1 行目（ラベルを含む行）だけを見る。本文の中に
+    # 桁 0 の `do` があるとその一覧を早く閉じるが、倒れる向きは「見る数が減る」側
+    out="$(awk '
+        /^for [A-Za-z_]+ in \\$/ { inlist = 1; next }
+        inlist && /^do$/ { inlist = 0; next }
+        inlist && /^    "/ {
+            seen++
+            entry = substr($0, index($0, "\"") + 1)
+            colon = index(entry, ":")
+            if (colon == 0) { next }
+            body = substr(entry, colon + 1)
+            sub(/^[[:space:]]+/, "", body)
+            first = substr(body, 1, 1)
+            if (first != "" && first !~ /^[ -~]$/) { bad = bad "\n  " NR ": " substr(entry, 1, colon - 1) }
+        }
+        END { print seen bad }
+    ' "${BASH_SOURCE[0]}")"
+    local seen="${out%%$'\n'*}"
+    local offenders="${out#"${seen}"}"
+    # 1 件も拾えなければ検出網が死んでいる（一覧の書き方が変わった）ので落とす（fail-closed）
+    if [ -z "${seen}" ] || [ "${seen}" -eq 0 ] 2>/dev/null; then
+        report_fail "ケースの一覧のラベルにコロンを含めない" \
+            "ケースを 1 つも拾えませんでした（一覧の書き方が変わった可能性）"
+        return
+    fi
+    if [ -z "${offenders}" ]; then
+        report 0 "ケースの一覧のラベルにコロンを含めない（${seen} 件）"
+    else
+        report_fail "ケースの一覧のラベルにコロンを含めない" \
+            "ラベルにコロンを含むケース（本文の先頭にラベルの残りが混ざります）:${offenders}"
+    fi
+}
+case_label_colon_case
 
 # 集計を出して、失敗が 1 件でもあれば非ゼロで終わる
 harness_summary
