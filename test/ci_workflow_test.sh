@@ -3246,6 +3246,56 @@ jobs:
           ${chain_guarded_case#*:}"
 done
 
+# **連鎖に守られているのは `if true` の本体だけではない**（issue #150。`main` 既存の fail-open）。
+# `test -n "${DOLLAR}RUN" && bash <スイート>` は `$RUN` が空なら 1 度も走らないのに「最上位で
+# 確実に走る」と記録されていた——**2 トークンで必須スイートを無効化できる**形で、素の呼び出し・
+# ブレースグループ・部分シェル・`||` の右辺・2 段の連鎖のどれでも同じだった
+# （`if true` を挟んだ形だけが PR #148 で閉じていた）。記録の 5 列目（走ると証明できない
+# 理由の数）に連鎖の分を足して、実行の照会から外す
+for chain_call_case in \
+    "素の呼び出し:test -n \"${DOLLAR}RUN\" && bash ${SUITE_PATH}" \
+    "ブレースグループ:test -n \"${DOLLAR}RUN\" && { bash ${SUITE_PATH}; }" \
+    "部分シェル:test -n \"${DOLLAR}RUN\" && ( bash ${SUITE_PATH} )" \
+    "|| の右辺:test -z \"${DOLLAR}RUN\" || bash ${SUITE_PATH}" \
+    "2 段の連鎖:test -n \"${DOLLAR}RUN\" && test -n \"${DOLLAR}ALSO\" && bash ${SUITE_PATH}" \
+    "反転された真:! true && bash ${SUITE_PATH}"
+do
+    assert_not_wired "連鎖の右辺（${chain_call_case%%:*}）は実行の証拠にしない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${chain_call_case#*:}
+          echo done"
+done
+
+# **締めすぎない側＝短絡で結論が分かる連鎖は「必ず走る」のまま。**
+# 連鎖の有無だけで見送ると、実際に走る呼び出しを「未配線」と事実と逆に診断して CI を赤くする。
+# 真偽の判定は `chain_literal_status()` が持ち、**先頭のグループの開き（`( true`）・
+# 末尾の閉じ（`( true )`）・飾り（`time` / `!`）を落としてから**比べる——生の綴りで
+# `true` と比べていた版では、この 8 形（`( … )` と `{ … }` の中）が `not-wired` に化けた（実測）
+for chain_known_case in \
+    "真と分かる &&:true && bash ${SUITE_PATH}" \
+    "コロンの &&:: && bash ${SUITE_PATH}" \
+    "偽の && から || へ:false && echo mid || bash ${SUITE_PATH}" \
+    "真の || から && へ:true || echo mid && bash ${SUITE_PATH}" \
+    "部分シェルの中の真:( true && bash ${SUITE_PATH} )" \
+    "閉じた部分シェル:( true ) && bash ${SUITE_PATH}" \
+    "反転された偽:! false && bash ${SUITE_PATH}" \
+    "time 付きの真:time true && bash ${SUITE_PATH}"
+do
+    assert_wired "結論の分かる連鎖（${chain_known_case%%:*}）は実行の証拠になる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${chain_known_case#*:}"
+done
+
 # **`!` で反転された `if true` / `while true` も「必ずゲートする」ではない**（レビューで実測）。
 # `open_form()` は `strip_struct_wrappers()` を通して分類するので `! if true; then` も
 # 「必ず走る」の種類になるが、`!` は終了状態を**反転**するので、本体が走って失敗しても
@@ -5061,6 +5111,19 @@ jobs:
     steps:
       - name: lint
         run: shellcheck ${DOLLAR}LIST" \
+    ci_workflow_command_matches "" '(^|[;&|(][[:space:]]*)shellcheck([^[:alnum:]_])' '[$][{]?LIST[}]?([^[:alnum:]_]|$)'
+
+# **連鎖の右辺でもリンタの網は見る**（issue #150）。実行の照会は「走ると証明できない」として
+# 外すが、`test -n "${DOLLAR}LIST" && shellcheck ${DOLLAR}LIST` は正当な綴りなので、
+# こちらで外すと**正しく設定されたリンタを「配線されていない」と報告**する（照会ごとに
+# 意味が違うので、記録の 5 列目を見るのは `top` を渡す側だけ）
+assert_matcher match "コマンド単位: 連鎖の右辺のコマンドも見る" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: lint
+        run: test -n \"${DOLLAR}LIST\" && shellcheck ${DOLLAR}LIST" \
     ci_workflow_command_matches "" '(^|[;&|(][[:space:]]*)shellcheck([^[:alnum:]_])' '[$][{]?LIST[}]?([^[:alnum:]_]|$)'
 
 assert_matcher no-match "コマンド単位: 別々のコマンドに散っていれば満たさない" "name: ci
