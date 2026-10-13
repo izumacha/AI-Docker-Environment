@@ -5346,7 +5346,10 @@ for and_swallowed_case in \
     "パイプラインで終わる並び＋後ろの行:bash ${SUITE_PATH} && echo ok | cat
           echo done" \
     "パイプラインの並びを背後へ回す:bash ${SUITE_PATH} && echo ok | cat &" \
-    "部分シェルの中の || true:( bash ${SUITE_PATH} && echo ok || true )"
+    "部分シェルの中の || true:( bash ${SUITE_PATH} && echo ok || true )" \
+    "読めない右辺の ||:bash ${SUITE_PATH} && echo ok || echo \"suite failed\"" \
+    "部分シェルの中の読めない右辺:( bash ${SUITE_PATH} && echo ok || echo msg )" \
+    "0 を明示した exit が後ろ:bash ${SUITE_PATH} && echo ok || exit 0"
 do
     assert_not_wired "並びの途中で握り潰される（${and_swallowed_case%%:*}）" "name: ci
 jobs:
@@ -5360,11 +5363,19 @@ done
 
 # 締めすぎない側。**パイプラインは並びの 1 要素なので跨ぐ**（跨がないと連鎖の終端が
 # 「ステップの最後のコマンド」に届かず、正しくゲートしている綴りを未配線と報告する）。
-# **読めない右辺の `||` は握り潰し扱いにしない**——`|| false` は必ず失敗するので
-# 実 `bash -e` では伝わる（実測で GATES）
+# **「成功しえない右辺」の `||` は握り潰し扱いにしない**——並びをいつでも失敗させるので
+# 実 `bash -e` では伝わる（実測で GATES）。`false` に加えて `exit` / `return` の
+# 失敗で終わる綴りがここに入る（レビュー指摘。除く条件を `false` だけにしていた頃は
+# `|| exit 1` を未配線と報告していた＝正しい配線を赤にする fail-closed）。
+# `exit $rc` のように**読めない引数**も失敗側へ倒す（`||` の枝の `exit` は
+# 失敗を伝えるために書くのがほぼすべて）
 for and_pipeline_case in \
     "パイプラインで終わる並びが最後:bash ${SUITE_PATH} && echo ok | cat" \
-    "読めない右辺の ||:bash ${SUITE_PATH} && echo ok || false"
+    "偽と分かる右辺の ||:bash ${SUITE_PATH} && echo ok || false" \
+    "失敗で終わる exit が後ろ:bash ${SUITE_PATH} && echo ok || exit 1" \
+    "引数の無い exit が後ろ:bash ${SUITE_PATH} && echo ok || exit" \
+    "読めない引数の exit が後ろ:bash ${SUITE_PATH} && echo ok || exit \$rc" \
+    "失敗で終わる return が後ろ:bash ${SUITE_PATH} && echo ok || return 1"
 do
     assert_wired "並びの終端まで届けば合否に効く（${and_pipeline_case%%:*}）" "name: ci
 jobs:

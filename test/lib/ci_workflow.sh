@@ -71,7 +71,7 @@ CI_WORKFLOW_COMMAND_PREFIXES='((sudo|env|nice|timeout|command|exec)[[:space:]]+|
 # **`{` は空白を必須にする**——`{bash x;}` は bash として成り立たない綴りなので、
 # 許すと `${VAR}` のような無関係な綴りまで命令の位置と読む方向へ広がるだけ
 # **開き 1 つ分の綴り。** 下の「何個でも」はこれを繰り返したもので、
-# `chain_literal_status()` は 1 つずつ落とすのでこちらを読む（綴りを 2 か所に分けない）。
+# `chain_status_probe()` は 1 つずつ落とすのでこちらを読む（綴りを 2 か所に分けない）。
 # **波括弧は `[{]`（括り）で書き、`\{`（逃がし）にしない。** この綴りは awk へ `-v` で渡すが、
 # `-v` の値は**逃がし列として解釈される**ので、`\{` は実装ごとに扱いが違う——`gawk` は
 # 「escape sequence `\{' treated as plain `{'」を**毎回 stderr へ出し**、awk の出力を
@@ -1978,23 +1978,28 @@ ci_workflow_extract() {
         # 落とす綴りの源は `strip_struct_wrappers()` と `CI_WORKFLOW_GROUP_OPENERS` 側にあり、
         # ここでは「開きと閉じの記号」だけを自分で見る——`split_commands` が切った断片は
         # 釣り合っていないことがあるので、釣り合いの判定には使えない（開きの数は数えない）
-        function chain_literal_status(t,   probe, flip, before) {
+        # **判定の前の正規化だけを行い、残った綴りを返す**（`chain_literal_status()` と
+        # `chain_never_succeeds()` が共有する。§6 DRY——写しを 2 つ持つと、落とす綴りを
+        # 直したときに片方だけが古くなる）。反転の偶奇は `CHAIN_PROBE_FLIP`、
+        # 算術コマンドだったかは `CHAIN_PROBE_ARITH` に載せる
+        function chain_status_probe(t,   probe, before) {
             probe = t
             # 反転の回数（偶奇）を持つ。`! !` は打ち消し合う
-            flip = 0
+            CHAIN_PROBE_FLIP = 0
+            CHAIN_PROBE_ARITH = 0
             # 剥がせるものが無くなるまで交互に落とす（`( ! true` のように重なる）
             while (1) {
                 before = probe
                 # `time` / `!` を剥がし、`!` を剥がしたぶんだけ真偽を反転する
                 probe = strip_struct_wrappers(probe)
-                if (STRUCT_INVERTED) { flip = !flip }
+                if (STRUCT_INVERTED) { CHAIN_PROBE_FLIP = !CHAIN_PROBE_FLIP }
                 # **算術コマンド（`(( … ))`）は読まない。** 丸括弧を 2 つ落とすと中身が
                 # 「コマンドとしての `true`」に見えるが、算術の真偽は**変数の値**で決まる
                 # ——`(( true ))` は未設定の変数 `true` を 0 と読むので終了状態は 1（偽）。
                 # 読むと向きが逆の判定になり、`! (( true )) && set +e` の `set +e` を
                 # 「走らない」と数えて握り潰されたスイートを「ゲートしている」と読む
                 # （`main` には無い、この差分が入れかけた退行。レビューで実測）
-                if (probe ~ /^\(\(/) { return "" }
+                if (probe ~ /^\(\(/) { CHAIN_PROBE_ARITH = 1; return "" }
                 # 先頭のグループの開きを 1 つ落とす。**綴りは `CI_WORKFLOW_GROUP_OPENER` が源**
                 # で、`{` の後ろの空白は必須（`{true` は bash として成り立たない綴りなので、
                 # 落とすと `{true && <呼び出し>` を「真と分かる」と読んでしまう。レビューで実測）
@@ -2007,10 +2012,15 @@ ci_workflow_extract() {
             # （下記の残る境界）、落として得るものが無い一方、`{ echo a; true } && …` のように
             # **bash が解析できない綴り**を「真と分かる」と読む口になる（レビューで実測）
             sub(/[[:space:]]*[;)]*[[:space:]]*$/, "", probe)
-            probe = trim(probe)
+            return trim(probe)
+        }
+
+        function chain_literal_status(t,   probe) {
+            probe = chain_status_probe(t)
+            if (CHAIN_PROBE_ARITH) { return "" }
             # `true` / `:` は真、`false` は偽。反転されていれば入れ替える
-            if (probe == "true" || probe == ":") { return flip ? "f" : "t" }
-            if (probe == "false") { return flip ? "t" : "f" }
+            if (probe == "true" || probe == ":") { return CHAIN_PROBE_FLIP ? "f" : "t" }
+            if (probe == "false") { return CHAIN_PROBE_FLIP ? "t" : "f" }
             # それ以外は読めない（`""`＝走るか分からない側へ倒す。fail-closed）。
             # **残っている境界**: `{ true; } && <呼び出し>` は左辺が `}` だけの断片になるので
             # 読めない（`split_commands` が `;` で切る）。グループの終了状態は最後に走った
@@ -2020,6 +2030,34 @@ ci_workflow_extract() {
             # 切れ目の判定ごと変えると `set` の到達判定まで動くので、この 1 形は
             # fail-closed のまま残す（`( true ) && …` は括弧が同じ断片に載るので読める）
             return ""
+        }
+
+        # **その綴りが「成功しえない」なら 1 を返す**（`||` の右辺が並びの失敗を
+        # 握り潰せるかを見る側。issue #174 のレビュー指摘）。`||` の右辺が成功すれば
+        # 並びの終了状態は 0 になり左辺の失敗は消えるが、**右辺自身が必ず失敗する綴り**
+        # （`false` / `exit 1` / `exit` / `return 1`）なら並びはいつでも失敗するので、
+        # 失敗は握り潰されずに伝わる（実測で GATES）。ここを「偽と分かる綴り（`false`）
+        # だけ」にすると `bash <スイート> && echo ok || exit 1` を未配線と報告する
+        # ——**正しく配線されている綴りを赤にする fail-closed**（`main` は wired と答えており、
+        # issue #174 の差分が入れた退行。レビューで実測）
+        # **`exit` / `return` は 0 を明示したときだけ成功する**。引数が無ければ `$?`
+        # （＝直前の失敗）で終わるので失敗、数値以外（`exit $rc`）は読めないので
+        # 「成功しえない」側へ倒す——`||` の枝の `exit` は失敗を伝えるために書くのが
+        # ほぼすべてで、握り潰し扱いにすると上と同じ fail-closed になる
+        function chain_never_succeeds(t,   probe) {
+            probe = chain_status_probe(t)
+            # 算術コマンドは真偽を読まない（上と同じ理由）
+            if (CHAIN_PROBE_ARITH) { return 0 }
+            # 綴りから真偽が分かる形は `chain_literal_status()` と同じ規則で読む
+            if (probe == "true" || probe == ":") { return CHAIN_PROBE_FLIP ? 1 : 0 }
+            if (probe == "false") { return CHAIN_PROBE_FLIP ? 0 : 1 }
+            # `exit 0` / `return 0` だけが成功する。`!` は見ない——`exit` は戻らないので
+            # 反転する相手がいない（`return` に `!` を付ける綴りは実在しないため同じ扱い）
+            if (probe ~ /^(exit|return)([[:space:]]+[^[:space:]]+)?$/) {
+                return (probe ~ /^(exit|return)[[:space:]]+0+$/) ? 0 : 1
+            }
+            # それ以外は普通のコマンドなので成功しうる（握り潰しうる）
+            return 0
         }
 
         # **`eval` はここに入れない**（レビューで実測した fail-closed）。`eval` に複合コマンドを
@@ -3596,9 +3634,22 @@ ci_workflow_extract() {
                     # （`bash <スイート> && echo ok &` は実 `bash -e` で NOGATE）。
                     # (b) `||` の右辺が**綴りから真と分かる**（`true` / `:`）なら並びの
                     # 終了状態は 0 になる（`bash <スイート> && echo ok || true` も NOGATE）。
-                    # 読めない右辺は現状どおり位置だけで決める——`|| false` のように
-                    # **必ず失敗する右辺なら実際には伝わる**ので、一律に握り潰し扱いへ倒すと
-                    # 正しくゲートしている綴りを未配線と報告する（実測で GATES）。
+                    # **読めない右辺も握り潰し扱いにする**（issue #174）——除くのは
+                    # **成功しえない右辺**（`chain_never_succeeds()`。`|| false` ・ `|| exit 1` ・
+                    # `|| exit` ・ `|| return 1`）だけ。あれは並びをいつでも失敗させるので
+                    # 失敗は実際に伝わる（実測で GATES）が、`|| echo "suite failed"` のように
+                    # **成功する普通のコマンド**を「読めないから位置だけで決める」と、
+                    # 並びがステップの最後にあるとき wired に化ける（実 `bash -e` は NOGATE）。
+                    # しかもこれは CI でごく普通に書かれる綴りで、実在の `ci.yml` の
+                    # `run: bash <スイート>` をこの形へ差し替えても `ci_coverage_test.sh` が
+                    # 緑のまま通った（レビューで実測）。**記録自身の区切りが `||` のときの
+                    # 扱い（一律で伝えない）と向きがそろう**のも要点で、同じ関数の中で
+                    # 2 つの `||` の答えが食い違う状態も解消する。
+                    # **除く条件を「偽と分かる綴り（`false`）だけ」にしてはいけない**
+                    # （レビュー指摘、実測）——`bash <スイート> && echo ok || exit 1` を
+                    # 未配線と報告する。正しく配線されている綴りを赤にする fail-closed で、
+                    # しかも直し方が「ワークフローを書き換える」しか無くなる
+                    # （`main` は wired と答えており、この差分が入れた退行）
                     # **握り潰しの判定は部分シェルの中でも効かせる**——`( … || true )` は
                     # 部分シェルの終了状態そのものが 0 になるので、親で検査されても伝わらない
                     # （実 `bash -e` で NOGATE。位置の判定だけを部分シェルで飛ばす）
@@ -3615,7 +3666,7 @@ ci_workflow_extract() {
                             if (chain_parts[2] == "&") { absorbed = 1; break }
                             if (chain_parts[2] == "||" && chain_end < nbuf) {
                                 split(buf[chain_end + 1], rhs_parts, "\t")
-                                if (rhs_parts[1] == parts[1] && chain_literal_status(rhs_parts[6]) == "t") { absorbed = 1; break }
+                                if (rhs_parts[1] == parts[1] && !chain_never_succeeds(rhs_parts[6])) { absorbed = 1; break }
                             }
                             if (chain_parts[2] != "&&" && chain_parts[2] != "||" && chain_parts[2] != "|") { break }
                             chain_end++
