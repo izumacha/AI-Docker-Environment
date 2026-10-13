@@ -1453,23 +1453,37 @@ ci_workflow_extract() {
         # 見つけるので、素直に数えると 1 つ深く記録して打ち消しが成立しなくなる）。
         # 逆にブレース・関数の本体・`case` のアームは中で走るので数える
         #
-        # **ここには先頭の部分シェルを越える処理（`cross_lead_subshells()`）を置いていない**
-        # ——`last_deciding_open()` / `walk_opens_case()` には要るのに、ここには要らない
-        # 理由を残す（置き忘れではないので、見つけた人が「同じ分断だ」と読んで足さないため）。
-        # (a) `set` を探す `set_command()` は `strip_command_prefixes()` を通るが、あの一覧に
-        #     `(` を剥がす規則は**無い**（同関数の「`(` は入れない」の段落が理由を記録している）。
-        #     したがって釣り合っていない先頭の `(` の後ろに置いた `set` はそもそも見つからず、
-        #     `set_probe` が空のままここへ来ない（`( set +e; bash x )` が実例）。
-        # (b) 残る経路は `case` のアームの走査（`set_arm` を `)` の先へ進めてから探す形）だけで、
-        #     ここだけは `( case $M in a) set +e` のように先頭の `(` を持つ本文が届く。
-        #     **実測ではこの越える処理を足しても判定が 1 件も変わらない**
-        #     （総当たりの 680 通り ＋ 1 行アームを狙った 14 通り、差分 0）。
-        #     何も変えない門番を置くと、読み手に「守られている」と誤解させるだけなので置かない。
-        # **この前提が崩れたら（`(` を剥がす規則が増える・アーム以外の経路が増える）、
-        #   自前で導き直さず `cross_lead_subshells()` をここでも通すこと。**
-        function set_open_depth(t, cached_fn_form, use_cached,   n, k, probe, rest) {
-            probe = t; n = 0
+        # **先頭に並ぶ部分シェルも越えて数える**（issue #180）。ここには以前その処理が無く、
+        # 「`set_command()` は `(` を剥がさないので釣り合っていない先頭の `(` の後ろの `set` は
+        # そもそも見つからない」ことを理由に置いていなかった。その前提は issue #180 で崩れた
+        # ——`( set +e` と 1 行で書いた握り潰しを読まないと、**部分シェルの中の呼び出しが
+        # まるごと「合否に効く」と読まれる fail-open** だったので、呼び出し側が先頭の
+        # 部分シェルを越えた先も探すようにした。当時のコメントが「前提が崩れたら自前で
+        # 導き直さず `cross_lead_subshells()` をここでも通すこと」と指示していたので、そうしている。
+        # **`strip_command_prefixes()` へ `(` を足す形では直さない**——あちらで落とすと
+        # `open_form()` が後ろの `if` も形 2 として返し、1 つの断片で同じ階層を二重に開く
+        # （同関数の「`(` は入れない」の段落が理由を記録している）。越えるのは呼び出し側と
+        # ここだけに閉じる。
+        # 素の「開いた数」ではない点は下記のとおり変わらない（`if set +e; then` の `set` は
+        # 条件の位置にあるので `if` の階層は数えない）
+        function set_open_depth(t, cached_fn_form, use_cached,   n, k, probe, rest, cap, leadn) {
+            probe = t; n = 0; leadn = 0
+            # **上限はループの外で 1 度だけ求める**（`t` は変わらないので値は同じ）。
+            # 兄弟の 2 つ（`last_deciding_open()` / `walk_opens_case()`）も同じ形で、
+            # ここだけ中で呼ぶと開きが 1 つ増えるたびに断片全体の走査が 1 回増え、
+            # 3 つの歩調がずれる起点になる
+            cap = lead_subshell_cap(t)
             while (1) {
+                # **上限は越えた数（`leadn`）で数える**（`n` と共有すると手前の `{` だけで
+                # 上限に当たる。理由は `cross_lead_subshells()` の説明）。
+                # **この越えにピンは無い**（外しても 1 件も落ちない＝実測）。それでも残すのは、
+                # 外すと「部分シェルの中で走る `set`」を**親の深さ**で記録することになり、
+                # `apply_errexit()` の打ち消し条件（`weak_depth >= at`）と閉じるときの
+                # 取り消し（`weak_depth > depth`）が読む値が嘘になるため。いまは打ち消しが
+                # 成立しなくても `at_uncertain == 0` の側で同じ答えになるので差が出ないだけで、
+                # そこを締める変更が入った瞬間に静かな fail-closed になる
+                probe = cross_lead_subshells(probe, cap - leadn)
+                leadn += LEAD_SUBSHELLS; n += LEAD_SUBSHELLS
                 k = open_form(probe, cached_fn_form, (use_cached && n == 0))
                 # 何も開かない綴りと見出しだけの綴りはここで終わり
                 if (k == 0 || k == 4) { break }
@@ -2234,7 +2248,7 @@ ci_workflow_extract() {
         # **ここでは出力しない**のが要点で、ジョブ単位の無効化キー（`if: false` 等）は
         # YAML のキー順が自由である以上 `steps:` の**後ろ**にも書ける。書いた時点で
         # 出力済みのステップは取り消せないため、ジョブ 1 つ分を溜めてから出す
-        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, closed_any, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, closed_subshell, closed_uncertain, chain_in, inverted, arm_masked, arm_at, arm_expected, case_scope, opens_case, opens_case_here, case_opens_at, close_probe, close_rest, close_first, open_head, esac_probe, esac_rest, esac_first, dead_probe, dead_lead, close_n, exit_seen, chain_at, chain_depth, closed_sub_seen, closed_sub_e, closed_sub_p, sub_rec, sub_rec_level, prom_rec, sub_id, carry_level, open_stripped, head_inverted, inverted_at, closed_inverted, prop_op, sub_serial) {
+        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_lead_rest, set_lead_n, set_sub, set_res, set_res_at, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, closed_any, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, closed_subshell, closed_uncertain, chain_in, inverted, arm_masked, arm_at, arm_expected, case_scope, opens_case, opens_case_here, case_opens_at, close_probe, close_rest, close_first, open_head, esac_probe, esac_rest, esac_first, dead_probe, dead_lead, close_n, exit_seen, chain_at, chain_depth, closed_sub_seen, closed_sub_e, closed_sub_p, sub_rec, sub_rec_level, prom_rec, sub_id, carry_level, open_stripped, head_inverted, inverted_at, closed_inverted, prop_op, sub_serial) {
             # **シェルのオプションはステップごとにリセットする。** ステップは 1 つずつ
             # 別のシェルで走るので、前のステップの `set +e` / `pipefail` は引き継がれない。
             # **控えるのは `set` で明示された分だけ（-1 = 明示なし）。** シェルの既定と突き合わせるのは
@@ -2547,6 +2561,30 @@ ci_workflow_extract() {
                         # ここで見出しだけを落として拾い、下で「本体の中の `set`」として
                         # （＝その場では反映せず、関数名に控える形で）扱う
                         if (set_probe == "" && fn_form == 2) { set_probe = set_command(function_body_rest(struct_text)) }
+                        # **先頭に並ぶ部分シェルの後ろも覗く**（issue #180）。`( set +e` と
+                        # 1 行で書くと `strip_command_prefixes()` は `(` を落とさない（落とすと
+                        # 階層を二重に開く。同関数の「`(` は入れない」の段落が理由）ので、
+                        # **握り潰しの存在そのものを見落としていた**——`errexit` が立ったままに
+                        # なるので、その部分シェルの中の呼び出しがまるごと「合否に効く」と
+                        # 読まれる（実測で `( set +e` ＋ `while true; do bash <スイート>; break; done`
+                        # ＋ `)` は実 `bash -e` で NOGATE なのに wired。**4 トークンでスイートを
+                        # ゲートから外せる fail-open**）。越えた分の階層は `set_open_depth()` が
+                        # 同じ `cross_lead_subshells()` で数えるので、記録する深さもそろう
+                        # **先頭が `(` でない断片は釣り合いの走査すら要らない。** `set_probe` が
+                        # 空の断片はほとんどなので、門番を置かないと全断片が `paren_delta()` の
+                        # 1 文字ずつの走査を払う（`cross_lead_subshells()` は同じ綴りで即座に
+                        # 諦めるので上限は使われない）。答えは変わらない（§8）
+                        set_lead_n = 0
+                        if (set_probe == "" && struct_text ~ subshell_open_re()) {
+                            set_lead_rest = cross_lead_subshells(struct_text, lead_subshell_cap(struct_text))
+                            # **越えた数を控える**（下の `set_sub` が使う）。ここで
+                            # `set` が見つからなくても 0 へ戻す必要は無い——予約は
+                            # 「`set` が 1 つでも見つかった」ときにしか作らず、同じ断片の
+                            # 別経路（アーム走査）で見つかる `set` もその部分シェルの中で走るので、
+                            # 同じ番号で正しい（戻す条件を足しても 1 件もピンが動かない＝実測）
+                            set_lead_n = LEAD_SUBSHELLS
+                            if (set_lead_n > 0) { set_probe = set_command(set_lead_rest) }
+                        }
                         # **命令の位置に置けたか**を控える。使うのは**下のアーム走査に入るかの
                         # 門番 1 か所だけ**——素の綴りで見つかったならアームを探す必要が無い。
                         # **「置けたなら向きの判断に `uncertain` を使える」と書かないこと**
@@ -2731,6 +2769,39 @@ ci_workflow_extract() {
                             # `set -e` と階層が食い違って打ち消せなくなる（正しくゲートする綴りを
                             # 赤くする。レビューで実測）
                             set_depth = depth + set_open_depth(open_head, fn_form, (open_head == struct_text))
+                            # **先頭の部分シェルを越えて見つけた `set` は、その部分シェルの中に属する**
+                            # （issue #180）。階層ごとの連番（`sub_id`）はこの断片の開き側で振られるが、
+                            # それは下の開きループ（この `set` の処理より後ろ）なので、素直に
+                            # `sub_id[enclosing_subshell_depth(depth, …)]` を読むと**親**の番号になり、
+                            # 同じ部分シェルの中の `set -e` が打ち消せない（`( set +e` 改行 `set -e`
+                            # 改行 `bash <スイート>` が、実 `bash -e` では GATES なのに `not-wired`
+                            # ＝正しくゲートする綴りを赤くする。実測）。
+                            # **番号を予想しない。** 「開き側は先頭から順に振るので `sub_serial + n`
+                            # だろう」と見込むと、上限が食い違う綴り（越える数は生の釣り合いで
+                            # 数えるのに、開き側はアーム見出しを補正した `paren` で回る）で
+                            # **予想した番号が別の部分シェルへ渡り**、握り潰しの記録が無関係な階層の
+                            # `set -e` で打ち消される（fail-open）。ここで**先に振って**おき、
+                            # 開き側は空いていなければそれを使う（余った予約はそこで捨てる）。
+                            # 先頭が `(` の断片は外側の階層を閉じないので、`depth` より深い枠は空
+                            set_sub = sub_id[enclosing_subshell_depth(depth, subshell_at)]
+                            if (set_lead_n > 0) {
+                                for (set_res = 1; set_res <= set_lead_n; set_res++) {
+                                    sub_serial++; sub_id[depth + set_res] = sub_serial
+                                }
+                                set_sub = sub_id[depth + set_lead_n]
+                                # **どの断片が予約したかを控える。** 開き側が越えた数だけ開けない
+                                # 綴りでは予約が余り、残すとその番号が**後の別の部分シェル**へ渡って、
+                                # 握り潰しの記録が無関係な階層の `set -e` で打ち消される（fail-open）。
+                                # 余りは「同じ断片か」で弾くので捨てて回る必要が無い
+                                # （印は論理行と断片の対——`j` だけでは行をまたいで重なる）。
+                                # **開き側が越えた数より少なく開く綴りは実在する**（issue #172 の
+                                # アーム模様の surgery は `(` を 1 文字落とすので `paren` が
+                                # 生の釣り合いより小さくなりうる。`case $X in` の直後の
+                                # `( set +e |` がその形）。**この印に当たるピンは無い**——
+                                # その綴りを作る検査をどのスイートも持っていないので、
+                                # 外しても緑のまま通る。規約とレビューで守る
+                                set_res_at = i ":" j
+                            }
                             # **関数ごとの台帳で使う階層。** 本体を同じ断片で開く 1 行書き
                             # （`f() { set +e; }`）では深さが増えるのが断片の末尾なので、
                             # 素の `depth` で控えると、続く断片の `set -e`（1 つ深い）と
@@ -2779,7 +2850,7 @@ ci_workflow_extract() {
                                 # 記号を除いた残りが、まとめて書かれたオプション文字の並び
                                 setbody = substr(setopt, 2)
                                 # 並びのどこかに `e` があれば errexit の指定
-                                if (setbody ~ /e/) { errexit = apply_errexit(seton, strengthen_base, uncertain, weaken_ok, errexit, set_depth, sub_id[enclosing_subshell_depth(depth, subshell_at)]) }
+                                if (setbody ~ /e/) { errexit = apply_errexit(seton, strengthen_base, uncertain, weaken_ok, errexit, set_depth, set_sub) }
                                 # **定義の本文で見た弱める向きは、関数名に控えておく。**
                                 # 定義しただけでは走らないので上では反映されないが、
                                 # 呼ばれればシェルを共有するので握り潰しは呼び出し元へ漏れる。
@@ -2800,7 +2871,7 @@ ci_workflow_extract() {
                                     # `errexit` は失敗でその場で止まるかどうか
                                     # **長い綴りでも同じ記録を残す。** 残さないと、`set +o errexit … set -o errexit` の
                                     # 括りだけが打ち消せず、ゲートしているステップが「未配線」と誤報される
-                                    if (setname == "errexit") { errexit = apply_errexit(seton, strengthen_base, uncertain, weaken_ok, errexit, set_depth, sub_id[enclosing_subshell_depth(depth, subshell_at)]) }
+                                    if (setname == "errexit") { errexit = apply_errexit(seton, strengthen_base, uncertain, weaken_ok, errexit, set_depth, set_sub) }
                                     # `pipefail` が立っていればパイプ越しでも失敗が伝わる
                                     else if (setname == "pipefail") { pipefail = set_flag(seton, strengthen_pipe_ok, weaken_ok, pipefail) }
                                     # 長い綴り（`+o errexit` / `+o pipefail`）も短い綴りと同じように控える
@@ -3460,7 +3531,12 @@ ci_workflow_extract() {
                             # 釣り合いが 0 の断片（`( : )`）は階層が残らないので開かない
                             while (paren > 0 && open_probe ~ subshell_open_re()) {
                                 depth++; group_start[depth] = nbuf
-                                subshell_at[depth] = 1; subshell++; sub_serial++; sub_id[depth] = sub_serial
+                                # **番号は上の `set` の処理が先に振っていることがある**（issue #180）。
+                                # 空いていなければそれを使う——振り直すと、越えて見つけた `set +e` の
+                                # 記録がどの階層とも結び付かず、同じ部分シェルの中の `set -e` で
+                                # 打ち消せない（正しくゲートする綴りを赤くする）
+                                subshell_at[depth] = 1; subshell++
+                                if (!(sub_id[depth] && set_res_at == i ":" j)) { sub_serial++; sub_id[depth] = sub_serial }
                                 # **`!` で反転された部分シェルの中は実行の証拠にしない**（issue #155）。
                                 # 走りはするので**リンタの照会（`top` を渡さない）では数えてよい**
                                 # ——`uncertain` を立てる形なら実行の照会だけに効く（issue が

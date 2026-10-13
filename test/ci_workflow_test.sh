@@ -4023,12 +4023,39 @@ jobs:
           ${subshell_keep_case#*:}"
 done
 
-# **`set` を開き括弧と同じ断片に書いた綴り（`( set +e`）は読まない**——
-# `strip_command_prefixes()` は `(` を落とさないので `set_probe` が空になる。
-# 向きは fail-open（握り潰しを見落とす）で `main` と同じなので本差分では変えていない。
-# この対は「読まないこと」を固定するためのもので、読むようにするなら
-# 「開く階層へ記録する／強める向きは credit しない」まで併せて設計が要る（別 issue）
-assert_wired "開き括弧と同じ断片の set +e は読まない（残る境界）" "name: ci
+# **`set` を開き括弧と同じ断片に書いた綴り（`( set +e`）も読む**（issue #180）。
+# `strip_command_prefixes()` は `(` を落とさない（落とすと階層を二重に開く）ので、
+# 以前は `set_probe` が空になり握り潰しの存在そのものを見落としていた——`errexit` が
+# 立ったままになるので、その部分シェルの中の呼び出しがまるごと「合否に効く」と
+# 読まれる（**4 トークンでスイートをゲートから外せる fail-open**）。
+# 下の 4 形はどれも実 `bash -e` で NOGATE（部分シェルは 0 で終わるので失敗が伝わらない）
+for lead_sub_set_case in \
+    "複数行:( set +e
+          bash ${SUITE_PATH}
+          echo done )" \
+    "ループを挟む:( set +e
+          while true; do bash ${SUITE_PATH}; break; done
+          )" \
+    "一行:( set +e; bash ${SUITE_PATH}; echo done )" \
+    "二重の部分シェル:( ( set +e
+          bash ${SUITE_PATH}
+          echo done ) )"
+do
+    assert_not_wired "開き括弧と同じ断片の set +e を読む（${lead_sub_set_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${lead_sub_set_case#*:}"
+done
+
+# **越えた分は「その部分シェルの中で落とした」として記録する**（issue #180）。
+# 階層ごとの連番（`sub_id`）は開き側のループで振られ、それはこの `set` の処理より
+# **後ろ**なので、素直に読むと親の番号になり同じ部分シェルの中の `set -e` が
+# 打ち消せない（実 `bash -e` は GATES なのに `not-wired`＝正しくゲートする綴りを赤くする）
+assert_wired "開き括弧と同じ断片の set +e は中の set -e で戻せる" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -4036,8 +4063,23 @@ jobs:
       - name: subject
         run: |
           ( set +e
+          set -e
           bash ${SUITE_PATH}
           echo done )"
+
+# **部分シェルを閉じたあとの呼び出しは握り潰しを継がない**（issue #180）。
+# 越えた分を親の階層へ記録すると、`)` の巻き戻しで戻らず以降すべてが未配線に化ける
+assert_wired "部分シェルの中の set +e は閉じたあとへ漏れない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ( set +e
+          echo x )
+          bash ${SUITE_PATH}
+          echo done"
 
 # **部分シェルの同一性は深さの数値では測れない**（issue #152 のレビュー指摘）。
 # 閉じたブレースと同じ深さに開いた部分シェルを区別できないと、ブレースの中で落とした分が
