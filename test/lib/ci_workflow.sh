@@ -3596,9 +3596,18 @@ ci_workflow_extract() {
                     # （`bash <スイート> && echo ok &` は実 `bash -e` で NOGATE）。
                     # (b) `||` の右辺が**綴りから真と分かる**（`true` / `:`）なら並びの
                     # 終了状態は 0 になる（`bash <スイート> && echo ok || true` も NOGATE）。
-                    # 読めない右辺は現状どおり位置だけで決める——`|| false` のように
-                    # **必ず失敗する右辺なら実際には伝わる**ので、一律に握り潰し扱いへ倒すと
-                    # 正しくゲートしている綴りを未配線と報告する（実測で GATES）。
+                    # **読めない右辺も握り潰し扱いにする**（issue #174）——除くのは
+                    # **綴りから偽と分かる右辺**（`|| false`）だけ。あれは必ず失敗するので
+                    # 実際には伝わる（実測で GATES）が、`|| echo "suite failed"` のように
+                    # **成功する普通のコマンド**を「読めないから位置だけで決める」と、
+                    # 並びがステップの最後にあるとき wired に化ける（実 `bash -e` は NOGATE）。
+                    # しかもこれは CI でごく普通に書かれる綴りで、実在の `ci.yml` の
+                    # `run: bash <スイート>` をこの形へ差し替えても `ci_coverage_test.sh` が
+                    # 緑のまま通った（レビューで実測）。**記録自身の区切りが `||` のときの
+                    # 扱い（一律で伝えない）と向きがそろう**のも要点で、同じ関数の中で
+                    # 2 つの `||` の答えが食い違う状態も解消する。
+                    # 倒れる向きは fail-closed（`|| false` と「必ず失敗する読めない右辺」を
+                    # 取り違えることは無い——偽と分かる綴りは除いてある）
                     # **握り潰しの判定は部分シェルの中でも効かせる**——`( … || true )` は
                     # 部分シェルの終了状態そのものが 0 になるので、親で検査されても伝わらない
                     # （実 `bash -e` で NOGATE。位置の判定だけを部分シェルで飛ばす）
@@ -3615,7 +3624,7 @@ ci_workflow_extract() {
                             if (chain_parts[2] == "&") { absorbed = 1; break }
                             if (chain_parts[2] == "||" && chain_end < nbuf) {
                                 split(buf[chain_end + 1], rhs_parts, "\t")
-                                if (rhs_parts[1] == parts[1] && chain_literal_status(rhs_parts[6]) == "t") { absorbed = 1; break }
+                                if (rhs_parts[1] == parts[1] && chain_literal_status(rhs_parts[6]) != "f") { absorbed = 1; break }
                             }
                             if (chain_parts[2] != "&&" && chain_parts[2] != "||" && chain_parts[2] != "|") { break }
                             chain_end++

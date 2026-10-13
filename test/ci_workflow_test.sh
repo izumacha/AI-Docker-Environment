@@ -5346,7 +5346,9 @@ for and_swallowed_case in \
     "パイプラインで終わる並び＋後ろの行:bash ${SUITE_PATH} && echo ok | cat
           echo done" \
     "パイプラインの並びを背後へ回す:bash ${SUITE_PATH} && echo ok | cat &" \
-    "部分シェルの中の || true:( bash ${SUITE_PATH} && echo ok || true )"
+    "部分シェルの中の || true:( bash ${SUITE_PATH} && echo ok || true )" \
+    "読めない右辺の ||:bash ${SUITE_PATH} && echo ok || echo \"suite failed\"" \
+    "部分シェルの中の読めない右辺:( bash ${SUITE_PATH} && echo ok || echo msg )"
 do
     assert_not_wired "並びの途中で握り潰される（${and_swallowed_case%%:*}）" "name: ci
 jobs:
@@ -5364,7 +5366,7 @@ done
 # 実 `bash -e` では伝わる（実測で GATES）
 for and_pipeline_case in \
     "パイプラインで終わる並びが最後:bash ${SUITE_PATH} && echo ok | cat" \
-    "読めない右辺の ||:bash ${SUITE_PATH} && echo ok || false"
+    "偽と分かる右辺の ||:bash ${SUITE_PATH} && echo ok || false"
 do
     assert_wired "並びの終端まで届けば合否に効く（${and_pipeline_case%%:*}）" "name: ci
 jobs:
