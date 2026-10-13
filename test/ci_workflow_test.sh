@@ -2739,6 +2739,15 @@ for exit_inside_case in \
           f
           }
           bash ${SUITE_PATH}" \
+    "部分シェルの中の再定義は親の関数を置き換えない:f() { exit 0; }
+          ( f() { :; }
+          )
+          f
+          bash ${SUITE_PATH}" \
+    "部分シェルの中の再定義（1 断片）:f() { exit 0; }
+          ( f() { :; } )
+          f
+          bash ${SUITE_PATH}" \
     "ブレースの中の部分シェル:{ ( exit 0; bash ${SUITE_PATH} ); }" \
     "無条件に exit する関数の呼び出し:f() { exit 0; }
           f

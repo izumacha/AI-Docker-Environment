@@ -2772,8 +2772,18 @@ ci_workflow_extract() {
                         # （`fnweak_*`）も同じところで消すが、あちらは**記録する側が越えた定義を
                         # 見送る**ので、消しが広がっても「古い記録が残る」側だけが直り、
                         # 緩む向きには動かない
+                        # **部分シェルを越えて見つけた定義では消さない**（issue #189 の 3 巡目の
+                        # レビューで実測）。部分シェルの中の再定義は**親の関数を置き換えない**ので、
+                        # 消すと `f() { exit 0; }` ＋ `( f() { :; } )` ＋ `f` が「もう脱出しない」
+                        # として wired になる（真値 NOGATE。1 つ前のコミットは正しく not-wired
+                        # だった＝この門番を落とすと自分で fail-open を開く）。ブレースだけで
+                        # 越えた定義（`{ f() { :; }`）は同じシェルなので消すのが正しい。
+                        # 部分シェルの中で再定義して**その中で呼ぶ**綴り
+                        # （`( f() { return 0; }` 改行 `f )`）は、台帳が残っても脱出が
+                        # 部分シェルの中だけを死に体にするので外のスイートは生きたまま——
+                        # つまりこの門番はどちらの向きも壊さない（実測でピン 2 形とも緑）
                         fn_name_here = (fn_form == 2 || was_pending_fndef) ? fndef_name_here \
-                                       : ((cmd_fndef == 1) ? cmd_fnname : "")
+                                       : ((cmd_fndef == 1 && cmd_sub == 0) ? cmd_fnname : "")
                         if (fn_name_here != "") {
                             fnweak_e[fn_name_here] = 0
                             fnweak_pipe[fn_name_here] = 0
@@ -3237,7 +3247,13 @@ ci_workflow_extract() {
                                     # 控えた時点では呼び先がまだ弱めると分かっていないことがある
                                     # errexit を落とした関数なら、`set +e` と同じ扱いで落とす
                                     # （`apply_errexit()` を通すので、同じ階層の `set -e` で打ち消せる）
-                                    if (fnweak_e[fncall]) { errexit = apply_errexit(0, 0, uncertain, 1, errexit, depth) }
+                                    # **第 7 引数（どの部分シェルの中で落としたか）を省かない**
+                                    # （issue #189 の 3 巡目のレビュー）。省くと awk の未初期化値が
+                                    # `weak_sub` へ入り、いまは数値比較なので 0 と同じに振る舞うが、
+                                    # 比較の書き方が変わった瞬間に「部分シェルの中で落とした」と
+                                    # 誤って帰属する。ここは `subshell == 0 && call_sub == 0` でしか
+                                    # 来ないので、意図の 0（部分シェルの外）を明示する
+                                    if (fnweak_e[fncall]) { errexit = apply_errexit(0, 0, uncertain, 1, errexit, depth, 0) }
                                     # pipefail を落とした関数も同じ
                                     if (fnweak_pipe[fncall]) { pipefail = set_flag(0, 0, 1, pipefail) }
                                 }
