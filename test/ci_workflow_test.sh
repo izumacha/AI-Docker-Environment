@@ -3454,6 +3454,53 @@ jobs:
             bash ${SUITE_PATH}
           fi"
 
+# **素のグループ（`( … )` / `{ … }`）に付いた `!` も同じ**（issue #155。`main` 既存の fail-open）。
+# `open_form()` のブレースの判定は剥がす前の綴りを見るので `! { … }` は何も開かず、
+# 先頭の `(` を越えるループも `^\(` を求めるので `! ( … )` では 1 度も回らない
+# ——どちらも階層が開かないので反転を見る行に**そもそも到達しなかった**。
+# **1 行に畳んだ `( … )` は閉じ括弧が呼び出しと同じ断片**なので、階層は記録より先に
+# 閉じる。閉じた階層が反転していたことを控えて記録へ載せる（`closed_inverted`）
+for bang_group_case in \
+    "ブレースグループ:! { : ; bash ${SUITE_PATH} ; }" \
+    "部分シェル:! ( : ; bash ${SUITE_PATH} )" \
+    "部分シェルの中にアーム見出し:! ( case \"${DOLLAR}X\" in a) :;; esac ; bash ${SUITE_PATH} )" \
+    "time と重ねたブレース:time ! { : ; bash ${SUITE_PATH} ; }" \
+    "ブレースの中の if true:! { if true; then bash ${SUITE_PATH}; fi; }" \
+    "部分シェルの中の if true:! ( if true; then bash ${SUITE_PATH}; fi )" \
+    "ブレースの中の部分シェル:! { : ; ( bash ${SUITE_PATH} ) ; }"
+do
+    assert_not_wired "! で反転した${bang_group_case%%:*}の中は実行の証拠にしない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${bang_group_case#*:}"
+done
+
+# **締めすぎない側。** `!` が付いていない素のグループは必ず走るので今までどおり証拠にする。
+# `time` だけの飾りも終了状態を通すので同じ（反転するのは `!` だけ）。
+# `!` の付いたグループを**抜けた後ろ**も、反転はそのグループの終了状態にしか掛からない
+for bang_group_live_case in \
+    "飾りなしのブレース:{ : ; bash ${SUITE_PATH} ; }" \
+    "飾りなしの部分シェル:( : ; bash ${SUITE_PATH} )" \
+    "time だけのブレース:time { : ; bash ${SUITE_PATH} ; }" \
+    "反転したブレースを抜けた後ろ:! { : ; }
+          bash ${SUITE_PATH}" \
+    "反転した部分シェルを抜けた後ろ:! ( : )
+          bash ${SUITE_PATH}"
+do
+    assert_wired "反転していないグループの中は証拠のまま（${bang_group_live_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${bang_group_live_case#*:}"
+done
+
 # **`!` を重ねると打ち消し合う。** `STRUCT_INVERTED` を「1 を代入する掛け金」にすると
 # `! ! if true; then <呼び出し>; fi` を「反転されている」と読み、実 bash では伝わる失敗を
 # 「伝わらない」と判定する（fail-closed。実測で `main` は `not-wired`・実 bash は GATES）
@@ -3862,6 +3909,14 @@ jobs:
           ${subshell_weaken_case#*:}"
 done
 
+# **この対は 1 行書き（`( set +e; …`）では書かない**（レビュー指摘）——あの綴りでは
+# `set_command()` が先頭の `(` を越えられず `set +e` が**そもそも読まれない**ので、
+# 下の 3 つの向き（同じ部分シェルの中での打ち消し・閉じたときの巻き戻し・最後の
+# コマンドの引き上げ）を 1 つも見張らないまま緑になる（実測で、`subshell == 0` の
+# 門番を戻しても落ちなかった）。複数行の綴り（とパイプの右側）で書く
+# **打ち消しの対は「呼び出しの後ろにもう 1 行」置く**——最後のコマンドなら引き上げ
+# （`prom_rec`）が救ってしまい、打ち消しが壊れても緑のまま通る（実測で、同一性の
+# 判定を反転させる変異が 634 件すべて緑だった）
 # **締めすぎない側。** 部分シェルの中の `set +e` を**親へ漏らす**と、正しくゲートしている
 # ステップを「握り潰されている」と誤報して必須ジョブが赤くなる（issue #152 が明示的に
 # 禁じている向き）。`( … )` を閉じたら入口の姿へ戻すこと・最後のコマンドは引き上げること・
@@ -3869,11 +3924,19 @@ done
 # （最後のものは、credit すると「部分シェルは自分の中で止まるだけで親は止まらない」のに
 #  ゲートしていると読む＝540 形の総当たりで 47 形が誤った。実測）
 for subshell_keep_case in \
-    "部分シェルを抜けた後ろ:( set +e; true )
+    "部分シェルを抜けた後ろ:(
+          set +e
+          true
+          )
           bash ${SUITE_PATH}" \
     "部分シェルのループの中で落として抜けた後ろ:( for f in a; do set +e; done )
           bash ${SUITE_PATH}" \
-    "落として戻した部分シェルの中:( set +e; set -e; bash ${SUITE_PATH} )" \
+    "落として戻した部分シェルの中:(
+          set +e
+          set -e
+          bash ${SUITE_PATH}
+          echo done
+          )" \
     "部分シェルの中の最後のコマンド:(
           set +e
           bash ${SUITE_PATH}
@@ -3882,7 +3945,10 @@ for subshell_keep_case in \
           set +e
           bash ${SUITE_PATH}
           ; } )" \
-    "入れ子の部分シェルの中の最後のコマンド:( set +e; ( bash ${SUITE_PATH} ) )"
+    "パイプの右で落として最後のコマンド:echo x | {
+          set +e
+          bash ${SUITE_PATH}
+          }"
 do
     assert_wired "部分シェルの中の set +e を漏らさない（${subshell_keep_case%%:*}）" "name: ci
 jobs:

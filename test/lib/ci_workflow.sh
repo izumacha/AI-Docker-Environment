@@ -2073,7 +2073,7 @@ ci_workflow_extract() {
         # **ここでは出力しない**のが要点で、ジョブ単位の無効化キー（`if: false` 等）は
         # YAML のキー順が自由である以上 `steps:` の**後ろ**にも書ける。書いた時点で
         # 出力済みのステップは取り消せないため、ジョブ 1 つ分を溜めてから出す
-        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, closed_any, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, closed_subshell, closed_uncertain, chain_in, inverted, arm_masked, arm_at, arm_expected, case_scope, opens_case, opens_case_here, case_opens_at, close_probe, close_rest, close_first, open_head, esac_probe, esac_rest, esac_first, dead_probe, dead_lead, close_n, exit_seen, chain_at, chain_depth, closed_sub_seen, closed_sub_e, closed_sub_p, sub_rec, sub_rec_level, prom_rec, sub_id, carry_level) {
+        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, closed_any, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, closed_subshell, closed_uncertain, chain_in, inverted, arm_masked, arm_at, arm_expected, case_scope, opens_case, opens_case_here, case_opens_at, close_probe, close_rest, close_first, open_head, esac_probe, esac_rest, esac_first, dead_probe, dead_lead, close_n, exit_seen, chain_at, chain_depth, closed_sub_seen, closed_sub_e, closed_sub_p, sub_rec, sub_rec_level, prom_rec, sub_id, carry_level, open_stripped, head_inverted, inverted_at, closed_inverted) {
             # **シェルのオプションはステップごとにリセットする。** ステップは 1 つずつ
             # 別のシェルで走るので、前のステップの `set +e` / `pipefail` は引き継がれない。
             # **控えるのは `set` で明示された分だけ（-1 = 明示なし）。** シェルの既定と突き合わせるのは
@@ -2238,6 +2238,7 @@ ci_workflow_extract() {
                         # `errexit` / `pipefail` は「明示されていない」を表す `-1` を正当な値として
                         # 取るため、値そのものを「閉じていない」の目印には使えない
                         closed_entry_seen = 0
+                        closed_inverted = 0
                         prom_rec = 0
                         closed_sub_seen = 0
                         closed_sub_e = 0
@@ -2896,6 +2897,13 @@ ci_workflow_extract() {
                             }
                             sub_rec[depth] = 0
                             if (chain_at[depth]) { chain_depth--; chain_at[depth] = 0 }
+                            # **反転した階層を閉じた断片は、その中の最後のコマンドを載せている。**
+                            # 階層が閉じるのは記録より**先**なので（1 行に畳んだ
+                            # `! ( : ; bash <スイート> )` は閉じ括弧が呼び出しと同じ断片）、
+                            # ここで控えないと反転が記録に載らず「最上位で確実に走る」になる
+                            # （issue #155。実測で `! { … }` の複数行は閉じたのに
+                            #  `! ( … )` の 1 行書きだけが wired のまま残った）
+                            if (inverted_at[depth]) { closed_inverted = 1; inverted_at[depth] = 0 }
                             group_start[depth] = -1
                             # 巻き戻し先はこの断片が閉じた**一番外側**の階層の入口。
                             # 閉じる順は内側からなので、上書きし続ければ最後に残るのが一番外側
@@ -2931,11 +2939,16 @@ ci_workflow_extract() {
                             errexit = closed_sub_e
                             pipefail = closed_sub_p
                             # **後ろにコマンドが無ければ、握り潰した最後の記録を引き上げる**
-                            # （issue #152）。`( set +e; bash <スイート> )` のように呼び出しが
-                            # 部分シェルの最後なら、握り潰しても終了状態はそのまま親へ伝わる。
+                            # （issue #152）。呼び出しが部分シェルの最後なら、握り潰しても
+                            # 終了状態はそのまま親へ伝わる（`(` 改行 `set +e` 改行
+                            # `bash <スイート>` 改行 `)` は実 `bash -e` でジョブを落とす）。
                             # **閉じる断片そのものがコマンドを持つ場合は引き上げない**
-                            # （`( set +e; bash <スイート>; echo z )` の `echo z )` が後ろに走るので
-                            #  終了状態は上書きされる＝引き上げると fail-open）
+                            # ——同じ綴りの最後に `echo z )` が付くと、そちらが後ろに走って
+                            # 終了状態を上書きする（引き上げると fail-open）。
+                            # **例に 1 行書き（`( set +e; …`）を挙げないこと**（レビュー指摘）
+                            # ——あの綴りは `set_command()` が先頭の `(` を越えられず握り潰しを
+                            # 読まないので**ここへ到達しない**（`main` 既存の fail-open として
+                            # 別にピンがある）。存在しない制御経路の説明は保守上の罠になる
                             if (prom_rec > 0 && !carries_command(text)) {
                                 if (closed_sub_e != 0) {
                                     split(buf[prom_rec], inner, "\t")
@@ -3046,7 +3059,7 @@ ci_workflow_extract() {
                         # **リンタの照会（`top` を渡さない）は巻き込まない**のが要点で、
                         # `test -n "$FILES" && shellcheck $FILES` は正当な綴り——`gate` 側を
                         # 0 にすると、正しく設定されたリンタを「配線されていない」と報告する
-                        buf[nbuf] = step_id "\t" ops[j] "\t" ((dead_depth >= 0 || unreachable || exit_seen) ? 0 : errexit) "\t" pipefail "\t" (uncertain + (chain_in ? 1 : 0)) "\t" text
+                        buf[nbuf] = step_id "\t" ops[j] "\t" ((dead_depth >= 0 || unreachable || exit_seen) ? 0 : errexit) "\t" pipefail "\t" (uncertain + (chain_in ? 1 : 0) + (closed_inverted ? 1 : 0)) "\t" text
                         # **部分シェルの中で握り潰したコマンドのうち、最後のものを控える**（issue #152）。
                         # 部分シェルの終了状態は「最後に走ったコマンドの状態」なので、握り潰しても
                         # それが最後なら失敗はそのまま親へ伝わる（`( set +e; bash <スイート> )` は
@@ -3229,9 +3242,31 @@ ci_workflow_extract() {
                         open_probe = open_head
                         # 断片の**先頭**の開きかどうか（見出しと結び付く `{` は先頭の 1 つだけ）
                         first_open = 1
+                        # この断片で `!` を剥がしたか（issue #155。素のグループの飾り）
+                        head_inverted = 0
                         # この断片で開いた階層に印を付けて回るための走査位置
                         od = depth_before
                         while (1) {
+                            # **先頭の飾り（`time` / `!`）を素のグループの手前で落とす**（issue #155）。
+                            # `open_form()` は内部で飾りを落として制御構造を分類するが、
+                            # ブレースの判定だけは**剥がす前の綴り**を見るので `! { … }` は
+                            # 種類 0（何も開かない）になり、下の `(` を越えるループも `^\(` を
+                            # 求めるので `! ( … )` では 1 度も回らない。どちらも階層を 1 つも
+                            # 開かないので、**反転された本体が「最上位で確実に走る」として
+                            # 記録される**（実 `bash -e` では `!` が終了状態を反転するので
+                            # ジョブは緑のまま＝スイートの失敗が届かない。`main` 既存の fail-open）。
+                            # **落とすのは剥がした先が素のグループ（`(` / `{`）のときだけ**に限る
+                            # ——関数定義の判定（`function_form()`）は見出しの綴りを見るので、
+                            # 飾りが付いた形を剥がして渡すと「定義」と誤分類しうる（同関数の
+                            # コメントが理由を記録している）。制御構造は `open_form()` の中の
+                            # 剥がしで既に分類できているので、ここで触る必要が無い
+                            open_stripped = strip_struct_wrappers(open_probe)
+                            if (open_stripped != open_probe && open_stripped ~ /^[({]/) {
+                                open_probe = open_stripped
+                                # `!` を剥がしたかは下の `inverted` と OR で合わせる
+                                # （`open_form()` が内部で剥がすと `STRUCT_INVERTED` が上書きされる）
+                                if (STRUCT_INVERTED) { head_inverted = 1 }
+                            }
                             # **先頭に並ぶ部分シェルの開き（`( if true; then`）はここで開く。**
                             # `open_form()` は `(` を読まない（釣り合いが階層を数えるので、
                             # 読ませると同じ階層を二重に開く）。そのため以前は `(` の後ろの
@@ -3249,6 +3284,11 @@ ci_workflow_extract() {
                             while (paren > 0 && open_probe ~ subshell_open_re()) {
                                 depth++; group_start[depth] = nbuf
                                 subshell_at[depth] = 1; subshell++; sub_serial++; sub_id[depth] = sub_serial
+                                # **`!` で反転された部分シェルの中は実行の証拠にしない**（issue #155）。
+                                # 走りはするので**リンタの照会（`top` を渡さない）では数えてよい**
+                                # ——`uncertain` を立てる形なら実行の照会だけに効く（issue が
+                                # 指定している向き。`! shellcheck …` でも shellcheck は走る）
+                                if (head_inverted) { uncertain++; uncertain_at[depth] = 1; inverted_at[depth] = 1 }
                                 paren--
                                 sub(subshell_open_re(), "", open_probe)
                                 # 見出しと結び付く `{` は断片の先頭の 1 つだけ。`(` を越えた先の
@@ -3279,6 +3319,13 @@ ci_workflow_extract() {
                             # 開始位置を広げたことで not-wired → wired へ動いた。
                             # つまり `!inverted` は**包まれていない綴り**を閉じただけで、
                             # 包んだ族は開いたまま（向きはどちらも危険側）
+                            # **ここで `head_inverted` を OR しない。** 手前で落とした `!` は
+                            # 素のグループ（`(` / `{`）にしか付かず、そのグループの階層が
+                            # この行より先に開いて `uncertain` を背負うので、内側の
+                            # `if true` をどちらに読んでも記録は「走ると証明できない」側に
+                            # 入る（実測で、OR を足しても外しても 634 件すべて緑＝何も
+                            # 変えない仕掛けだった。何も変えない仕掛けは「守られている」と
+                            # 誤解させるので置かない）
                             inverted = STRUCT_INVERTED
                             # 必ず走る条件（`if true` / `while true`）。**連鎖に守られていればその限りではない**
                             # ——`split_commands` は `&&` で切るので `if true && [ -z "$SKIP" ]; then` の
@@ -3343,7 +3390,11 @@ ci_workflow_extract() {
                                     fndef_name[depth] = pending_fndef_name
                                 }
                                 # そうでなければ素の grouping（必ず走るので uncertain は増やさない）
-                                else { group_start[depth] = nbuf }
+                                # **ただし `!` で反転されていれば実行の証拠にしない**（issue #155）
+                                else {
+                                    group_start[depth] = nbuf
+                                    if (head_inverted) { uncertain++; uncertain_at[depth] = 1; inverted_at[depth] = 1 }
+                                }
                             }
                             # 本体が同じ断片の中で続く綴り以外は、ここで終わり
                             if (open_kind != 3 && open_kind != 5) { break }
