@@ -1613,11 +1613,26 @@ ci_workflow_extract() {
         # `[^()]*` は `(` を跨げないので、`f() { ( case $X in a)` のように**階層を開く前置き**が
         # 手前に付いた 1 行書きには当たらない。釣り合いの勘定はその形でも崩れる
         # （見出しを閉じる `)` が先頭の `(` を打ち消す）ので、探す側の綴りを別に持つ。
-        # **`case` の手前は行頭・空白・`(` に限る**——`lowercase in x)` のような綴りを
-        # 見出しと読まないため（`(case` は bash で有効なので `(` を含める。
-        # `{case` は無効なので含めない）
+        # **`case` の手前は「命令の位置」に限る**（issue #172）——断片の先頭・グループの開き
+        # （`(` / `{`）・区切り（`;` / `&` / `|`）・本体を開く語（`do` / `then` / `else`）の
+        # 直後だけを見出しの前置きとして認める。**空白なら何でも良いとしてはいけない**
+        # ——`( : case x in y )` のような**散文**（`case` が引数の位置にある綴り）に当たって
+        # 本物の括弧を閉じる `)` を落とし、閉じない部分シェルの階層が開く。そうなると
+        # そのステップの以降すべての記録が「部分シェルの中」として書かれ、
+        # issue #149 の位置の判定（部分シェルの中では飛ばす）が丸ごと外れて
+        # 握り潰された実行が「ゲートしている」と読まれる（レビューで実測。fail-open）。
+        # issue #145 の対象（`f() { ( case $X in a)`）は `(` の直後なので引き続き当たる
+        # （関数定義の見出しを跨ぐ必要が無いのが要点）。`{case` は bash で無効だが
+        # `{` の後ろには空白が要るだけなので、開きの文字としては区別せず並べる。
+        # **本体を開く語は「断片の先頭」にも来る**（レビュー指摘、実測）——`split_commands` は
+        # 断片の前後の空白を落とすので、`then case $X in a) :` のように `then ` で始まる
+        # 断片では手前に空白が無い。空白を必須にすると当たらず、#145 の fail-open が
+        # そのまま戻る（`f() { ( if true; then case … esac; fi ; bash <スイート> ) }` で
+        # 実測: `main` は not-wired・この錨だけでは wired）
+        # **残る境界**: 飾り（`time case $X in a)`）は前置きとして認めていない
+        # ——倒れる向きは「`)` を落とさない」側で、`main` の #145 以前と同じ扱い
         function arm_head_in_search_re() {
-            return "(^|[[:space:](])" arm_head_in_core_re()
+            return "(^|[({;&|]|(^|[[:space:]])(do|then|else)[[:space:]])[[:space:]]*" arm_head_in_core_re()
         }
 
         # 先頭のアーム見出し（`y)` / `(y)` / `y|z)`）を落として、その後ろ（＝命令の位置）を返す。
@@ -2092,7 +2107,7 @@ ci_workflow_extract() {
         # **ここでは出力しない**のが要点で、ジョブ単位の無効化キー（`if: false` 等）は
         # YAML のキー順が自由である以上 `steps:` の**後ろ**にも書ける。書いた時点で
         # 出力済みのステップは取り消せないため、ジョブ 1 つ分を溜めてから出す
-        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, closed_any, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, closed_subshell, closed_uncertain, chain_in, inverted, arm_masked, arm_at, arm_expected, case_scope, opens_case, opens_case_here, case_opens_at, close_probe, close_rest, close_first, open_head, esac_probe, esac_rest, esac_first, dead_probe, dead_lead, close_n, exit_seen, chain_at, chain_depth, closed_sub_seen, closed_sub_e, closed_sub_p, sub_rec, sub_rec_level, prom_rec, sub_id, carry_level, open_stripped, head_inverted, inverted_at, closed_inverted) {
+        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, closed_any, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, closed_subshell, closed_uncertain, chain_in, inverted, arm_masked, arm_at, arm_expected, case_scope, opens_case, opens_case_here, case_opens_at, close_probe, close_rest, close_first, open_head, esac_probe, esac_rest, esac_first, dead_probe, dead_lead, close_n, exit_seen, chain_at, chain_depth, closed_sub_seen, closed_sub_e, closed_sub_p, sub_rec, sub_rec_level, prom_rec, sub_id, carry_level, open_stripped, head_inverted, inverted_at, closed_inverted, prop_op, sub_serial) {
             # **シェルのオプションはステップごとにリセットする。** ステップは 1 つずつ
             # 別のシェルで走るので、前のステップの `set +e` / `pipefail` は引き継がれない。
             # **控えるのは `set` で明示された分だけ（-1 = 明示なし）。** シェルの既定と突き合わせるのは
@@ -3535,14 +3550,17 @@ ci_workflow_extract() {
             for (i = 1; i <= nenv; i++) { print jobname "#" envbuf[i] }
             # ジョブごと止められていなければ、コマンドの控えをまとめて出す。
             # **ここで初めて実効シェルが確定する**（ステップ自身の指定 > ジョブの既定 > ワークフローの既定）
-            # **ステップごとに「最後に走るコマンドの記録」を先に求める**（issue #149）。
-            # `&&` の免除が効くかは「その並びがステップの最後か」で決まるので、
-            # 並び順を 1 度なめてから判断する
-            for (i = 1; i <= nbuf; i++) {
-                split(buf[i], parts, "\t")
-                if (carries_command(parts[6])) { last_cmd[parts[1]] = i }
-            }
             if (!job_disabled) {
+                # **ステップごとに「最後に走るコマンドの記録」を先に求める**（issue #149）。
+                # `&&` の免除が効くかは「その並びがステップの最後か」で決まるので、
+                # 並び順を 1 度なめてから判断する。**止められたジョブでは求めない**
+                # ——下の出力はこのブロックの中でしか使わないので、外に置くと
+                # 捨てる表のために全記録へ `carries_command()` を回すことになる
+                # （レビュー指摘。issue #166 で削った走査と同じ費用）
+                for (i = 1; i <= nbuf; i++) {
+                    split(buf[i], parts, "\t")
+                    if (carries_command(parts[6])) { last_cmd[parts[1]] = i }
+                }
                 for (i = 1; i <= nbuf; i++) {
                     # 控えた 1 件を「ステップ番号・直後の区切り・errexit・pipefail・本文」に分ける
                     split(buf[i], parts, "\t")
