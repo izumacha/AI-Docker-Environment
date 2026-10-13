@@ -5264,6 +5264,23 @@ jobs:
           ${and_live_case#*:}"
 done
 
+# **アーム見出しの `)` を釣り合いから外すのは、`case` が命令の位置にあるときだけ**（issue #172）。
+# `( : case x in y )` は `case` が**引数の位置**にある散文で、`)` は本物の部分シェルを閉じる。
+# 外してしまうと閉じない部分シェルの階層が開き、以降の記録がすべて「部分シェルの中」として
+# 書かれて issue #149 の位置の判定が飛ばされる（実測で、握り潰された `&& echo ok` が
+# wired に化ける fail-open）。**命令の位置にある形（`(` の直後・`do` の後ろ 等）は
+# 引き続き外す**ので、issue #145 の対（「裸のアーム見出しと関数の本体」6 形）が守る
+assert_not_wired "引数の位置の case は見出しとして読まない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ( : case x in y )
+          bash ${SUITE_PATH} && echo ok
+          echo z"
+
 # **伏せ字の写しを省く素通しは、引用符だけでなく打ち消し（`\\`）も見る**（issue #166）。
 # `bash <スイート> \&& echo ok` の `\&` は**ただの引数**で、残る 1 つの `&` が
 # 並びごと背後へ回す（実 `bash -e` で NOGATE ＝実測）。伏せ字で `\&` を空白へ潰さないと
