@@ -668,6 +668,49 @@ jobs:
             MARK
             bash ${SUITE_PATH}"
 
+# **素のスカラーに置いたプロパティも値から落とす**（issue #126 のレビューで実測）。
+# `run: &suites bash test/x.sh` は値が `bash test/x.sh` の正当な YAML なのに、落とさないと
+# `suites bash test/x.sh` という幻のコマンドが記録され、実行しているスイートが「未配線」になる
+# （fail-closed。`main` から続く既存の穴）。**枝の選び分けではプロパティを読まない**ままにして、
+# 値の取り出しでだけ落とす（2 か所で読む / 読まないが食い違うと同じ行が両方の枝に当たる）。
+# **名前の無い `!` はここでは落とさない**（下の「! 経由の呼び出し」と同じ綴りになり、
+# ランナーがシェルへ渡す側だと終了状態が反転してゲートしない＝fail-open）
+for plain_prop_case in \
+    "アンカー:&suites bash ${SUITE_PATH}" \
+    "タグ:!!str bash ${SUITE_PATH}"
+do
+    assert_wired "素のスカラーのプロパティは値から落とす（${plain_prop_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: ${plain_prop_case#*:}"
+done
+
+# **`!` は名前なしでもよい**（YAML の非特定タグ。`run: ! |` は PyYAML も通す）。
+# 名前を 1 文字以上に揃えると、この綴りだけ issue #126 の手当てから外れる
+assert_wired "名前の無い非特定タグを挟んだブロックスカラー" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: ! |
+          bash ${SUITE_PATH}"
+
+# **締めすぎない側＝素の `&` はプロパティとして読まないこと**（`{name: & "b"}` は PyYAML も
+# エラーにする綴り）。読むと後ろの引用が開いて**本物の `, secrets:` を伏せる**ので、
+# `!` との非対称は意図したもの（伏せ処理側の `propend > i || ch == "!"` と対で保つ）
+assert_not_wired "名前の無いアンカーはブロックスカラーを始めない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: & |
+          bash ${SUITE_PATH}"
+
 # **締めすぎない側＝プロパティに見える綴りでブロックを始めないこと。**
 # `run: foo !bar |` は素のスカラー（`|` は指示子ではない）なので、本文の読み飛ばしを
 # 始めてはいけない。`run: &s|` はプロパティと値のあいだに空白が無く YAML として正しくないので、

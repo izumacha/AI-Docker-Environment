@@ -1479,6 +1479,15 @@ permissions: read-all
 jobs:
   j: {name: !!str "a #b", secrets: inherit, runs-on: ubuntu-latest}'
 
+# **名前の無いタグ（非特定タグ `!`）でも塞がっていること**（`{name: ! "a #b"}` は PyYAML も通す）。
+# 名前を 1 文字以上要求すると、この 1 文字だけで引用が開かず後ろの `, secrets:` が伏せられ、
+# ワークフローが read-only と判定されて SHA ピンの強制が丸ごと外れる（issue #124 と同じ経路）
+assert_privilege_classification privileged 'a hash inside a value with a bare non-specific tag does not hide a later secrets key' \
+'name: X
+permissions: read-all
+jobs:
+  j: {name: ! "a #b", secrets: inherit, runs-on: ubuntu-latest}'
+
 # アンカーとタグを両方並べた形（YAML はどちらの順でも許す）でも塞がっていること
 assert_privilege_classification privileged 'a hash inside a value with both an anchor and a tag does not hide a later secrets key' \
 'name: X

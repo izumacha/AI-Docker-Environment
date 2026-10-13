@@ -166,17 +166,36 @@ CI_WORKFLOW_COMMENT_START='(^|[[:space:]])#'
 # 鍵と値のあいだに置ける飾りで、値そのものではない（`run: &suites |` の `&suites`）。
 # 名前を終わらせる文字はフロー形式の区切り 4 種だけで、**`#` は含めない**
 # （`#` がコメントを始めるのは空白の後ろだけなので、`&a#b` の `#` は名前の一部）。
-# **綴りの源はこの 1 行で、3 つの読み手が同じものを読む**:
+# **綴りの源はこの 1 か所で、4 つの読み手が同じものを読む**:
 #   - `emit_structural_lines()` の伏せ処理（1 文字ずつ歩く側。`prop_stop_re`）
 #   - `emit_structural_lines()` のブロックスカラーの開始判定（`prop_re`）
-#   - `ci_workflow_extract` の `run:` の読み取り（同じ `prop_re`）
+#   - `ci_workflow_extract` の `run:` がブロックスカラーかの判定（同じ `prop_re`）
+#   - `ci_workflow_extract` の**素のスカラー**の値の読み取り（`prop_plain_re`）
 # 写しを持つと、どれか 1 つだけが古くなって「構造行では本文を読み飛ばすのに
-# 抽出側は値として読む」ような食い違いが生まれる（issue #126 で実際に起きた形）
+# 抽出側は値として読む」ような食い違いが生まれる（issue #126 で実際に起きた形）。
+# 4 つ目が無いと `run: &suites bash test/x.sh`（値は `bash test/x.sh` の正当な YAML）で
+# `suites bash test/x.sh` という幻のコマンドが記録され、実行しているスイートが
+# 「未配線」になる（fail-closed だが、配線を証明できないのは同じ）
 CI_WORKFLOW_PROP_STOP_CHARS='][{},'
 CI_WORKFLOW_PROP_STOP="[${CI_WORKFLOW_PROP_STOP_CHARS}]"
 # 名前に使える文字は上を**否定した**集合＋空白・引用符の除外。プロパティの後ろに
 # 空白を要求するのは YAML の規則（`&n|` は正しくない）で、伏せ処理側の条件と同じ
-CI_WORKFLOW_NODE_PROPERTY="([&!][^${CI_WORKFLOW_PROP_STOP_CHARS}[:space:]\"']+[[:space:]]+)*"
+CI_WORKFLOW_PROP_NAME="[^${CI_WORKFLOW_PROP_STOP_CHARS}[:space:]\"']"
+# **名前を要する形。素のスカラーの値から落とすのはこちらだけ。**
+# 名前の無い `!` をここで認めると、`run: ! bash test/x.sh` が値 `bash test/x.sh` として
+# 読まれて「ゲートしている」と報告される。ところが**その綴りが実際にどう扱われるかは
+# ここからは確かめられない**（GitHub のワークフロー解析器は PyYAML ではない）ので、
+# ランナーが `! bash …` をそのままシェルへ渡す側だと、終了状態が反転して**ゲートしない
+# ステップをゲートしていると言う fail-open** になる。読まなければ逆向き（未配線＝fail-closed）
+# で、同じ綴りを `assert_not_wired` で固定してある
+CI_WORKFLOW_NODE_PROPERTY="((&${CI_WORKFLOW_PROP_NAME}+|!${CI_WORKFLOW_PROP_NAME}+)[[:space:]]+)*"
+# **ブロックの印（`|` / `>`）の手前だけ、名前の無い `!` も許す形。**
+# `run: ! |` は YAML の非特定タグで正当（PyYAML も通す）。しかも `! |` はシェルとしては
+# 構文エラーなので**競合する読み方が無い**＝上の fail-open が起こらない。
+# 一方 **素の `&` はどちらでも認めない**（`{name: & "b"}` は PyYAML もエラー。読むと
+# 後ろの引用が開いて本物の `, secrets:` を伏せる＝隠す向き）。
+# この非対称は伏せ処理側の `propend > i || ch == "!"` と**対で保つこと**
+CI_WORKFLOW_NODE_PROPERTY_BLOCK="((&${CI_WORKFLOW_PROP_NAME}+|!${CI_WORKFLOW_PROP_NAME}*)[[:space:]]+)*"
 
 # 抽出した「実行されるコマンド」を保持するファイル。1 行が
 # `<ジョブ名>#<ステップ番号><TAB><ゲートに効くか(1/0)><TAB><コマンドの断片>`
@@ -218,7 +237,7 @@ emit_structural_lines() {
     awk -v dq='"' -v sq="'" -v flow_re='[][{},#]' -v flow_mask='~' \
         -v comment_re="${CI_WORKFLOW_COMMENT_START}" \
         -v prop_stop_re="${CI_WORKFLOW_PROP_STOP}" \
-        -v prop_re="${CI_WORKFLOW_NODE_PROPERTY}" \
+        -v prop_re="${CI_WORKFLOW_NODE_PROPERTY_BLOCK}" \
         -v tight_openers='{[,' '
         # 引用スカラーの中で、位置 i の 1 文字から始まるのが「終端ではない脱出表記」かどうかを返す。
         # 二重引用では `\` が次の 1 文字を脱出させ、単一引用では `'"'"''"'"'` が文字としてのアポストロフィ。
@@ -440,7 +459,11 @@ emit_structural_lines() {
                         # これにより、名前に引用符を含む `&a"b`（PyYAML も受け付けない）が
                         # そのまま構造行へ出て「構造行に引用符を 1 つも残さない」不変条件を
                         # 破ることも防いでいる（引用符は従来どおり落とす経路へ落ちる）
-                        if (propend > i && substr(src, propend + 1, 1) ~ /^[[:space:]]$/) {
+                        # **`!` だけは名前なしでも読む**（YAML の非特定タグ `run: ! |` は正当。
+                        # 読まないと「鍵と指示子のあいだのプロパティ」の手当て（issue #126）が
+                        # この綴りだけ外れる）。`&` の側は上の (1) のとおり 1 文字以上を要求する
+                        # ——この非対称はシェル定数 `CI_WORKFLOW_NODE_PROPERTY` と**対で保つこと**
+                        if ((propend > i || ch == "!") && substr(src, propend + 1, 1) ~ /^[[:space:]]$/) {
                             # プロパティの綴りは構造でも値でもないので、手を加えずそのまま出力へ送る
                             out = out substr(src, i, propend - i + 1)
                             # 行頭の「字下げと `-` だけ」の並びはここで終わり（プロパティはそのどちらでもない）
@@ -771,7 +794,8 @@ ci_workflow_run_with_structure() {
     fi
     # 構造行の表を BEGIN で読み込んでから、呼び出し側のプログラムを続ける
     awk -v structural_file="${structural_file}" -v comment_re="${CI_WORKFLOW_COMMENT_START}" \
-        -v prop_re="${CI_WORKFLOW_NODE_PROPERTY}" \
+        -v prop_re="${CI_WORKFLOW_NODE_PROPERTY_BLOCK}" \
+        -v prop_plain_re="${CI_WORKFLOW_NODE_PROPERTY}" \
         -f "${program_file}" "${workflow}"
     # awk の終了コードを控える（後始末で上書きされないように）
     local status=$?
@@ -2966,7 +2990,14 @@ ci_workflow_extract() {
                             # （以降で別の断片を剥がすと上書きされる）。
                             # **ここに到達するのは `open_form()` が種類を返した形だけ**で、
                             # `! { … }` / `! ( … )` は階層を 1 つも開かないので**そもそも通らない**
-                            # （`main` から続く fail-open。issue #155 で追う）
+                            # （issue #155 で追う fail-open）。**この族は「`main` から続く既存の穴」で
+                            # ちょうど半分**で、実測（6 種の包み × 4 種の中身）では
+                            # 複数行の `! { if true; then bash <suite>; fi; }` は #123 の前から wired、
+                            # **1 行に畳んだ綴り**（`! { if true; then bash <suite>; fi; }` を
+                            # `run:` の 1 行に書く形）は #123 が `ci_workflow_runs_script` の
+                            # 開始位置を広げたことで not-wired → wired へ動いた。
+                            # つまり `!inverted` は**包まれていない綴り**を閉じただけで、
+                            # 包んだ族は開いたまま（向きはどちらも危険側）
                             inverted = STRUCT_INVERTED
                             # 必ず走る条件（`if true` / `while true`）。**連鎖に守られていればその限りではない**
                             # ——`split_commands` は `&&` で切るので `if true && [ -z "$SKIP" ]; then` の
@@ -3499,13 +3530,21 @@ ci_workflow_extract() {
             }
 
             # 1 行で書かれた `run: <command>`。
-            # **上のブロック開始の枝が先に `next` するので、`run: &s |` はここへ来ない。**
-            # 判定の綴りをここでも足さないのは、2 か所で「プロパティを読む / 読まない」が
-            # 食い違うと同じ行が両方の枝に当たりうるため（順序に頼る代わりに、
-            # ブロック側の判定を唯一の入口にしてある）
+            # **枝の選び分けにプロパティを読ませない**のが要点で、2 か所で「プロパティを読む /
+            # 読まない」が食い違うと同じ行が両方の枝に当たりうる（上のブロック側の判定を
+            # 唯一の入口にして、順序に頼らない）。`run: &s |` は上で `next` されている。
+            # **ただし値の取り出しでは落とす。** 素のスカラーにもプロパティは置けるので
+            # （`run: &suites bash test/x.sh` は値が `bash test/x.sh` の正当な YAML）、
+            # 残すと `suites bash test/x.sh` という幻のコマンドが記録され、実行している
+            # スイートが「未配線」になる（fail-closed。`main` から続く既存の穴。レビューで実測）。
+            # **落とすのは名前のある形だけ**（`prop_plain_re`）。名前の無い `!` を認めると
+            # `run: ! bash test/x.sh` が値 `bash test/x.sh` として読まれるが、ランナーが
+            # その綴りをシェルへ渡す側だと `!` が終了状態を反転してゲートしない——
+            # 「ゲートしている」と言う fail-open になるので、こちらは読まない側へ倒す
             if (probe ~ /^[[:space:]]*-?[[:space:]]*run:[[:space:]]*[^|>[:space:]]/) {
                 text = probe
                 sub(/^[[:space:]]*-?[[:space:]]*run:[[:space:]]*/, "", text)
+                sub("^" prop_plain_re, "", text)
                 text = trim(text)
                 # **値全体を囲む引用符は落とす。** `run: "bash test/x_test.sh"` は正当な YAML で
                 # 中身は同じコマンドだが、引用符が先頭に残るとコマンドの開始位置の判定に外れ、
