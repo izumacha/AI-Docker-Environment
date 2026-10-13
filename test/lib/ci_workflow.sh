@@ -1734,6 +1734,35 @@ ci_workflow_extract() {
             return s2
         }
 
+        # いまいる階層を内側から外側へたどり、**一番内側の部分シェルの階層**を返す（無ければ 0）。
+        # 「部分シェルの中で握り潰された最後のコマンド」を覚えるのに使う（issue #152）
+        function enclosing_subshell_depth(d, at,   k) {
+            for (k = d; k >= 1; k--) { if (at[k]) { return k } }
+            return 0
+        }
+
+        # その断片が**コマンドを 1 つでも走らせるか**。閉じ語・閉じ括弧・区切りだけの断片
+        # （`)` / `} )` / `done )` / `fi ;`）は何も走らせないので偽を返す（issue #152）。
+        # **近似であることを承知で使う。** 取り違えの向きは非対称で、
+        #   - コマンドが無いのに真と読む → 握り潰しの引き上げを見送る（fail-closed。ピンが落ちる）
+        #   - コマンドがあるのに偽と読む → 引き上げてしまう（fail-open）
+        # なので、落とす綴りは `close_word_re()` が持つ閉じ語と括弧・区切りだけに限る
+        function carries_command(t,   s2, before) {
+            s2 = t
+            while (1) {
+                before = s2
+                sub(/^[[:space:]]*/, "", s2)
+                sub(/^[);]+[[:space:]]*/, "", s2)
+                # **リダイレクトは終了状態を変えないのでコマンドに数えない**
+                # （issue #152 のレビュー指摘。`) >/dev/null` を「後ろにコマンドがある」と
+                #  読むと引き上げを見送り、正しくゲートしている綴りを未配線と報告した＝実測）
+                sub(/^[0-9]*[<>]&?[[:space:]]*[^[:space:]]+[[:space:]]*/, "", s2)
+                s2 = drop_close_word(s2)
+                if (s2 == before) { break }
+            }
+            return (s2 != "")
+        }
+
         # 内側から見て、**走るかどうかがそこで決まる**一番内側の階層を返す（無ければ 0）。
         # 関数の台帳で「同じところで落として戻したか」を測るのに使う。
         # **素の深さでは測れない**（ブレースグループや `if true` の本体は同じシェルで必ず走るので、
@@ -1764,7 +1793,7 @@ ci_workflow_extract() {
         # `cancel` を**引数で受け取らない**のが要点。ループの外で 1 度だけ計算すると、
         # `set +e -e` のように 1 つの語で自分を打ち消す綴りで判定が古いままになり、
         # 2 コマンドに分けた同じ意味（`set +e` 改行 `set -e`）と答えが食い違う
-        function apply_errexit(on, strengthen_base, at_uncertain, weaken_ok, current, at,   cancel, ok, updated) {
+        function apply_errexit(on, strengthen_base, at_uncertain, weaken_ok, current, at, at_sub,   cancel, ok, updated) {
             # 同じ階層で自分が落とした分か（毎回この場で測る）
             # **同じか、それより外側（＝より確実に走る）階層で戻したなら打ち消し。**
             # 等号だけだと、閉じたブレースの外で戻す `{ set +e; }` ＋ `set -e` が
@@ -1787,7 +1816,12 @@ ci_workflow_extract() {
             # それ以外は通常の適用（`next` は awk の予約語なので使わない）
             updated = set_flag(on, ok, weaken_ok, current)
             # 新しく落としたなら、その階層と落とす前の値を控える
-            if (!on && updated == 0 && current != 0) { weak_depth = at; weak_prev = current }
+            # **どの部分シェルの中で落としたかも控える**（issue #152 のレビュー指摘）。
+            # 深さの数値だけでは、閉じたブレースと同じ深さに開いた部分シェルを
+            # 区別できず、ブレースの中で落とした分が「この部分シェルの中で落とした」
+            # ことになる（`{ set +e; }` ＋ `( set -e; … )` が wired に化けた＝実測）。
+            # 階層ごとに振る連番（`sub_id`）で同一性を見る（0 は「部分シェルの外」）
+            if (!on && updated == 0 && current != 0) { weak_depth = at; weak_prev = current; weak_sub = at_sub }
             return updated
         }
 
@@ -2039,7 +2073,7 @@ ci_workflow_extract() {
         # **ここでは出力しない**のが要点で、ジョブ単位の無効化キー（`if: false` 等）は
         # YAML のキー順が自由である以上 `steps:` の**後ろ**にも書ける。書いた時点で
         # 出力済みのステップは取り消せないため、ジョブ 1 つ分を溜めてから出す
-        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, closed_any, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, closed_subshell, closed_uncertain, chain_in, inverted, arm_masked, arm_at, arm_expected, case_scope, opens_case, opens_case_here, case_opens_at, close_probe, close_rest, close_first, open_head, esac_probe, esac_rest, esac_first, dead_probe, dead_lead, close_n, exit_seen, chain_at, chain_depth) {
+        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, group_start, closed_group_start, inner, k, fndef, fndef_at, struct_text, set_probe, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, closed_any, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, closed_subshell, closed_uncertain, chain_in, inverted, arm_masked, arm_at, arm_expected, case_scope, opens_case, opens_case_here, case_opens_at, close_probe, close_rest, close_first, open_head, esac_probe, esac_rest, esac_first, dead_probe, dead_lead, close_n, exit_seen, chain_at, chain_depth, closed_sub_seen, closed_sub_e, closed_sub_p, sub_rec, sub_rec_level, prom_rec, sub_id, carry_level) {
             # **シェルのオプションはステップごとにリセットする。** ステップは 1 つずつ
             # 別のシェルで走るので、前のステップの `set +e` / `pipefail` は引き継がれない。
             # **控えるのは `set` で明示された分だけ（-1 = 明示なし）。** シェルの既定と突き合わせるのは
@@ -2079,6 +2113,10 @@ ci_workflow_extract() {
             weak_depth = -1
             # その階層で落とす直前の errexit（記録を残してよい状態だったかの判定に使う）
             weak_prev = -1
+            # 落とした位置の部分シェルの連番（0 = 部分シェルの外）
+            weak_sub = 0
+            # 部分シェルの階層へ振る連番（同じ深さでも別の部分シェルだと分かるように）
+            sub_serial = 0
             # 関数定義（`f() { … }`）の入れ子の数。**定義しただけでは本文は走らない**ので、
             # 中の `set` は弱める向きでも反映しない（`uncertain` とは別に数える）
             fndef = 0
@@ -2200,6 +2238,10 @@ ci_workflow_extract() {
                         # `errexit` / `pipefail` は「明示されていない」を表す `-1` を正当な値として
                         # 取るため、値そのものを「閉じていない」の目印には使えない
                         closed_entry_seen = 0
+                        prom_rec = 0
+                        closed_sub_seen = 0
+                        closed_sub_e = 0
+                        closed_sub_p = 0
                         closed_subshell = 0
                         closed_uncertain = 0
                         closed_entry_e = 0
@@ -2435,7 +2477,12 @@ ci_workflow_extract() {
                             # ここへ来た時点で `set_probe` は、着地した `set …` か空のどちらか
                             # （ループは着地したときだけ `break` し、それ以外は空のまま抜ける）
                         }
-                        if (set_probe != "" && dead_depth < 0 && subshell == 0 && !set_forked && !unreachable) {
+                        # **部分シェルの中で見た `set` も、その部分シェルの中へは反映する**
+                        # （issue #152）。以前は `subshell == 0` で丸ごと捨てていたため、
+                        # `( while true; do set +e; bash <スイート>; break; done )` の握り潰しが
+                        # 見えず、1 度も合否に効かない呼び出しが「ゲートしている」と読まれた。
+                        # 親へ漏らさないのは下の「部分シェルを閉じたら入口の姿へ戻す」が担う
+                        if (set_probe != "" && dead_depth < 0 && !set_forked && !unreachable) {
                             # **`set` の反映は「どちらへ倒すか」で非対称にする（issue #113）。**
                             # 制御構造の中（`uncertain > 0`）は走るか分からないが、`+` と `-` では
                             # 分からないときに倒すべき先が逆になる:
@@ -2485,7 +2532,21 @@ ci_workflow_extract() {
                             # 「未配線」と誤報して CI を恒常的に赤くする（実 bash と差分照合して実測）
                             # 同じ階層の括りを打ち消せるのは、その階層で自分が落としたときだけ
                             # 強める向きに共通の前提（命令の位置・定義の外・連鎖に守られていない）
-                            strengthen_base = (set_probe == text && !in_fndef_here && prev_op != "&&" && prev_op != "||")
+                            # **部分シェルの中の `set -e` は、自分で落とした分を戻すときだけ信用する**
+                            # （issue #152）。親が `set +e` している下での `( set -e; … )` を
+                            # 素直に credit すると、部分シェルは自分の中で止まるだけで親は止まらない
+                            # のに「合否に効く」と読む（fail-open。打ち消しかどうかは
+                            # `apply_errexit()` の `cancel` が階層の向きで判断するので、
+                            # ここでは「**その部分シェルの中で**落とした記録があるか」までを見る）。
+                            # **「落とした記録があるか」だけでは足りない**——外側の `set +e` が
+                            # 記録を残しているだけで内側の `set -e` を credit してしまい、
+                            # `set +e` ＋ `( set -e; bash <スイート> )` が wired に化ける
+                            # （部分シェルは自分の中で止まるだけで親は止まらないので実 bash は
+                            #  NOGATE。540 形の総当たりで 47 形が新しく誤った＝実測）
+                            strengthen_base = (set_probe == text && !in_fndef_here && prev_op != "&&" && prev_op != "||" \
+                                               && (subshell == 0 \
+                                                   || (weak_depth >= 0 && weak_sub != 0 \
+                                                       && weak_sub == sub_id[enclosing_subshell_depth(depth, subshell_at)])))
                             # **括りの記録は errexit のものなので、errexit の判断にしか使わない**
                             # （`apply_errexit()` の中で測る）。pipefail まで巻き込むと、無関係な
                             # `set +e` が同じ階層で開いているだけで走らないループの中の
@@ -2556,7 +2617,7 @@ ci_workflow_extract() {
                                 # 記号を除いた残りが、まとめて書かれたオプション文字の並び
                                 setbody = substr(setopt, 2)
                                 # 並びのどこかに `e` があれば errexit の指定
-                                if (setbody ~ /e/) { errexit = apply_errexit(seton, strengthen_base, uncertain, weaken_ok, errexit, set_depth) }
+                                if (setbody ~ /e/) { errexit = apply_errexit(seton, strengthen_base, uncertain, weaken_ok, errexit, set_depth, sub_id[enclosing_subshell_depth(depth, subshell_at)]) }
                                 # **定義の本文で見た弱める向きは、関数名に控えておく。**
                                 # 定義しただけでは走らないので上では反映されないが、
                                 # 呼ばれればシェルを共有するので握り潰しは呼び出し元へ漏れる。
@@ -2577,7 +2638,7 @@ ci_workflow_extract() {
                                     # `errexit` は失敗でその場で止まるかどうか
                                     # **長い綴りでも同じ記録を残す。** 残さないと、`set +o errexit … set -o errexit` の
                                     # 括りだけが打ち消せず、ゲートしているステップが「未配線」と誤報される
-                                    if (setname == "errexit") { errexit = apply_errexit(seton, strengthen_base, uncertain, weaken_ok, errexit, set_depth) }
+                                    if (setname == "errexit") { errexit = apply_errexit(seton, strengthen_base, uncertain, weaken_ok, errexit, set_depth, sub_id[enclosing_subshell_depth(depth, subshell_at)]) }
                                     # `pipefail` が立っていればパイプ越しでも失敗が伝わる
                                     else if (setname == "pipefail") { pipefail = set_flag(seton, strengthen_pipe_ok, weaken_ok, pipefail) }
                                     # 長い綴り（`+o errexit` / `+o pipefail`）も短い綴りと同じように控える
@@ -2819,7 +2880,21 @@ ci_workflow_extract() {
                             if (group_start[depth] >= 1) { closed_group_start = group_start[depth] }
                             if (fndef_at[depth]) { fndef--; fndef_at[depth] = 0 }
                             true_at[depth] = 0
-                            if (subshell_at[depth]) { subshell--; subshell_at[depth] = 0; closed_subshell = 1 }
+                            # **部分シェルの入口は別に控える**（issue #152）。下の巻き戻しで
+                            # 使うのは「閉じた一番外側の**部分シェル**の入口」で、`closed_entry_*`
+                            # （閉じた一番外側の階層）とは別物——`{ set +e; ( : ) }` のように
+                            # 同じシェルのブレースを一緒に閉じる断片では、ブレースの入口まで
+                            # 戻すと**親で効いている握り潰し**を消してしまう（fail-open）
+                            if (subshell_at[depth]) {
+                                subshell--; subshell_at[depth] = 0; sub_id[depth] = 0; closed_subshell = 1
+                                closed_sub_e = entry_errexit[depth]; closed_sub_p = entry_pipefail[depth]
+                                closed_sub_seen = 1
+                                # 引き上げ候補は**内側から見て最初に見つかったもの**（閉じる順が
+                                # 内→外なので、先に見つかった方が内側）。入口の姿は逆に
+                                # 一番外側のものを使う（上書きし続ければ最後に残る）
+                                if (prom_rec == 0 && sub_rec[depth] > 0) { prom_rec = sub_rec[depth] }
+                            }
+                            sub_rec[depth] = 0
                             if (chain_at[depth]) { chain_depth--; chain_at[depth] = 0 }
                             group_start[depth] = -1
                             # 巻き戻し先はこの断片が閉じた**一番外側**の階層の入口。
@@ -2846,6 +2921,39 @@ ci_workflow_extract() {
                         # 正しくゲートしているステップを「未配線」と誤報して赤くする
                         # （fail-closed。レビューで実測）。閉じたブロックの**中**で落とした分は
                         # すぐ下の `closed_any && weak_depth > depth` が既に捨てている
+                        # **部分シェルを閉じたら、区切りに関係なく入口の姿へ戻す**（issue #152）。
+                        # `( … )` は常に子シェルで走るのでオプションは親へ漏れない。戻さないと
+                        # 中の `set +e` が親へ漏れ、正しくゲートしているステップを「握り潰されて
+                        # いる」と誤報して必須ジョブを赤くする（issue が明示的に禁じている向き）。
+                        # **記録（`weak_depth`）はここで触らない**——理由は下の `|` / `&` の
+                        # 巻き戻しと同じで、外側の階層で落とした分は生きている
+                        if (closed_sub_seen) {
+                            errexit = closed_sub_e
+                            pipefail = closed_sub_p
+                            # **後ろにコマンドが無ければ、握り潰した最後の記録を引き上げる**
+                            # （issue #152）。`( set +e; bash <スイート> )` のように呼び出しが
+                            # 部分シェルの最後なら、握り潰しても終了状態はそのまま親へ伝わる。
+                            # **閉じる断片そのものがコマンドを持つ場合は引き上げない**
+                            # （`( set +e; bash <スイート>; echo z )` の `echo z )` が後ろに走るので
+                            #  終了状態は上書きされる＝引き上げると fail-open）
+                            if (prom_rec > 0 && !carries_command(text)) {
+                                if (closed_sub_e != 0) {
+                                    split(buf[prom_rec], inner, "\t")
+                                    buf[prom_rec] = inner[1] "\t" inner[2] "\t" closed_sub_e "\t" inner[4] "\t" inner[5] "\t" inner[6]
+                                }
+                                # **外側でもまだ握り潰されているなら、引き上げ候補を外側へ引き継ぐ**
+                                # （issue #152 のレビュー指摘）。入れ子の部分シェルでは内側の
+                                # 入口が 0（外側の `set +e` を継いでいる）なので、ここで捨てると
+                                # 「内側が外側の最後のコマンド」という伝播を見落とし、
+                                # 正しくゲートしている綴りを未配線と報告する（実測で
+                                # `( set +e; ( bash <スイート> ) )` の複数行書きが化けた）
+                                else {
+                                    carry_level = enclosing_subshell_depth(depth, subshell_at)
+                                    if (carry_level > 0) { sub_rec[carry_level] = prom_rec }
+                                }
+                            }
+                            prom_rec = 0
+                        }
                         if (closed_entry_seen && (ops[j] == "|" || ops[j] == "&")) {
                             errexit = closed_entry_e
                             pipefail = closed_entry_p
@@ -2939,6 +3047,17 @@ ci_workflow_extract() {
                         # `test -n "$FILES" && shellcheck $FILES` は正当な綴り——`gate` 側を
                         # 0 にすると、正しく設定されたリンタを「配線されていない」と報告する
                         buf[nbuf] = step_id "\t" ops[j] "\t" ((dead_depth >= 0 || unreachable || exit_seen) ? 0 : errexit) "\t" pipefail "\t" (uncertain + (chain_in ? 1 : 0)) "\t" text
+                        # **部分シェルの中で握り潰したコマンドのうち、最後のものを控える**（issue #152）。
+                        # 部分シェルの終了状態は「最後に走ったコマンドの状態」なので、握り潰しても
+                        # それが最後なら失敗はそのまま親へ伝わる（`( set +e; bash <スイート> )` は
+                        # 実 `bash -e` でジョブを落とす）。閉じるときに後ろへコマンドが無ければ
+                        # この記録を引き上げる。**控えるのは「errexit だけが理由で 0 になった記録」**で、
+                        # 死に体・到達不能はそのままにする（引き上げると fail-open）
+                        if (subshell > 0 && errexit == 0 && !(dead_depth >= 0 || unreachable || exit_seen) \
+                            && carries_command(text)) {
+                            sub_rec_level = enclosing_subshell_depth(depth, subshell_at)
+                            if (sub_rec_level > 0) { sub_rec[sub_rec_level] = nbuf }
+                        }
                         # 偽と分かる条件のブロックに入るところを覚える（この深さより深い間は無効）
                         # **連鎖が続くなら条件は 1 語だけではない。** `split_commands` は `&&` / `||` で
                         # 切るので、`if false || true; then` の断片は `if false` になる。素直に
@@ -3129,7 +3248,7 @@ ci_workflow_extract() {
                             # 釣り合いが 0 の断片（`( : )`）は階層が残らないので開かない
                             while (paren > 0 && open_probe ~ subshell_open_re()) {
                                 depth++; group_start[depth] = nbuf
-                                subshell_at[depth] = 1; subshell++
+                                subshell_at[depth] = 1; subshell++; sub_serial++; sub_id[depth] = sub_serial
                                 paren--
                                 sub(subshell_open_re(), "", open_probe)
                                 # 見出しと結び付く `{` は断片の先頭の 1 つだけ。`(` を越えた先の
@@ -3244,7 +3363,7 @@ ci_workflow_extract() {
                         if (paren > 0) {
                             for (closing = 0; closing < paren; closing++) {
                                 depth++; group_start[depth] = nbuf
-                                subshell_at[depth] = 1; subshell++
+                                subshell_at[depth] = 1; subshell++; sub_serial++; sub_id[depth] = sub_serial
                             }
                         }
                         # **この断片が開いた階層すべてに、断片に入る前のオプションを控える**
@@ -3281,7 +3400,7 @@ ci_workflow_extract() {
                         if (depth > depth_before && (pipe_in || ops[j] == "|") \
                             && case_before == 0 && !(ops[j] == "|" && case_depth > 0 && !pipe_in) \
                             && !subshell_at[depth_before + 1]) {
-                            subshell_at[depth_before + 1] = 1; subshell++
+                            subshell_at[depth_before + 1] = 1; subshell++; sub_serial++; sub_id[depth_before + 1] = sub_serial
                         }
                         # **連鎖で入った階層も控える**（issue #151 の実測）。
                         # `[ "$c" -eq 2 ] || { echo "FAIL: …"; exit 1; }` の `exit` は `;` の後ろなので
