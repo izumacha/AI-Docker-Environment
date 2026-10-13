@@ -2811,6 +2811,30 @@ jobs:
           >/dev/null set +e
           bash ${SUITE_PATH}"
 
+# **リダイレクトの綴りは 1 文字では足りない**（issue #177。実測）——`[<>]` 1 文字で書くと
+# `>>` の 2 文字目が転送先として読まれ、前置きとして落とせない。**転送先の前に空白を置く**
+# のが要点で、`>>/dev/null` と詰めて書くと 1 文字の綴りでも転送先が `>/dev/null` として
+# まとめて飲まれ、たまたま正しく落ちる（実測で、詰めた綴りのピンは古い綴りでも緑だった）。落とせないと
+# `>> log set +e` の `set` が見つからず握り潰しを読み落とすので、**握り潰された実行が
+# 「ゲートしている」と報告される**（`main` から fail-open。`>/dev/null set +e` は
+# 正しく読めていたので、追記の綴りだけが素通りする非対称だった）
+for redirect_prefix_case in \
+    "追記リダイレクト:>> /dev/null set +e" \
+    "番号付き追記リダイレクト:2>> /dev/null set +e" \
+    "まとめリダイレクト:&> /dev/null set +e" \
+    "ここ文字列:<<< x set +e"
+do
+    assert_not_wired "先頭に置いたリダイレクト付きの set +e（${redirect_prefix_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${redirect_prefix_case#*:}
+          bash ${SUITE_PATH}"
+done
+
 # --- case を開く断片に載ったアームの set は本体の階層に属する ----------------------
 
 # 深さが増えるのは断片の**末尾**なので、素直に記録すると同じアームの後続
@@ -4015,7 +4039,23 @@ for sub_promote_case in \
     "閉じる断片のリダイレクト:(
           set +e
           bash ${SUITE_PATH}
-          ) >/dev/null"
+          ) >/dev/null" \
+    "閉じる断片の追記リダイレクト:(
+          set +e
+          bash ${SUITE_PATH}
+          ) >> /dev/null" \
+    "閉じる断片の番号付き追記リダイレクト:(
+          set +e
+          bash ${SUITE_PATH}
+          ) 2>> /dev/null" \
+    "閉じる断片のまとめリダイレクト:(
+          set +e
+          bash ${SUITE_PATH}
+          ) &> /dev/null" \
+    "閉じる断片のここ文字列:(
+          set +e
+          bash ${SUITE_PATH}
+          ) <<< x"
 do
     assert_wired "部分シェルの最後のコマンドを引き上げる（${sub_promote_case%%:*}）" "name: ci
 jobs:
