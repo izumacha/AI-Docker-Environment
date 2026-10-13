@@ -1747,17 +1747,23 @@ ci_workflow_extract() {
         #   - コマンドが無いのに真と読む → 握り潰しの引き上げを見送る（fail-closed。ピンが落ちる）
         #   - コマンドがあるのに偽と読む → 引き上げてしまう（fail-open）
         # なので、落とす綴りは `close_word_re()` が持つ閉じ語と括弧・区切りだけに限る
-        function carries_command(t,   s2, before) {
+        function carries_command(t,   s2, before, closed, dropped) {
             s2 = t
+            closed = 0
             while (1) {
                 before = s2
                 sub(/^[[:space:]]*/, "", s2)
-                sub(/^[);]+[[:space:]]*/, "", s2)
-                # **リダイレクトは終了状態を変えないのでコマンドに数えない**
+                if (sub(/^[);]+[[:space:]]*/, "", s2)) { closed = 1 }
+                # **閉じ括弧に付いたリダイレクトは終了状態を変えないのでコマンドに数えない**
                 # （issue #152 のレビュー指摘。`) >/dev/null` を「後ろにコマンドがある」と
                 #  読むと引き上げを見送り、正しくゲートしている綴りを未配線と報告した＝実測）
-                sub(/^[0-9]*[<>]&?[[:space:]]*[^[:space:]]+[[:space:]]*/, "", s2)
-                s2 = drop_close_word(s2)
+                # **ただし閉じ括弧を伴わない裸のリダイレクトは 1 つのコマンド**で、`$?` を 0 に
+                # する（レビュー指摘、実測）。区別しないと `bash <スイート> && echo ok` の次の行に
+                # `> out` だけを置いた形で「連鎖がステップの最後」と読まれ、握り潰された実行が
+                # ゲートしていると報告される
+                if (closed) { sub(/^[0-9]*[<>]&?[[:space:]]*[^[:space:]]+[[:space:]]*/, "", s2) }
+                dropped = drop_close_word(s2)
+                if (dropped != s2) { closed = 1; s2 = dropped }
                 if (s2 == before) { break }
             }
             return (s2 != "")
@@ -2952,7 +2958,7 @@ ci_workflow_extract() {
                             if (prom_rec > 0 && !carries_command(text)) {
                                 if (closed_sub_e != 0) {
                                     split(buf[prom_rec], inner, "\t")
-                                    buf[prom_rec] = inner[1] "\t" inner[2] "\t" closed_sub_e "\t" inner[4] "\t" inner[5] "\t" inner[6]
+                                    buf[prom_rec] = inner[1] "\t" inner[2] "\t" closed_sub_e "\t" inner[4] "\t" inner[5] "\t" inner[6] "\t" inner[7]
                                 }
                                 # **外側でもまだ握り潰されているなら、引き上げ候補を外側へ引き継ぐ**
                                 # （issue #152 のレビュー指摘）。入れ子の部分シェルでは内側の
@@ -3059,7 +3065,7 @@ ci_workflow_extract() {
                         # **リンタの照会（`top` を渡さない）は巻き込まない**のが要点で、
                         # `test -n "$FILES" && shellcheck $FILES` は正当な綴り——`gate` 側を
                         # 0 にすると、正しく設定されたリンタを「配線されていない」と報告する
-                        buf[nbuf] = step_id "\t" ops[j] "\t" ((dead_depth >= 0 || unreachable || exit_seen) ? 0 : errexit) "\t" pipefail "\t" (uncertain + (chain_in ? 1 : 0) + (closed_inverted ? 1 : 0)) "\t" text
+                        buf[nbuf] = step_id "\t" ops[j] "\t" ((dead_depth >= 0 || unreachable || exit_seen) ? 0 : errexit) "\t" pipefail "\t" (uncertain + (chain_in ? 1 : 0) + (closed_inverted ? 1 : 0)) "\t" text "\t" ((subshell > 0 || paren > 0) ? 1 : 0)
                         # **部分シェルの中で握り潰したコマンドのうち、最後のものを控える**（issue #152）。
                         # 部分シェルの終了状態は「最後に走ったコマンドの状態」なので、握り潰しても
                         # それが最後なら失敗はそのまま親へ伝わる（`( set +e; bash <スイート> )` は
@@ -3179,10 +3185,26 @@ ci_workflow_extract() {
                         # **開いた断片そのものも中身になりうる。** `( bash x; ) || true` では
                         # `(` と呼び出しが同じ断片に載るので、控えた位置の**次**から書き換えると
                         # 呼び出しだけが取り残され、握り潰された実行が「ゲートしている」と読まれる
-                        if (closed_group_start >= 0 && (ops[j] == "||" || ops[j] == "&" || ops[j] == "|")) {
+                        # **`&&` も伝える**（issue #149）。`if true; then bash <スイート>; fi && echo ok`
+                        # の `&&` は `fi` に付くので、中身の記録は自分の区切りしか見ていない。
+                        # 伝えないと中の呼び出しが「合否に効く」と読まれる（実 `bash -e` は
+                        # NOGATE ＝AND の並びの左辺なので errexit が免除する）。
+                        # **伝えるときは 7 列目（部分シェルの中か）を 0 へ落とす**——免除が
+                        # 起きるのは**閉じた外側**なので、`( bash <スイート> ) && echo ok` の
+                        # 中身を「部分シェルの中だから伝わる」と読んではいけない
+                        # （実 `bash -e` でも NOGATE。中に `&&` がある形＝`( … && … )` だけが伝わる）
+                        # **`&&` を伝えるときは、中の記録が既に持つ強い抑制を上書きしない**
+                        # （レビュー指摘、実測）。`{ bash <スイート> || true; } && echo ok` の
+                        # 呼び出しは `||` で握り潰されていて外へ 1 つも漏れないのに、
+                        # 区切りだけで塗り替えると `&&` になり、位置の判定を通って
+                        # 「ゲートしている」と読まれた（main は正しく未配線。実 `bash -e` は NOGATE）。
+                        # `||` / `|` / `&` は `&&` より強い抑制なので、付いている方を残す
+                        if (closed_group_start >= 0 && (ops[j] == "||" || ops[j] == "&" || ops[j] == "|" || ops[j] == "&&")) {
                             for (k = closed_group_start; k <= nbuf; k++) {
                                 split(buf[k], inner, "\t")
-                                buf[k] = inner[1] "\t" ops[j] "\t" inner[3] "\t" inner[4] "\t" inner[5] "\t" inner[6]
+                                prop_op = ops[j]
+                                if (prop_op == "&&" && (inner[2] == "||" || inner[2] == "|" || inner[2] == "&")) { prop_op = inner[2] }
+                                buf[k] = inner[1] "\t" prop_op "\t" inner[3] "\t" inner[4] "\t" inner[5] "\t" inner[6] "\t" (prop_op == "&&" ? 0 : inner[7])
                             }
                         }
                         # 次の断片から見た「直前」を控える
@@ -3490,7 +3512,7 @@ ci_workflow_extract() {
         # ステップ番号にジョブ名を冠するのは、呼び出し側が「どのジョブが実行するか」まで
         # 問えるようにするため（env は同じジョブからしか見えないので、ジョブを跨いだ
         # 分割は「配線されている」と答えてはいけない）
-        function flush_job(   i, parts, shell_name, errexit_on, pipefail_on, gate) {
+        function flush_job(   i, parts, shell_name, errexit_on, pipefail_on, gate, last_cmd, chain_end, chain_parts, absorbed, rhs_parts) {
             # 未確定のステップをジョブの控えへ移してから判断する
             flush_step()
             # **env の記録は無効化に関わらず出す。** これは「何が実行されるか」ではなく
@@ -3500,6 +3522,13 @@ ci_workflow_extract() {
             for (i = 1; i <= nenv; i++) { print jobname "#" envbuf[i] }
             # ジョブごと止められていなければ、コマンドの控えをまとめて出す。
             # **ここで初めて実効シェルが確定する**（ステップ自身の指定 > ジョブの既定 > ワークフローの既定）
+            # **ステップごとに「最後に走るコマンドの記録」を先に求める**（issue #149）。
+            # `&&` の免除が効くかは「その並びがステップの最後か」で決まるので、
+            # 並び順を 1 度なめてから判断する
+            for (i = 1; i <= nbuf; i++) {
+                split(buf[i], parts, "\t")
+                if (carries_command(parts[6])) { last_cmd[parts[1]] = i }
+            }
             if (!job_disabled) {
                 for (i = 1; i <= nbuf; i++) {
                     # 控えた 1 件を「ステップ番号・直後の区切り・errexit・pipefail・本文」に分ける
@@ -3514,6 +3543,55 @@ ci_workflow_extract() {
                     # 直後の区切りから、その失敗が job に伝わるかを決める
                     gate = 1
                     if (parts[2] == "||" || parts[2] == "&") { gate = 0 }
+                    # **`&&` の左辺の失敗は errexit が免除する**（issue #149。POSIX:
+                    # AND-OR の並びのうち最後以外は `-e` の対象外で、bash も
+                    # `set -e; false && echo x; echo after` で `after` を出す＝実測）。
+                    # 同じシェルの中ならその失敗はそのまま捨てられるので、
+                    # `bash <スイート> && echo ok` は `|| true` と同じく合否に効かない
+                    # （以前は `&&` を一律「伝わる」側に倒しており、スイートを
+                    #  ワークフローから外して `&& echo ok` を 1 つ足すだけで
+                    #  `ci_coverage_test.sh` が緑のまま通った）。
+                    # **部分シェルの中だけは伝わる**——`( … && … )` の終了状態は
+                    # 親で検査されるので免除が及ばない（実 `bash -e` で
+                    # `( bash <スイート> && echo ok )` は GATES ＝実測）
+                    # **位置で決まる**（issue #149）——免除されるのは「並びの最後以外」なので、
+                    # その並び自身がステップの最後のコマンドなら並びの終了状態＝失敗が
+                    # ステップの終了状態になって伝わる。実 `bash -e` で、`bash <スイート> && echo ok`
+                    # だけの本文は GATES・後ろに 1 行足すと NOGATE（＝実測）。
+                    # **閉じ語だけの記録（`}` / `fi` / `done` / `)`）は数えない**——コマンドを
+                    # 走らせないので終了状態を上書きしない
+                    # **並びの途中で握り潰される形は位置を見る前に落とす**（レビュー指摘、実測）。
+                    # (a) `&` が付いた並びは丸ごと背後へ回り、その場の終了状態は 0
+                    # （`bash <スイート> && echo ok &` は実 `bash -e` で NOGATE）。
+                    # (b) `||` の右辺が**綴りから真と分かる**（`true` / `:`）なら並びの
+                    # 終了状態は 0 になる（`bash <スイート> && echo ok || true` も NOGATE）。
+                    # 読めない右辺は現状どおり位置だけで決める——`|| false` のように
+                    # **必ず失敗する右辺なら実際には伝わる**ので、一律に握り潰し扱いへ倒すと
+                    # 正しくゲートしている綴りを未配線と報告する（実測で GATES）。
+                    # **握り潰しの判定は部分シェルの中でも効かせる**——`( … || true )` は
+                    # 部分シェルの終了状態そのものが 0 になるので、親で検査されても伝わらない
+                    # （実 `bash -e` で NOGATE。位置の判定だけを部分シェルで飛ばす）
+                    # **パイプラインは並びの 1 要素なので跨ぐ**——`bash <スイート> && echo ok | cat`
+                    # の並びはパイプラインで終わるので、跨がないと連鎖の終端が
+                    # 「ステップの最後のコマンド」に届かず、正しくゲートしている綴りを
+                    # 未配線と報告する（実測で GATES。`main` は wired と答えていた）
+                    if (parts[2] == "&&") {
+                        absorbed = 0
+                        chain_end = i
+                        while (chain_end <= nbuf) {
+                            split(buf[chain_end], chain_parts, "\t")
+                            if (chain_parts[1] != parts[1]) { break }
+                            if (chain_parts[2] == "&") { absorbed = 1; break }
+                            if (chain_parts[2] == "||" && chain_end < nbuf) {
+                                split(buf[chain_end + 1], rhs_parts, "\t")
+                                if (rhs_parts[1] == parts[1] && chain_literal_status(rhs_parts[6]) == "t") { absorbed = 1; break }
+                            }
+                            if (chain_parts[2] != "&&" && chain_parts[2] != "||" && chain_parts[2] != "|") { break }
+                            chain_end++
+                        }
+                        if (absorbed) { gate = 0 }
+                        else if (parts[7] != "1") { gate = (chain_end == last_cmd[parts[1]]) ? 1 : 0 }
+                    }
                     if (parts[2] == "|") { gate = pipefail_on }
                     if (!errexit_on) { gate = 0 }
                     # 断片は trim 済みでタブを含まないので、6 列目がそのまま本文

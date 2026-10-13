@@ -5194,6 +5194,165 @@ jobs:
       - name: subject
         run: timeout 300 bash ${SUITE_PATH}"
 
+# **後置の `&&` は位置で決まる**（issue #149。`main` 既存の fail-open）。POSIX は
+# AND-OR の並びのうち**最後以外**を `-e` の対象外とするので、`bash <スイート> && echo ok`
+# の失敗はその場では捨てられる。**ただし並び自身がステップの最後のコマンドなら**、
+# 並びの終了状態（＝スイートの失敗）がステップの終了状態になって伝わる
+# （実 `bash -e` で、本文がその 1 行だけなら GATES・後ろに 1 行足すと NOGATE ＝実測）。
+# 以前は `&&` を一律「伝わる」側に倒していたので、**スイートをワークフローから外して
+# `&& echo ok` と 1 行を足すだけ**で `ci_coverage_test.sh` が緑のまま通った。
+# **閉じ語だけの記録（`}` / `fi` / `done` / `)`）は「後ろのコマンド」に数えない**
+# **閉じた部分シェルに付いた `&&` は「部分シェルの中だから伝わる」と読んではいけない**
+# ——免除が起きるのは閉じた**外側**なので、伝えるときは記録の「部分シェルの中か」の
+# 旗も落とす（落とさないと `( bash <スイート> ) && echo ok` ＋後ろの 1 行が
+# 位置によらず wired に化ける＝実測で、この対が無いと変異が素通りした）
+for and_absorbed_case in \
+    "素の &&:bash ${SUITE_PATH} && echo ok
+          echo done" \
+    "ブレースの中:{ bash ${SUITE_PATH} && echo ok ; }
+          echo done" \
+    "if の本体:if true; then bash ${SUITE_PATH} && echo ok ; fi
+          echo done" \
+    "fi に付いた &&:if true; then bash ${SUITE_PATH} ; fi && echo ok
+          echo done" \
+    "連鎖の途中:true && bash ${SUITE_PATH} && echo ok
+          echo done" \
+    "閉じたブレースに付いた &&:{ bash ${SUITE_PATH} ; } && echo ok
+          echo done" \
+    "閉じた部分シェルに付いた &&:( bash ${SUITE_PATH} ) && echo ok
+          echo done" \
+    "複数行で閉じた部分シェルに付いた &&:( bash ${SUITE_PATH}
+          ) && echo ok
+          echo done"
+do
+    assert_not_wired "後ろに行がある && の左辺は合否に効かない（${and_absorbed_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${and_absorbed_case#*:}"
+done
+
+# **締めすぎない側。** 並びがステップの最後なら伝わる（上の各形から後ろの 1 行を抜いたもの）。
+# **部分シェルの中の `&&` は位置によらず伝わる**——`( … && … )` の終了状態は親で検査されるので
+# 免除が及ばない（実 `bash -e` で後ろに 1 行足しても GATES ＝実測）
+for and_live_case in \
+    "素の && が最後:bash ${SUITE_PATH} && echo ok" \
+    "ブレースの中が最後:{ bash ${SUITE_PATH} && echo ok ; }" \
+    "if の本体が最後:if true; then bash ${SUITE_PATH} && echo ok ; fi" \
+    "fi に付いた && が最後:if true; then bash ${SUITE_PATH} ; fi && echo ok" \
+    "閉じたブレースに付いた && が最後:{ bash ${SUITE_PATH} ; } && echo ok" \
+    "閉じた部分シェルに付いた && が最後:( bash ${SUITE_PATH} ) && echo ok" \
+    "部分シェルの中の &&（後ろに行あり）:( bash ${SUITE_PATH} && echo ok )
+          echo done" \
+    "複数行で閉じた部分シェルに付いた && が最後:( bash ${SUITE_PATH}
+          ) && echo ok" \
+    "&& の右辺:true && bash ${SUITE_PATH}" \
+    "閉じ語だけが後ろにある:{
+          bash ${SUITE_PATH} && echo ok
+          }"
+do
+    assert_wired "並びが最後なら && の左辺も合否に効く（${and_live_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${and_live_case#*:}"
+done
+
+# **並びの途中で握り潰される形は位置を見る前に落とす**（レビュー指摘、実測）。
+# `&` が付いた並びは丸ごと背後へ回り、`||` の右辺が綴りから真と分かるなら並びの
+# 終了状態は 0 になる。どちらも実 `bash -e` で NOGATE。
+# **部分シェルの中でも効く**——`( … || true )` は部分シェルの終了状態そのものが 0 になる
+for and_swallowed_case in \
+    "|| true が後ろ:bash ${SUITE_PATH} && echo ok || true" \
+    "コロンの no-op が後ろ:bash ${SUITE_PATH} && echo ok || :" \
+    "並びを背後へ回す:bash ${SUITE_PATH} && echo ok &" \
+    "パイプラインで終わる並び＋後ろの行:bash ${SUITE_PATH} && echo ok | cat
+          echo done" \
+    "パイプラインの並びを背後へ回す:bash ${SUITE_PATH} && echo ok | cat &" \
+    "部分シェルの中の || true:( bash ${SUITE_PATH} && echo ok || true )"
+do
+    assert_not_wired "並びの途中で握り潰される（${and_swallowed_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${and_swallowed_case#*:}"
+done
+
+# 締めすぎない側。**パイプラインは並びの 1 要素なので跨ぐ**（跨がないと連鎖の終端が
+# 「ステップの最後のコマンド」に届かず、正しくゲートしている綴りを未配線と報告する）。
+# **読めない右辺の `||` は握り潰し扱いにしない**——`|| false` は必ず失敗するので
+# 実 `bash -e` では伝わる（実測で GATES）
+for and_pipeline_case in \
+    "パイプラインで終わる並びが最後:bash ${SUITE_PATH} && echo ok | cat" \
+    "読めない右辺の ||:bash ${SUITE_PATH} && echo ok || false"
+do
+    assert_wired "並びの終端まで届けば合否に効く（${and_pipeline_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${and_pipeline_case#*:}"
+done
+
+# **`&&` を伝えるとき、中の記録が既に持つ強い抑制を上書きしない**（レビュー指摘、実測）。
+# `{ bash <スイート> || true; } && echo ok` の呼び出しは `||` で握り潰されていて外へ 1 つも
+# 漏れないのに、閉じ括弧に付いた区切りで一律に塗り替えると `&&` になり、位置の判定を
+# 通って「ゲートしている」と読まれる（実 `bash -e` は NOGATE）。
+# `||` / `|` / `&` は `&&` より強い抑制なので、付いている方を残す
+for and_keeps_suppressor_case in \
+    "|| true で握り潰す:{ bash ${SUITE_PATH} || true; } && echo ok" \
+    "パイプの左辺:( bash ${SUITE_PATH} | cat ) && echo ok" \
+    "ブレースの中のパイプ:{ bash ${SUITE_PATH} | cat ; } && echo ok" \
+    "背後へ回す:( bash ${SUITE_PATH} & ) && echo ok"
+do
+    assert_not_wired "握り潰した区切りは && の伝播で塗り替えない（${and_keeps_suppressor_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${and_keeps_suppressor_case#*:}"
+done
+
+# **裸のリダイレクトだけの行は 1 つのコマンド**で、`$?` を 0 にする（レビュー指摘、実測）。
+# 「後ろのコマンド」に数えないと、連鎖がステップの最後だと読まれて握り潰された実行が
+# ゲートしていると報告される（実 `bash -e` は NOGATE）
+assert_not_wired "裸のリダイレクトだけの行が後ろにある" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} && echo ok
+          > out"
+
+# 締めすぎない側。**閉じ括弧に付いたリダイレクトは終了状態を変えない**ので後ろの
+# コマンドに数えない（issue #152 のレビュー指摘と同じ理由。数えると正しくゲートして
+# いる綴りが未配線になる）
+assert_wired "閉じ括弧に付いたリダイレクトは後ろのコマンドに数えない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          {
+          bash ${SUITE_PATH} && echo ok
+          } >/dev/null"
+
 assert_wired "空白の無い && の直前" "name: ci
 jobs:
   type-check:
@@ -7312,6 +7471,51 @@ awk_v_backslash_case() {
     fi
 }
 awk_v_backslash_case
+
+# **ケースの一覧のラベルにコロンを含めない。** この近くの検査は `"ラベル:本文"` という
+# 1 つの文字列を `${case%%:*}` と `${case#*:}` で割るので、**ラベル側にコロンが入ると
+# 本文の先頭にラベルの残りが混ざる**。混ざった本文は bash の綴りとして成り立たない語に
+# なるため呼び出しが見つからず、`assert_not_wired` のケースは**何も見張らないまま緑**で
+# 通る（実測。`"|| : が後ろ:bash <スイート> …"` が本文 ` が後ろ:bash …` に化けて、
+# 仕掛けを壊す変異でも落ちなかった）。**本文が日本語で始まることを印として落とす**
+# ——正しい本文はコマンド（ASCII）で始まる。
+# **対象はこのファイル自身のソースから導く**（一覧を書くと次に足したループが黙って外れる）
+case_label_colon_case() {
+    local out
+    # `for <名前> in \` から `do` までを一覧の本体とみなし、`"` で始まる行を 1 ケースとして読む。
+    # **近似**: 本文が複数行のケースは 1 行目（ラベルを含む行）だけを見る。本文の中に
+    # 桁 0 の `do` があるとその一覧を早く閉じるが、倒れる向きは「見る数が減る」側
+    out="$(awk '
+        /^for [A-Za-z_]+ in \\$/ { inlist = 1; next }
+        inlist && /^do$/ { inlist = 0; next }
+        inlist && /^    "/ {
+            seen++
+            entry = substr($0, index($0, "\"") + 1)
+            colon = index(entry, ":")
+            if (colon == 0) { next }
+            body = substr(entry, colon + 1)
+            sub(/^[[:space:]]+/, "", body)
+            first = substr(body, 1, 1)
+            if (first != "" && first !~ /^[ -~]$/) { bad = bad "\n  " NR ": " substr(entry, 1, colon - 1) }
+        }
+        END { print seen bad }
+    ' "${BASH_SOURCE[0]}")"
+    local seen="${out%%$'\n'*}"
+    local offenders="${out#"${seen}"}"
+    # 1 件も拾えなければ検出網が死んでいる（一覧の書き方が変わった）ので落とす（fail-closed）
+    if [ -z "${seen}" ] || [ "${seen}" -eq 0 ] 2>/dev/null; then
+        report_fail "ケースの一覧のラベルにコロンを含めない" \
+            "ケースを 1 つも拾えませんでした（一覧の書き方が変わった可能性）"
+        return
+    fi
+    if [ -z "${offenders}" ]; then
+        report 0 "ケースの一覧のラベルにコロンを含めない（${seen} 件）"
+    else
+        report_fail "ケースの一覧のラベルにコロンを含めない" \
+            "ラベルにコロンを含むケース（本文の先頭にラベルの残りが混ざります）:${offenders}"
+    fi
+}
+case_label_colon_case
 
 # 集計を出して、失敗が 1 件でもあれば非ゼロで終わる
 harness_summary
