@@ -1747,17 +1747,23 @@ ci_workflow_extract() {
         #   - コマンドが無いのに真と読む → 握り潰しの引き上げを見送る（fail-closed。ピンが落ちる）
         #   - コマンドがあるのに偽と読む → 引き上げてしまう（fail-open）
         # なので、落とす綴りは `close_word_re()` が持つ閉じ語と括弧・区切りだけに限る
-        function carries_command(t,   s2, before) {
+        function carries_command(t,   s2, before, closed, dropped) {
             s2 = t
+            closed = 0
             while (1) {
                 before = s2
                 sub(/^[[:space:]]*/, "", s2)
-                sub(/^[);]+[[:space:]]*/, "", s2)
-                # **リダイレクトは終了状態を変えないのでコマンドに数えない**
+                if (sub(/^[);]+[[:space:]]*/, "", s2)) { closed = 1 }
+                # **閉じ括弧に付いたリダイレクトは終了状態を変えないのでコマンドに数えない**
                 # （issue #152 のレビュー指摘。`) >/dev/null` を「後ろにコマンドがある」と
                 #  読むと引き上げを見送り、正しくゲートしている綴りを未配線と報告した＝実測）
-                sub(/^[0-9]*[<>]&?[[:space:]]*[^[:space:]]+[[:space:]]*/, "", s2)
-                s2 = drop_close_word(s2)
+                # **ただし閉じ括弧を伴わない裸のリダイレクトは 1 つのコマンド**で、`$?` を 0 に
+                # する（レビュー指摘、実測）。区別しないと `bash <スイート> && echo ok` の次の行に
+                # `> out` だけを置いた形で「連鎖がステップの最後」と読まれ、握り潰された実行が
+                # ゲートしていると報告される
+                if (closed) { sub(/^[0-9]*[<>]&?[[:space:]]*[^[:space:]]+[[:space:]]*/, "", s2) }
+                dropped = drop_close_word(s2)
+                if (dropped != s2) { closed = 1; s2 = dropped }
                 if (s2 == before) { break }
             }
             return (s2 != "")
@@ -3187,10 +3193,18 @@ ci_workflow_extract() {
                         # 起きるのは**閉じた外側**なので、`( bash <スイート> ) && echo ok` の
                         # 中身を「部分シェルの中だから伝わる」と読んではいけない
                         # （実 `bash -e` でも NOGATE。中に `&&` がある形＝`( … && … )` だけが伝わる）
+                        # **`&&` を伝えるときは、中の記録が既に持つ強い抑制を上書きしない**
+                        # （レビュー指摘、実測）。`{ bash <スイート> || true; } && echo ok` の
+                        # 呼び出しは `||` で握り潰されていて外へ 1 つも漏れないのに、
+                        # 区切りだけで塗り替えると `&&` になり、位置の判定を通って
+                        # 「ゲートしている」と読まれた（main は正しく未配線。実 `bash -e` は NOGATE）。
+                        # `||` / `|` / `&` は `&&` より強い抑制なので、付いている方を残す
                         if (closed_group_start >= 0 && (ops[j] == "||" || ops[j] == "&" || ops[j] == "|" || ops[j] == "&&")) {
                             for (k = closed_group_start; k <= nbuf; k++) {
                                 split(buf[k], inner, "\t")
-                                buf[k] = inner[1] "\t" ops[j] "\t" inner[3] "\t" inner[4] "\t" inner[5] "\t" inner[6] "\t" (ops[j] == "&&" ? 0 : inner[7])
+                                prop_op = ops[j]
+                                if (prop_op == "&&" && (inner[2] == "||" || inner[2] == "|" || inner[2] == "&")) { prop_op = inner[2] }
+                                buf[k] = inner[1] "\t" prop_op "\t" inner[3] "\t" inner[4] "\t" inner[5] "\t" inner[6] "\t" (prop_op == "&&" ? 0 : inner[7])
                             }
                         }
                         # 次の断片から見た「直前」を控える

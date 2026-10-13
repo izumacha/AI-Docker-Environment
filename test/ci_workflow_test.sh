@@ -5264,6 +5264,54 @@ jobs:
           ${and_live_case#*:}"
 done
 
+# **`&&` を伝えるとき、中の記録が既に持つ強い抑制を上書きしない**（レビュー指摘、実測）。
+# `{ bash <スイート> || true; } && echo ok` の呼び出しは `||` で握り潰されていて外へ 1 つも
+# 漏れないのに、閉じ括弧に付いた区切りで一律に塗り替えると `&&` になり、位置の判定を
+# 通って「ゲートしている」と読まれる（実 `bash -e` は NOGATE）。
+# `||` / `|` / `&` は `&&` より強い抑制なので、付いている方を残す
+for and_keeps_suppressor_case in \
+    "|| true で握り潰す:{ bash ${SUITE_PATH} || true; } && echo ok" \
+    "パイプの左辺:( bash ${SUITE_PATH} | cat ) && echo ok" \
+    "ブレースの中のパイプ:{ bash ${SUITE_PATH} | cat ; } && echo ok" \
+    "背後へ回す:( bash ${SUITE_PATH} & ) && echo ok"
+do
+    assert_not_wired "握り潰した区切りは && の伝播で塗り替えない（${and_keeps_suppressor_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${and_keeps_suppressor_case#*:}"
+done
+
+# **裸のリダイレクトだけの行は 1 つのコマンド**で、`$?` を 0 にする（レビュー指摘、実測）。
+# 「後ろのコマンド」に数えないと、連鎖がステップの最後だと読まれて握り潰された実行が
+# ゲートしていると報告される（実 `bash -e` は NOGATE）
+assert_not_wired "裸のリダイレクトだけの行が後ろにある" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} && echo ok
+          > out"
+
+# 締めすぎない側。**閉じ括弧に付いたリダイレクトは終了状態を変えない**ので後ろの
+# コマンドに数えない（issue #152 のレビュー指摘と同じ理由。数えると正しくゲートして
+# いる綴りが未配線になる）
+assert_wired "閉じ括弧に付いたリダイレクトは後ろのコマンドに数えない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          {
+          bash ${SUITE_PATH} && echo ok
+          } >/dev/null"
+
 assert_wired "空白の無い && の直前" "name: ci
 jobs:
   type-check:
