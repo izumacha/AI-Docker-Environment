@@ -4065,7 +4065,29 @@ for lead_sub_set_case in \
     "一行:( set +e; bash ${SUITE_PATH}; echo done )" \
     "二重の部分シェル:( ( set +e
           bash ${SUITE_PATH}
-          echo done ) )"
+          echo done ) )" \
+    "ブレースの前置き:{ ( set +e
+          bash ${SUITE_PATH}
+          echo done )
+          }" \
+    "time の前置き:time ( set +e
+          bash ${SUITE_PATH}
+          echo done )" \
+    "ブレースと time:{ time ( set +e
+          bash ${SUITE_PATH}
+          echo done )
+          }" \
+    "time とブレース:time { ( set +e
+          bash ${SUITE_PATH}
+          echo done ) ; }" \
+    "入れ子のブレース:{ { ( set +e
+          bash ${SUITE_PATH}
+          echo done ) } }" \
+    "ブレースの前置きと二重の部分シェル:{ ( ( set +e
+          bash ${SUITE_PATH}
+          echo done ) )
+          }" \
+    "ブレースの前置きと一行:{ ( set +e; bash ${SUITE_PATH}; echo done ) ; }"
 do
     assert_not_wired "開き括弧と同じ断片の set +e を読む（${lead_sub_set_case%%:*}）" "name: ci
 jobs:
@@ -4081,6 +4103,35 @@ done
 # 階層ごとの連番（`sub_id`）は開き側のループで振られ、それはこの `set` の処理より
 # **後ろ**なので、素直に読むと親の番号になり同じ部分シェルの中の `set -e` が
 # 打ち消せない（実 `bash -e` は GATES なのに `not-wired`＝正しくゲートする綴りを赤くする）
+# **前置きの後ろでも打ち消せる**（issue #187）。覗きを広げるだけで予約の宛先を直さないと、
+# `{ ( set +e` の握り潰しが**ブレースの階層**へ結び付き、同じ部分シェルの中の `set -e` が
+# 打ち消せなくなる（wired → not-wired。正しくゲートする綴りを赤くする向きで、
+# issue #187 がレビューの実測として記録している退行）。実 `bash -e` はどちらも GATES
+for lead_sub_cancel_case in \
+    "ブレースの前置き:{ ( set +e
+          set -e
+          bash ${SUITE_PATH}
+          echo done )
+          }" \
+    "time の前置き:time ( set +e
+          set -e
+          bash ${SUITE_PATH}
+          echo done )" \
+    "入れ子のブレース:{ { ( set +e
+          set -e
+          bash ${SUITE_PATH}
+          echo done ) } }"
+do
+    assert_wired "前置きの後ろの set +e も中の set -e で戻せる（${lead_sub_cancel_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${lead_sub_cancel_case#*:}"
+done
+
 assert_wired "開き括弧と同じ断片の set +e は中の set -e で戻せる" "name: ci
 jobs:
   type-check:
