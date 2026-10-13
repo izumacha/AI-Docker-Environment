@@ -2805,6 +2805,11 @@ for exit_scoped_case in \
             )
           }
           f" \
+    "本文の部分シェルを開いたまま改行した関数の呼び出し:f() {
+            ( exit 0
+            )
+          }
+          f" \
     "部分シェルの中の脱出の後ろ（最上位へ戻る）:( exit 0
           echo inner )" \
     "1 行に畳んだ case のアームの中の呼び出し:f() { exit 0; }
@@ -2876,6 +2881,9 @@ for subshell_weaken_case in \
     "部分シェルの中で呼び、後ろに別のコマンド:( quiet; bash ${SUITE_PATH} )
           echo done" \
     "部分シェルの中で呼び、スイートは外:( quiet )
+          bash ${SUITE_PATH}" \
+    "部分シェルを開いたまま改行して呼び、スイートは外:( quiet
+          )
           bash ${SUITE_PATH}"
 do
     assert_wired "弱める関数を部分シェルの中で呼んでも中の失敗は伝わる（${subshell_weaken_case%%:*}）" "name: ci
