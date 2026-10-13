@@ -216,6 +216,25 @@ CI_WORKFLOW_ANCHOR_NAME='[A-Za-z0-9_-]'
 # ここを英数字に狭めると `!!str` が読めなくなる（実測で 2 件の対が落ちた）ので、
 # フロー形式の区切り・空白・引用符だけを終わりとする広い集合のままにする
 CI_WORKFLOW_TAG_NAME="[^${CI_WORKFLOW_PROP_STOP_CHARS}[:space:]\"']"
+# **逐語タグ（`!<…>`）は上の集合では読めない**（issue #182。実測）。YAML の逐語タグの中身は
+# URI 文字で、**フロー形式の区切りを含んでよい**——`!<tag:yaml.org,2002:str>` の `,` がそれ。
+# 上の集合は `,` で名前を切るので、このタグは読み飛ばせない。すると直後の引用符が
+# 「値の始まり」と認められず、値の中の `#` が伏せられないまま構造行へ残り、消費側が
+# そこで行を切って**後ろの本物の `secrets:` を捨てる**——そのワークフローが read-only と
+# 判定され、**FR-9.6(b) の SHA ピン強制が丸ごと外れる**（issue #124 と同じ経路の **fail-open**）。
+# **区切りを上の集合から外して直してはいけない。** 短縮形のタグ（`!!str` / `!e!suffix`）の
+# 名前は YAML の定義（`ns-tag-char`）でフロー形式の区切りを**含めない**。外すと値を取り出す側
+# （`prop_plain_re`）が `run: !x, bash <スイート>` を名前 `!x,` ＋ 値 `bash <スイート>` として読み、
+# **走るか確かめられない綴りで「ゲートしている」と言い出す**（実測。`PyYAML` はまさにそう読むが、
+# **GitHub の解析器は PyYAML ではない**——アンカーの集合を実装に合わせて狭めてある理由と同じで、
+# 確かめられない側は読まない＝fail-closed に倒す）。
+# **なお構造行の側では外しても何も変わらない**（実測。プロパティの綴りは手を加えずそのまま
+# 出力へ送るので、名前が伸びても後ろの `secrets:` は構造行に残る）——隠す向きに倒れるのは
+# 逐語タグを**読み飛ばせないとき**だけで、それが下で別扱いにしている理由。
+# 形の違う 2 つなので**綴りも 2 つに分ける**。閉じる `>` が同じ行に無ければ読まない（fail-closed）。
+# 逐語の形を先に書くのは、最長一致でない実装でも同じ答えになるようにするため
+# （`CI_WORKFLOW_REDIRECT_LEAD` と同じ理由）
+CI_WORKFLOW_VERBATIM_TAG='!<[^>[:space:]"]+>'
 # **名前を要する形。素のスカラーの値から落とすのはこちらだけ。**
 # 名前の無い `!` をここで認めると、`run: ! bash test/x.sh` が値 `bash test/x.sh` として
 # 読まれて「ゲートしている」と報告される。ところが**その綴りが実際にどう扱われるかは
@@ -223,7 +242,7 @@ CI_WORKFLOW_TAG_NAME="[^${CI_WORKFLOW_PROP_STOP_CHARS}[:space:]\"']"
 # ランナーが `! bash …` をそのままシェルへ渡す側だと、終了状態が反転して**ゲートしない
 # ステップをゲートしていると言う fail-open** になる。読まなければ逆向き（未配線＝fail-closed）
 # で、同じ綴りを `assert_not_wired` で固定してある
-CI_WORKFLOW_NODE_PROPERTY="((&${CI_WORKFLOW_ANCHOR_NAME}+|!${CI_WORKFLOW_TAG_NAME}+)[[:space:]]+)*"
+CI_WORKFLOW_NODE_PROPERTY="((&${CI_WORKFLOW_ANCHOR_NAME}+|${CI_WORKFLOW_VERBATIM_TAG}|!${CI_WORKFLOW_TAG_NAME}+)[[:space:]]+)*"
 # **ブロックの印（`|` / `>`）の手前だけ、名前の無い `!` も許す形。**
 # `run: ! |` は YAML の非特定タグで正当（PyYAML も通す）。しかも `! |` はシェルとしては
 # 構文エラーなので**競合する読み方が無い**＝上の fail-open が起こらない。
@@ -239,7 +258,7 @@ CI_WORKFLOW_NODE_PROPERTY="((&${CI_WORKFLOW_ANCHOR_NAME}+|!${CI_WORKFLOW_TAG_NAM
 # 2 つの読み手の答えが分かれる（配線の判定は fail-closed、特権の判定は値を引用として
 # 伏せる側＝危険側）。どちらに倒しても別の綴りで逆向きの穴が開くので、
 # **問いごとに安全な向きが逆である**ことを承知で分けてある（issue #126 のレビューで実測）
-CI_WORKFLOW_NODE_PROPERTY_BLOCK="((&${CI_WORKFLOW_ANCHOR_NAME}+|!${CI_WORKFLOW_TAG_NAME}*)[[:space:]]+)*"
+CI_WORKFLOW_NODE_PROPERTY_BLOCK="((&${CI_WORKFLOW_ANCHOR_NAME}+|${CI_WORKFLOW_VERBATIM_TAG}|!${CI_WORKFLOW_TAG_NAME}*)[[:space:]]+)*"
 
 # 抽出した「実行されるコマンド」を保持するファイル。1 行が
 # `<ジョブ名>#<ステップ番号><TAB><ゲートに効くか(1/0)><TAB><コマンドの断片>`
@@ -401,7 +420,7 @@ emit_structural_lines() {
         #
         # 引用符そのものは今までどおり落とす（`"permissions":` と `permissions:` を同じ形に
         # 揃える FR-8.1 の前提。脱出表記や入れ子で現れた引用符も同じく落とす）。
-        function mask_quoted_flow_punctuation(src,   out, raw, masked, quote, prev, gap, closed, keyq, seqzone, dashind, in_comment, flowdepth, i, ch, nxt, len, propend) {
+        function mask_quoted_flow_punctuation(src,   out, raw, masked, quote, prev, gap, closed, keyq, seqzone, dashind, in_comment, flowdepth, i, ch, nxt, len, propend, vtend, vtprobe, propraw) {
             # **引用符を 1 つも含まない行は、そのまま返す。** その場合この関数がやることは
             # 「1 文字ずつ読んで同じ文字を書き戻す」だけで、結果は入力と必ず一致する。
             # ワークフローの行の大半（`runs-on: ubuntu-latest` など）がこれに当たり、
@@ -484,14 +503,58 @@ emit_structural_lines() {
                     # 外れる**（issue #124。`&n ` の 3 文字を足すだけで可変タグが素通りする **fail-open**）
                     if ((ch == "&" || ch == "!") && at_value_start(prev, gap, keyq, dashind, flowdepth)) {
                         # プロパティの名前の終わりを探す。終わらせるのは空白・フロー形式の区切り
-                        # （`prop_stop_re`）・引用符の 3 種で、綴りの持ち主は awk 変数 1 か所
+                        # （`prop_stop_re`）・引用符の 3 種で、綴りの持ち主は awk 変数 1 か所。
+                        # **逐語タグ（`!<…>`）だけは別の形**（issue #182。実測）——中身は URI 文字で
+                        # **フロー形式の区切りを含んでよい**ので、`!<tag:yaml.org,2002:str>` は
+                        # 上の 3 種では `,` で切れてしまい、プロパティとして読み飛ばせない。
+                        # 読み飛ばせないと直後の引用符が「値の始まり」と認められず、値の中の `#` が
+                        # 伏せられないまま構造行へ残り、消費側がそこで行を切って
+                        # **後ろの本物の `secrets:` を捨てる**（issue #124 と同じ経路の fail-open。
+                        # 実測で `{name: !<tag:x,2002:str> "a #b", secrets: inherit}` が read-only と
+                        # 判定された）。**区切りの集合を広げて直してはいけない**——理由はシェル側の
+                        # `CI_WORKFLOW_TAG_NAME` の注記が持つ（広げると値を取り出す側が
+                        # 確かめられない綴りを「ゲートしている」と読む。実測）。
+                        # 形が違うので判定も分ける。閉じる `>` が同じ行に無ければ読まない（fail-closed。
+                        # `!<` を閉じない綴りは YAML として成り立たないので、読んで得るものが無い）
                         propend = i
-                        while (propend < len) {
-                            nxt = substr(src, propend + 1, 1)
-                            if (nxt ~ /[[:space:]]/) break
-                            if (nxt ~ prop_stop_re) break
-                            if (nxt == dq || nxt == sq) break
-                            propend++
+                        if (ch == "!" && substr(src, i + 1, 1) == "<") {
+                            # **閉じる `>` は「途切れずに届く」ときだけ認める**（レビュー指摘、実測）。
+                            # `index()` で行のどこかの `>` を拾うと、`!<a >` のような**閉じていない**
+                            # 綴りが後ろの `>` で閉じたものとして読まれ、続く引用符を開いて
+                            # **本物の `, secrets:` を伏せる**（＝この差分が入れた fail-open。
+                            # 実測で `main` は privileged・この綴りを拾う版は plain）。
+                            # 途切れとして数えるのは空白と二重引用符の 2 つ——逐語タグの中身は
+                            # YAML の `ns-uri-char` で、どちらも含めない。**単引用符は止めない**
+                            # （中身に含めてよい綴りなので、止めるとそれを含むタグでプロパティを
+                            # 読めず、まさに issue #182 の fail-open へ戻る＝実測）
+                            vtend = 0
+                            vtprobe = i + 2
+                            while (vtprobe <= len) {
+                                nxt = substr(src, vtprobe, 1)
+                                if (nxt ~ /[[:space:]]/ || nxt == dq) break
+                                if (nxt == ">") { vtend = vtprobe; break }
+                                vtprobe++
+                            }
+                            # 中身が 1 文字以上あるときだけ逐語タグとして読む（`!<>` は認めない。
+                            # シェル側の綴りが `+` を求めているのと対で保つ）
+                            if (vtend > i + 2) { propend = vtend }
+                        }
+                        # **逐語タグとして読めなかったとき、および読めても後ろに空白が
+                        # 続かないときは短縮形の歩きへ落とす**（レビュー指摘、実測）。
+                        # 落とさないと `!<a>b>` のように**最初の `>` で閉じて続きがある**綴りで
+                        # プロパティを読まないまま値の引用が開かず、`main` が伏せていた `#` を
+                        # 伏せ損なって特権判定が privileged → plain へ動く（この差分が入れた退行）。
+                        # 落とせば逐語として読めない綴りはすべて `main` と同じ答えに戻り、
+                        # 動くのは**逐語として正しく読める綴りだけ**になる
+                        if (propend == i || substr(src, propend + 1, 1) !~ /^[[:space:]]$/) {
+                            propend = i
+                            while (propend < len) {
+                                nxt = substr(src, propend + 1, 1)
+                                if (nxt ~ /[[:space:]]/) break
+                                if (nxt ~ prop_stop_re) break
+                                if (nxt == dq || nxt == sq) break
+                                propend++
+                            }
                         }
                         # プロパティとして読む条件は 2 つ。
                         # (1) **名前が 1 文字以上あること。** 素の `&` だけ（`{name: & "b, secrets: x"}`）は
@@ -510,8 +573,16 @@ emit_structural_lines() {
                         # 許す形）と**対で保つこと**。`CI_WORKFLOW_NODE_PROPERTY`（名前を要する形）の
                         # 方へ揃えると、どちらを動かしても issue #126 か素のスカラーの fail-open が開く
                         if ((propend > i || ch == "!") && substr(src, propend + 1, 1) ~ /^[[:space:]]$/) {
-                            # プロパティの綴りは構造でも値でもないので、手を加えずそのまま出力へ送る
-                            out = out substr(src, i, propend - i + 1)
+                            # プロパティの綴りは構造でも値でもないのでそのまま出力へ送る。
+                            # **ただし引用符だけは落とす**（レビュー指摘、実測）——逐語タグの中身は
+                            # 単引用符を含んでよく（それを含む綴りも YAML として読める）、そのまま出すと
+                            # 「構造行に引用符を 1 つも残さない」不変条件が破れる。消費側はその前提で
+                            # 正規化しているので、破ると特権判定が fail-open へ倒れうる。
+                            # 短縮形の歩きは引用符で止まるのでここへ来るのは逐語タグだけだが、
+                            # **落とす側に倒すのは綴りに依存しない**（二重引用符は上で中身から外してある）
+                            propraw = substr(src, i, propend - i + 1)
+                            gsub(/["\047]/, "", propraw)
+                            out = out propraw
                             # 行頭の「字下げと `-` だけ」の並びはここで終わり（プロパティはそのどちらでもない）
                             seqzone = 0
                             # **`prev` / `keyq` / `dashind` は書き換えない。** プロパティは値ではないので、

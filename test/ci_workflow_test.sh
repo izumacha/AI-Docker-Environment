@@ -623,7 +623,8 @@ for node_prop_case in \
     "独自タグ:!custom |" \
     "折りたたみ:&s >" \
     "chomping つき:&s |-" \
-    "明示字下げ指示子つき:&s |2"
+    "明示字下げ指示子つき:&s |2" \
+    "逐語タグ:!<tag:yaml.org,2002:str> |"
 do
     assert_wired "ノードプロパティを挟んだブロックスカラー（${node_prop_case%%:*}）" "name: ci
 jobs:
@@ -642,6 +643,44 @@ done
 # **`bash` と パスを改行で割った形では固定できない**——畳まないと記録が 2 つに割れるが、
 # 片方がパスそのもの（`test/subject_test.sh`）になり、それは**直接実行の綴りとして
 # 正しく配線と数えられる**ので答えが変わらない（実測）
+# **逐語タグ（`!<…>`）は素のスカラーの値からも落とす**（issue #182）。中身は URI 文字で
+# フロー形式の区切りを含んでよく（`!<tag:yaml.org,2002:str>` の `,`）、短縮形のタグ用の
+# 狭い集合では `,` で名前が切れて値を取り出せない（`main` から fail-closed。
+# 同じ取りこぼしが構造行の側では**隠す向き**の fail-open になるのが issue #182 の本体で、
+# そちらは `action_pin_test.sh` の特権判定のピンが固定する）
+assert_wired "逐語タグを挟んだ素のスカラーの値を読む" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: !<tag:yaml.org,2002:str> bash ${SUITE_PATH}"
+
+# 締めすぎない側。**短縮形のタグの名前には区切りを含めない**（YAML の `ns-tag-char`）。
+# 名前が `!x,` まで伸びる綴りは**読まない**ので、値が取り出せず未配線に倒れる
+# （`PyYAML` は名前 `!x,` ＋ 値 `bash <スイート>` と読むが、**GitHub の解析器は PyYAML ではない**
+# ——確かめられない綴りで「ゲートしている」と言わない側へ倒す＝fail-closed。
+# このピンは `CI_WORKFLOW_PROP_STOP_CHARS` から `,` を外す変異で落ちる）
+# 同じく締めすぎない側。**逐語タグの中身に空白と二重引用符は含めない**（YAML の `ns-uri-char`）。
+# 含む綴りは `PyYAML` も受け付けない（`ScannerError`）ので、値として読むと
+# **走るか確かめられない綴りで「ゲートしている」と言い出す**（レビュー指摘。この差分の
+# 最初の版が `[^>]+` と書いていて実際にそうなっていた＝実測で `main` は not-wired）
+assert_not_wired "逐語タグの中身に二重引用符を含む綴りは値として読まない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: !<a\"b> bash ${SUITE_PATH}"
+
+assert_not_wired "短縮形のタグの名前に区切りを含む綴りは値として読まない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: !x, bash ${SUITE_PATH}"
+
 assert_not_wired "ノードプロパティを挟んだ折りたたみブロックでは次行の || true が掛かる" "name: ci
 jobs:
   type-check:
@@ -7416,6 +7455,8 @@ jobs:
       - name: "say \"hi\""
       - name: '"'"'don'"'"''"'"'t'"'"'
       - {"name":"e, f", "uses": ./local}
+      - {name: !<a'"'"'b> x, uses: ./local}
+      - {name: &anchor "h, i", uses: ./local}
       - name: "unclosed, g'
 printf '%s\n' "${quote_free_body}" > "${TMP_DIR}/quote-free.yml"
 # **まず出力を受け取ってから判定する。** `| grep -q` に直接つなぐと、解析器が壊れて 1 行も

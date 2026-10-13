@@ -1165,6 +1165,29 @@ permissions:
 jobs:
   j: {uses: org/repo/.github/workflows/verify.yml@main, secrets: inherit}'
 
+# **逐語タグ（`!<…>`）の中のフロー形式の区切りで `secrets:` が隠れてはならない**（issue #182。実測）。
+# YAML の逐語タグの中身は URI 文字で `,` を含んでよいが、ノードプロパティを読み飛ばす側が
+# `,` で名前を切っていたため、直後の引用符が「値の始まり」と認められず、値の中の `#` が
+# 伏せられないまま構造行へ残っていた。消費側はそこで行を切るので**後ろの本物の
+# `secrets: inherit` が捨てられ**、このワークフローが read-only と判定されて
+# **可変タグの検査（FR-9.6(b)）が丸ごと外れる**（`PyYAML` はこの綴りを正しく読む＝実測で
+# 鍵は `name` / `secrets` / `runs-on` の 3 つ）。
+# **短縮形のタグでも同じ隠し方ができてはならない**ので、`!!str` の形も並べて固定する
+for verbatim_tag_case in \
+    "逐語タグに区切りを含む:!<tag:x,2002:str>" \
+    "逐語タグに閉じ括弧を含む:!<tag:x}2002:str>" \
+    "逐語タグに単引用符を含む:!<tag:x'2002:str>" \
+    "最初の閉じのあとに続きがある:!<a>b>" \
+    "短縮形のタグ:!!str"
+do
+    assert_privilege_classification privileged "secrets: inherit hidden behind a node property (${verbatim_tag_case%%:*})" \
+"name: X
+permissions:
+  contents: read
+jobs:
+  j: {name: ${verbatim_tag_case#*:} \"a #b\", secrets: inherit, runs-on: ubuntu-latest, steps: [{uses: actions/checkout@v7}]}"
+done
+
 # ジョブ単位でだけ書き込みを与える形（ワークフロー全体の宣言は読み取り専用）
 assert_privilege_classification privileged 'job-level write under a read-only workflow default' \
 'name: X
@@ -2539,6 +2562,25 @@ else
     fail 'ci.yml still runs test/ci_coverage_test.sh (coverage net is wired)' \
         "the CI coverage step no longer gates in the type-check job of ${WORKFLOW_DIR}/ci.yml; without it, scripts missing from SHELL_FILES and unwired suites stop being detected and CI stays green (if the suite moved to another job, FR-8.1 and this assertion both need updating)"
 fi
+
+# **逐語タグとして読めない綴りは `main` と同じ答えに戻すこと**（レビュー指摘、実測）。
+# 閉じる `>` を行のどこからでも拾う形（`index()`）にすると、`!<a >` のように**閉じていない**
+# 綴りが後ろの `>` で閉じたものとして読まれ、続く引用符を開いて**その後ろを伏せてしまう**
+# ——下の 2 形は引用の中に `secrets: inherit` を置いた囮で、伏せられると `plain` へ動く。
+# どちらも `PyYAML` が受け付けない綴り（`ScannerError`）なので、**読めないものは読まない**
+# ＝`main` と同じ `privileged` に倒す（「read-only と証明できないなら特権」という
+# この分類器の契約どおりの向き）
+for unreadable_verbatim_case in \
+    "閉じていない:!<a >" \
+    "二重引用符を含む:!<a\"b>"
+do
+    assert_privilege_classification privileged "secrets らしき綴りを伏せない（${unreadable_verbatim_case%%:*}）" \
+"name: X
+permissions:
+  contents: read
+jobs:
+  j: {name: ${unreadable_verbatim_case#*:} \"x, secrets: inherit\", runs-on: ubuntu-latest, steps: [{uses: actions/checkout@v7}]}"
+done
 
 # 検査結果の合計を、他のテストスイートと同じ書式で出力する
 printf '\n# %d passed, %d failed\n' "$PASS" "$FAIL"
