@@ -2268,10 +2268,9 @@ ci_workflow_extract() {
             probe = chain_status_probe(t)
             # 脱出の綴りでなければ関係ない（普通のコマンドは階層を抜けない）
             if (probe !~ /^(exit|return)([[:space:]]+[^[:space:]]+)?$/) { return 0 }
-            # 引数が 0 と読めるなら必ず成功して抜ける
-            if (probe ~ /^(exit|return)[[:space:]]+0+$/) { return 1 }
-            # 0 以外の数値リテラルなら必ず失敗する（抜けても並びは失敗する）
-            if (probe ~ /^(exit|return)[[:space:]]+[0-9]+$/) { return 0 }
+            # 0 以外の数値リテラルなら必ず失敗する（抜けても並びは失敗する）。
+            # **剰余の規則は `escape_literal_status()` が唯一の源**（`exit 256` は成功して抜ける）
+            if (probe ~ /^(exit|return)[[:space:]]+[0-9]+$/) { return (escape_literal_status(probe) == 0) ? 1 : 0 }
             # **引数が読めない脱出（素の `exit` / `exit $rc`）は手前のコマンド次第**
             # （レビュー指摘。`chain_never_succeeds()` は別の問いに答える関数で、読めない
             #  引数を「成功しえない」側へ倒すため、そのまま委ねると `|| (` / `echo cleanup` /
@@ -2281,6 +2280,59 @@ ci_workflow_extract() {
             # 手前に走ったコマンドがあればその状態は読めないので「成功しうる」側＝握り潰し側
             # （`main` と同じ答え）へ倒す
             return preceded ? 1 : 0
+        }
+        # **脱出の数値リテラルが実際に残す終了状態**（待機状態は 8 ビットなので 256 で割った余り）。
+        # `escape_can_succeed()` / `chain_never_succeeds()` / `||` の歩きが同じ規則を読む（§6 DRY）
+        function escape_literal_status(probe,   arg) {
+            arg = probe
+            # `exit` / `return` と空白を落として引数だけにする
+            sub(/^(exit|return)[[:space:]]+/, "", arg)
+            # 数値として読んで 256 の剰余を返す（`exit 256` は 0、`exit 300` は 44）
+            return (arg + 0) % 256
+        }
+        # **引数の終了状態が読めない脱出か**（`exit $rc` / `exit "${code}"`）。
+        # 素の `exit` と `exit $?` は読める——`||` の右辺が走るのは**左辺が落ちたとき**だけで、
+        # どちらも `$?`（＝その失敗の状態）で終わるので必ず非 0 になる。
+        # それ以外の変数・式は 0 にもなりうるので、`||` の歩きは**握り潰し側＝未配線**へ倒す
+        # （実測: `rc=0` のとき `bash <スイート> || exit $rc` は実 `bash -e` で NOGATE。
+        # 「読めないなら失敗を伝える」と読むと**1 件も走らないスイートが「ゲートしている」**になる）
+        function escape_status_unreadable(t,   probe) {
+            probe = chain_status_probe(t)
+            # 脱出でなければこの問いの対象外
+            if (probe !~ /^(exit|return)([[:space:]]+[^[:space:]]+)?$/) { return 0 }
+            # 引数なし・`$?` は左辺の失敗をそのまま持ち出すので読める
+            if (probe ~ /^(exit|return)([[:space:]]+\$\?)?$/) { return 0 }
+            # 数値リテラルも読める
+            if (probe ~ /^(exit|return)[[:space:]]+[0-9]+$/) { return 0 }
+            # 残りは読めない
+            return 1
+        }
+        # **そのシェルを必ず終わらせる脱出か**（`exit` だけ。`return` は呼び出し元へ戻るだけ）。
+        # `exit` は errexit の有無も並びの位置も問わずその場でシェルを終えるので、
+        # `set +e` の下でも、後ろに行があっても、終了状態はその `exit` のものになる
+        # （実測: `set +e` / `bash <スイート> || exit 1` / `echo done` は GATES。
+        # 位置と errexit を見ていたので未配線＝正しくゲートしている綴りを赤くしていた）
+        function exit_ends_shell(t, probe, head) {
+            probe = chain_status_probe(t)
+            # `exit` 以外（普通のコマンド・`return`）は対象外
+            if (probe !~ /^exit([[:space:]]+[^[:space:]]+)?$/) { return 0 }
+            # **手前で部分シェルを開いている綴りは対象外**（実測で見つけた穴）。
+            # `chain_status_probe()` は開き括弧も落とすので、`{ ( exit 1 )` のように
+            # 1 断片で部分シェルを開く綴りが「同じシェルの `exit`」に見えてしまう——
+            # その `exit` が終えるのは部分シェルだけなので、`set +e` の下では
+            # 失敗が伝わらない（実 `bash -e` は NOGATE。印を立てると fail-open）。
+            # **階層の識別子では判定できない**: 命令の手前で開いた数（`cmd_opens`）は
+            # 括弧の開きを数えない経路があり、記録の階層が部分シェルではなく
+            # 外のグループになる（実測）。綴りの手前に `(` があるかで見る
+            head = t
+            sub(/exit.*$/, "", head)
+            if (head ~ /\(/) { return 0 }
+            # 読める数値リテラルで 0 になるなら「成功して終わる」ので別扱い
+            if (probe ~ /^exit[[:space:]]+[0-9]+$/) { return (escape_literal_status(probe) != 0) ? 1 : 0 }
+            # 引数なし・`$?` は非 0（上の `escape_status_unreadable` の説明と同じ理由）
+            if (probe ~ /^exit([[:space:]]+\$\?)?$/) { return 1 }
+            # 読めない引数は主張しない
+            return 0
         }
         function chain_never_succeeds(t,   probe) {
             probe = chain_status_probe(t)
@@ -2314,10 +2366,15 @@ ci_workflow_extract() {
             # 綴りから真偽が分かる形は `chain_literal_status()` と同じ規則で読む
             if (probe == "true" || probe == ":") { return CHAIN_PROBE_FLIP ? 1 : 0 }
             if (probe == "false") { return CHAIN_PROBE_FLIP ? 0 : 1 }
-            # `exit 0` / `return 0` だけが成功する。`!` は見ない——`exit` は戻らないので
-            # 反転する相手がいない（`return` に `!` を付ける綴りは実在しないため同じ扱い）
+            # 脱出（`exit` / `return`）は引数で決まる。`!` は見ない——`exit` は戻らないので
+            # 反転する相手がいない（`return` に `!` を付ける綴りは実在しないため同じ扱い）。
+            # **数値リテラルの終了状態は 256 で割った余り**（レビュー後に実測で見つけた穴）。
+            # 待機状態は 8 ビットなので `exit 256` / `exit 512` は**成功して終わる**のに、
+            # 「0 を明示したときだけ成功」と読むと `bash <スイート> || exit 256` が
+            # 「ゲートしている」と答える（実 `bash -e` は NOGATE ＝ fail-open。`main` は未配線）
             if (probe ~ /^(exit|return)([[:space:]]+[^[:space:]]+)?$/) {
-                return (probe ~ /^(exit|return)[[:space:]]+0+$/) ? 0 : 1
+                if (probe ~ /^(exit|return)[[:space:]]+[0-9]+$/) { return (escape_literal_status(probe) != 0) ? 1 : 0 }
+                return 1
             }
             # それ以外は普通のコマンドなので成功しうる（握り潰しうる）
             return 0
@@ -2450,7 +2507,7 @@ ci_workflow_extract() {
         # `absorbed` は「追っている失敗が並びに吸われて、その場では落ちない」状態で、
         # 階層を出るたびに消える（複合コマンドの失敗は親から見れば 1 つのコマンドの失敗で、
         # そこでは errexit がその場で落とす）
-        function record_gates(i,   cur, s, op, nx, ns, ce, ls, absorbed, guard, key, e_here, p_here) {
+        function record_gates(i,   cur, s, op, nx, ns, ce, ls, absorbed, guard, key, e_here, p_here, inv, aborts) {
             # そもそも走らない記録（到達不能・死に体・`exit` の後ろ）は伝わらない
             if (rec_dead[i]) { return 0 }
             cur = i; s = rec_scope[i]; op = sep_of(i, s); absorbed = 0
@@ -2459,6 +2516,12 @@ ci_workflow_extract() {
             while (guard++ < 1000) {
                 # 背景実行の失敗は親の終了状態に出ない
                 if (op == "&") { return 0 }
+                # **`exit` がシェルを終えたあとは、並びの後ろの要素は 1 つも走らない**
+                # （レビュー 5 巡目の実測）。`bash <スイート> || exit 1 || echo z` の
+                # `|| echo z` は走らないので握り潰せない（実 `bash -e` は GATES。
+                # 握り潰し扱いにすると正しくゲートしている綴りを赤くする）。
+                # 並びの終わりとして扱えば、位置の判定は `aborts` が飛ばす
+                if (aborts) { op = "" }
                 if (op == "&&" || op == "||" || op == "|") {
                     nx = chain_rhs(cur)
                     if (nx == 0) { return 0 }
@@ -2482,10 +2545,34 @@ ci_workflow_extract() {
                             # 成功しえないなら並びはいつでも失敗する（issue #198 の一部。
                             # 中が読めない形は握り潰し側へ倒す）
                             ls = last_scope_cmd[rec_stepid[nx] "\t" ns] + 0
-                            if (ls == 0 || !chain_never_succeeds(rec_txt[ls])) { return 0 }
+                            if (ls == 0) { return 0 }
+                            if (chain_never_succeeds(rec_txt[ls])) {
+                                # 反転の扱いは素の右辺と同じ（`|| { ! true ; }`。下の `||` の枝を参照）
+                                inv = CHAIN_PROBE_FLIP
+                            }
+                            else {
+                                # **最後が成功しうるなら、中で errexit がその場で落とす記録を見る**
+                                # （レビュー指摘。`|| ( false; true )` は `false` で死ぬので
+                                # 並びはいつでも失敗する＝実 `bash -e` は GATES）。
+                                # 控えは `scope_fatal`（上の控え側の説明を参照）
+                                if (!((rec_stepid[nx] "\t" ns) in scope_fatal)) { return 0 }
+                                # **複合が並びの最後の要素でなければ、中の errexit は抑制されている**
+                                # ——`|| ( false; true ) && echo z` の複合は最後の要素ではないので
+                                # `false` では死なず、複合の状態は最後のコマンド（`true`）のもの
+                                # ＝並びは成功しうる（握り潰し側へ倒す）
+                                if (sep_of(ce, s) != "" && sep_of(ce, s) != ";") { return 0 }
+                                inv = 0
+                            }
                             # **手前に成功して抜ける脱出があれば、最後まで行かずに成功しうる**
                             if ((rec_stepid[nx] "\t" ns) in scope_exit_ok) { return 0 }
-                            absorbed = 0
+                            absorbed = inv ? 1 : 0
+                            # **同じシェルの中の `exit` はその場でシェルを終える**（`exit_ends_shell()`
+                            # の説明を参照）。見るのは「その階層で最後に走る記録」が
+                            # **その階層自身のもの**で、かつ部分シェルでないときだけ——部分シェルの
+                            # `exit` が終えるのはその部分シェルで、入れ子の中の `exit` も同じ
+                            # （実測: `set +e` ＋ `bash <スイート> || ( echo x; exit 1 )` ＋後ろの行は NOGATE）
+                            if (rec_scope[ls] == ns && !scope_sub[ns] && exit_ends_shell(rec_txt[ls]) \
+                                && sep_of(ce, s) != "|" && sep_of(ce, s) != "&") { aborts = 1 }
                         }
                         else if (op == "&&") { absorbed = 1 }
                         cur = ce; op = sep_of(cur, s); e_here = rec_e[cur]; p_here = rec_p[cur]; continue
@@ -2495,7 +2582,31 @@ ci_workflow_extract() {
                         # なら並びはいつでも失敗し、その右辺が並びの**最後の要素**なので
                         # errexit がその場で落とす（`absorbed` を立てない）
                         if (!chain_never_succeeds(rec_txt[nx])) { return 0 }
-                        absorbed = 0
+                        # **引数の終了状態が読めない脱出は「必ず失敗する」と言えない**ので
+                        # 握り潰し側＝未配線へ倒す（`escape_status_unreadable()` の説明を参照。
+                        # 複合の右辺で `escape_can_succeed()` が同じ向きに倒しているのと揃える）
+                        if (escape_status_unreadable(rec_txt[nx])) { return 0 }
+                        # **`!` で反転した右辺は errexit を発動させない**（レビュー指摘。
+                        # この差分が入れた fail-open）。bash は「`!` で真偽を反転している
+                        # コマンドの失敗」では終了しないので、`bash <スイート> || ! true` の
+                        # 並びはいつでも失敗するのに**その場では落ちず**、後ろに行があれば
+                        # その行の状態でステップが終わる（実 `bash -e` は NOGATE。
+                        # 反転を見ないと「1 件も走らないスイートがゲートしている」と読む）。
+                        # 失敗は並びの状態として残るので、**位置が効く形**＝`absorbed` を立てる
+                        # （後ろに行が無ければそのままステップの状態になり GATES。実測で
+                        # `main` は両方とも未配線＝こちらは fail-closed だった）
+                        absorbed = CHAIN_PROBE_FLIP ? 1 : 0
+                        # **`exit` はその場でシェルを終える**ので、errexit の有無も位置も問わない
+                        # （`exit_ends_shell()` の説明を参照）。印は同じ階層の間だけ持ち越し、
+                        # 階層を出るときに落とす——部分シェルの `exit` が終えるのはその部分シェルだけで、
+                        # 外では「失敗した 1 つのコマンド」として普通の規則に戻る（実測:
+                        # `( bash <スイート> || exit 1 ) || true` ＋後ろの行は NOGATE）
+                        # **パイプや背後の要素として置かれた `exit` は子シェルで走る**ので
+                        # 呼び出し元のシェルは終わらない（`bash <スイート> || exit 1 | cat` は
+                        # `exit 1` が部分シェルで死ぬだけで並びは `cat` の成功で終わる＝
+                        # 実 `bash -e` は NOGATE。印を立てると fail-open）
+                        if (exit_ends_shell(rec_txt[nx]) \
+                            && sep_of(nx, s) != "|" && sep_of(nx, s) != "&") { aborts = 1 }
                     }
                     # `&&` の左辺が落ちると右辺は走らず、並びの状態は左辺の失敗になる。
                     # 最後の要素ではないので errexit は落とさない＝位置が効く
@@ -2504,7 +2615,7 @@ ci_workflow_extract() {
                 }
                 # 区切りが `;` / 改行 / 末尾 —— 並びはここで終わる
                 key = rec_stepid[cur] "\t" s
-                if ((absorbed || !e_here || scope_suppressed(s)) \
+                if (!aborts && (absorbed || !e_here || scope_suppressed(s)) \
                     && (last_scope_cmd[key] + 0) > cur) { return 0 }
                 # この階層は追っている失敗で終わる。外へ 1 段ずつ出る
                 if (s == 0) { return 1 }
@@ -2538,7 +2649,9 @@ ci_workflow_extract() {
                 # この経路を守る唯一の仕掛けになる**——外さないこと。
                 # **階層ごとに入口の値を控える形も書いたが、(1) と答えが同じで 1 件も変わらないので
                 # 入れていない**（何も変えない仕掛けは置かない）
-                if (scope_sub[s] || scope_op[s] == "|") { absorbed = 0 }
+                # 脱出が終えるのは**そのシェル**なので、印を落とすのも部分シェルの境目だけ
+                # （素のグループ・制御構造の本体は同じシェルなので持ち越す）
+                if (scope_sub[s] || scope_op[s] == "|") { absorbed = 0; aborts = 0 }
                 cur = scope_close_at[s]; op = scope_op[s]; s = scope_parent[s]
                 # **階層の外の errexit / pipefail は包み方で分けず「閉じた記録」の値で読む。** 閉じ語の走査は
                 # 断片の記録を書き出す**前**に回り、部分シェルを閉じるときライブラリは
@@ -4526,7 +4639,7 @@ ci_workflow_extract() {
         # ステップ番号にジョブ名を冠するのは、呼び出し側が「どのジョブが実行するか」まで
         # 問えるようにするため（env は同じジョブからしか見えないので、ジョブを跨いだ
         # 分割は「配線されている」と答えてはいけない）
-        function flush_job(   i, parts, shell_name, gate, sc) {
+        function flush_job(   i, parts, shell_name, gate, sc, preceded_here) {
             # 未確定のステップをジョブの控えへ移してから判断する
             flush_step()
             # **env の記録は無効化に関わらず出す。** これは「何が実行されるか」ではなく
@@ -4583,6 +4696,35 @@ ci_workflow_extract() {
                                 sc = scope_parent[sc]
                             }
                         }
+                        # **その階層の中で「errexit が効いた状態で必ず失敗する記録」も控える**
+                        # （レビュー指摘。`||` の右辺が複合のとき、中の errexit がその場で落とす）。
+                        # `bash <スイート> || ( false; true )` は右辺が並びの**最後の要素**なので
+                        # 中で errexit が生きており、`false` で部分シェルが死ぬ＝並びはいつでも
+                        # 失敗する（実 `bash -e` は GATES）。最後のコマンド（`true`）だけを見ると
+                        # 「成功しうる」と読んで未配線＝正しくゲートしている綴りを赤くしていた。
+                        # 控えるのは**最初に見つけた 1 件**（手前のものが先に落とす）で、
+                        # 祖先の階層にも記す（内側の複合が死ねば外側も死ぬ）
+                        # **数えるのは「その記録自身の失敗で errexit が落ちる」ものだけ**
+                        # （実測で見つけた穴）。記録の直後が `&&` / `||` なら並びの最後の要素では
+                        # ないので errexit は抑制され、`|` ならパイプの左側、`&` なら背後の実行で
+                        # どちらも親の状態にならない——`|| { false && echo z ; echo ok ; }` は
+                        # `false` では死なず `echo ok` で成功するので握り潰し（実 `bash -e` は
+                        # NOGATE。区切りを見ないと「1 件も走らないスイートがゲートしている」と読む）
+                        # **`!` で反転した記録も除く**（実測で見つけた穴）。反転したコマンドの
+                        # 失敗では errexit が落ちないので、`|| { ! true ; echo ok ; }` は
+                        # `echo ok` まで進んで成功する＝握り潰し（実 `bash -e` は NOGATE）。
+                        # 判定は `chain_never_succeeds()` が最後に読んだ反転の偶奇で見る
+                        if (rec_e[i] && (parts[2] == "" || parts[2] == ";") \
+                            && chain_never_succeeds(parts[6]) && !CHAIN_PROBE_FLIP) {
+                            if (!((parts[1] "\t" rec_scope[i]) in scope_fatal)) {
+                                scope_fatal[parts[1] "\t" rec_scope[i]] = i
+                                sc = rec_scope[i]
+                                while (sc > 0) {
+                                    sc = scope_parent[sc]
+                                    if (!((parts[1] "\t" sc) in scope_fatal)) { scope_fatal[parts[1] "\t" sc] = i }
+                                }
+                            }
+                        }
                         last_scope_cmd[parts[1] "\t" rec_scope[i]] = i
                         # **複合コマンドは親から見れば 1 つのコマンド**なので、祖先の階層にも
                         # 「この位置で何かが走った」と記す。記さないと
@@ -4615,6 +4757,7 @@ ci_workflow_extract() {
             }
             for (i in last_scope_cmd) { delete last_scope_cmd[i] }
             for (i in scope_exit_ok) { delete scope_exit_ok[i] }
+            for (i in scope_fatal) { delete scope_fatal[i] }
             for (i in cmd_seen) { delete cmd_seen[i] }
             nbuf = 0
             for (i in scope_parent) {

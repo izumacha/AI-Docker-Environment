@@ -6055,14 +6055,15 @@ done
 # 実 `bash -e` では伝わる（実測で GATES）。`false` に加えて `exit` / `return` の
 # 失敗で終わる綴りがここに入る（レビュー指摘。除く条件を `false` だけにしていた頃は
 # `|| exit 1` を未配線と報告していた＝正しい配線を赤にする fail-closed）。
-# `exit $rc` のように**読めない引数**も失敗側へ倒す（`||` の枝の `exit` は
-# 失敗を伝えるために書くのがほぼすべて）
+# **引数の終了状態が読めない脱出（`exit $rc`）だけは握り潰し側へ倒す**（下の節。
+# issue #174 で置いた「読めない引数も失敗側へ倒す」を実測で入れ替えた）。
+# **数値リテラルは 256 で割った余りが終了状態**なので `exit 256` は成功して終わる
 for and_pipeline_case in \
     "パイプラインで終わる並びが最後:bash ${SUITE_PATH} && echo ok | cat" \
     "偽と分かる右辺の ||:bash ${SUITE_PATH} && echo ok || false" \
     "失敗で終わる exit が後ろ:bash ${SUITE_PATH} && echo ok || exit 1" \
     "引数の無い exit が後ろ:bash ${SUITE_PATH} && echo ok || exit" \
-    "読めない引数の exit が後ろ:bash ${SUITE_PATH} && echo ok || exit \$rc" \
+    "$? を持ち出す exit が後ろ:bash ${SUITE_PATH} && echo ok || exit \$?" \
     "失敗で終わる return が後ろ:bash ${SUITE_PATH} && echo ok || return 1" \
     "0 の算術コマンドが後ろ:bash ${SUITE_PATH} && echo ok || (( 0 ))" \
     "0 が並ぶ算術コマンドが後ろ:bash ${SUITE_PATH} && echo ok || (( 00 ))" \
@@ -6076,6 +6077,270 @@ jobs:
       - name: subject
         run: |
           ${and_pipeline_case#*:}"
+done
+
+# **引数の終了状態が読めない脱出は「必ず失敗する」と言えないので握り潰し側へ倒す**
+# （レビュー 5 巡目。issue #174 が置いた「読めない引数も失敗側へ倒す」の逆）。
+# `bash <スイート> && echo ok || exit $rc` の真値は**変数の値で変わる**——実測で
+# `rc=0` なら NOGATE・`rc=7` なら GATES。「失敗を伝えるために書くのがほぼすべて」
+# という見立ては書き手の意図としては正しいが、**意図が外れた配備（`$rc` が 0）で
+# 必須スイートが黙ってゲートしなくなる**のはこの照会がいちばん避けたい向きなので、
+# 証明できないものは未配線へ倒す（§9 の「不明なら拒否」）。**よく書く綴りは読めるので
+# 巻き込まれない**: 引数なしの `exit` と `exit $?` は `||` の右辺が走る条件
+# （左辺が落ちた）から必ず非 0 で、数値リテラルも読める。
+# **`exit 256` は成功して終わる**（待機状態は 8 ビットで剰余が 0）ので握り潰し側
+for unreadable_escape_case in \
+    "読めない変数の exit:bash ${SUITE_PATH} && echo ok || exit \$rc" \
+    "波括弧つきの変数の exit:bash ${SUITE_PATH} && echo ok || exit \${code}" \
+    "剰余が 0 になるリテラル:bash ${SUITE_PATH} && echo ok || exit 256" \
+    "剰余が 0 になる大きなリテラル:bash ${SUITE_PATH} && echo ok || exit 512" \
+    "0 を明示した exit:bash ${SUITE_PATH} && echo ok || exit 0"
+do
+    assert_not_wired "読めない・成功して終わる脱出は握り潰し側（${unreadable_escape_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${unreadable_escape_case#*:}"
+done
+
+# **`exit` は errexit の有無も並びの位置も問わずその場でシェルを終える**（レビュー 5 巡目）。
+# 位置と errexit を見ていたため、`set +e` の下や後ろに行がある綴りで**正しくゲートして
+# いるワークフローを赤く**していた（真値はすべて GATES。`main` も未配線＝この PR で
+# 直す側）。**剰余が 0 のリテラルは上の節のとおり除く**
+for exit_ends_shell_case in \
+    "set +e の下の exit 1:set +e
+          bash ${SUITE_PATH} || exit 1
+          echo done" \
+    "set +e の下の引数なし exit:set +e
+          bash ${SUITE_PATH} || exit
+          echo done" \
+    "後ろに行がある exit 1:bash ${SUITE_PATH} || exit 1
+          echo done" \
+    "部分シェルの中の exit 1:( bash ${SUITE_PATH} || exit 1 )
+          echo done"
+do
+    assert_wired "exit は位置と errexit を問わず終わらせる（${exit_ends_shell_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${exit_ends_shell_case#*:}"
+done
+
+# 締めすぎない側: **部分シェルの `exit` が終えるのはその部分シェルだけ**なので、
+# 外で握り潰されれば失敗は伝わらない（実測で NOGATE。`aborts` の印を階層の外へ
+# 持ち越すと「ゲートしている」と読む fail-open になる）
+assert_not_wired "部分シェルの exit を外で握り潰す形は伝わらない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ( bash ${SUITE_PATH} || exit 1 ) || true
+          echo done"
+
+# **`!` で反転した右辺は errexit を発動させない**（レビュー 4 巡目。この PR が入れた fail-open）。
+# 並びはいつでも失敗するが**その場では落ちない**ので、後ろに行があればその行の状態で
+# ステップが終わる（実測で NOGATE。反転を見ないと「1 件も走らないスイートがゲートして
+# いる」と読む）。後ろに行が無ければ並びの状態がそのままステップの状態になる＝GATES
+for inverted_rhs_case in \
+    "反転した true:bash ${SUITE_PATH} || ! true" \
+    "反転した ::bash ${SUITE_PATH} || ! :" \
+    "反転した非 0 の算術:bash ${SUITE_PATH} || ! (( 1 ))" \
+    "ブレースの中で反転:bash ${SUITE_PATH} || { ! true ; }"
+do
+    assert_swallowed "反転した || の右辺は errexit を発動させない（${inverted_rhs_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${inverted_rhs_case#*:}"
+done
+
+assert_wired "反転した || の右辺が最後ならステップの状態になる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || ! true"
+
+# **`||` の右辺が複合なら、中で errexit がその場で落とす記録も見る**（レビュー 5 巡目）。
+# 右辺は並びの**最後の要素**なので中の errexit が生きており、`|| ( false; true )` は
+# `false` で死ぬ＝並びはいつでも失敗する（真値 GATES）。最後のコマンドだけを見ていたため
+# 「成功しうる」と読んで未配線＝正しくゲートしている綴りを赤くしていた（`main` も同じ）
+for compound_fatal_case in \
+    "部分シェルの中の false:bash ${SUITE_PATH} || ( false; true )" \
+    "ブレースの中の false:bash ${SUITE_PATH} || { false; true ; }" \
+    "false のあとに表示:bash ${SUITE_PATH} || ( false; echo hi )" \
+    "最後が false:bash ${SUITE_PATH} || ( echo a; false )" \
+    "部分シェルに false だけ:bash ${SUITE_PATH} || ( false )"
+do
+    assert_wired "複合の右辺は中の errexit でも落ちる（${compound_fatal_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${compound_fatal_case#*:}
+          echo done"
+done
+
+# 締めすぎない側。中の errexit を当てにできない 2 形（どちらも真値 NOGATE）:
+# **複合が並びの最後の要素でなければ**中の errexit は抑制され、複合の状態は最後の
+# コマンドのものになる。**中で `set +e` していれば**そもそも落ちない
+for compound_fatal_control_case in \
+    "後ろに && が続く:bash ${SUITE_PATH} || ( false; true ) && echo z" \
+    "中で set +e:bash ${SUITE_PATH} || ( set +e; false; true )" \
+    "手前で成功して抜ける:bash ${SUITE_PATH} || ( exit 0; false )"
+do
+    assert_not_wired "中の errexit を当てにできない複合の右辺（${compound_fatal_control_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${compound_fatal_control_case#*:}
+          echo done"
+done
+
+# **1 断片で部分シェルを開く綴りの `exit` は、その部分シェルだけを終える**
+# （レビュー 5 巡目の実装中に実測で見つけた穴）。`{ ( exit 1 ) ; }` の `exit` が終えるのは
+# 内側の部分シェルなので、`set +e` の下では失敗が伝わらない（真値 NOGATE）。
+# **階層の識別子では判定できない**——命令の手前で開いた数は括弧の開きを数えない経路があり、
+# 記録の階層が部分シェルではなく外のグループになる（実測）ので、綴りの手前の `(` で見る
+assert_not_wired "1 断片で開いた部分シェルの exit は外へ伝わらない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          set +e
+          bash ${SUITE_PATH} || { ( exit 1 ) ; }
+          echo done"
+
+# 対照（締めすぎない側）: 同じ綴りでも**素のグループなら同じシェル**なので終わらせる。
+# 反転した複合は errexit を発動させない。パイプの左側は `pipefail` が無ければ捨てられる
+for escape_compound_case in \
+    "ブレースの中の exit は同じシェル:wired:bash ${SUITE_PATH} || { exit 1 ; } && echo z" \
+    "部分シェルの中の最後が false:wired:bash ${SUITE_PATH} || ( : ; false )" \
+    "並びを ; で閉じた複合:wired:bash ${SUITE_PATH} || { false ; } ; echo z" \
+    "pipefail つきのパイプの左側:wired:set -o pipefail
+          bash ${SUITE_PATH} || { false ; } | cat" \
+    "反転した複合:not-wired:bash ${SUITE_PATH} || ! { false ; }" \
+    "pipefail 無しのパイプの左側:not-wired:bash ${SUITE_PATH} || { false ; } | cat"
+do
+    escape_compound_label="${escape_compound_case%%:*}"
+    escape_compound_rest="${escape_compound_case#*:}"
+    escape_compound_want="${escape_compound_rest%%:*}"
+    escape_compound_body="${escape_compound_rest#*:}"
+    "assert_${escape_compound_want/-/_}" "複合の右辺の脱出と抑制（${escape_compound_label}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${escape_compound_body}
+          echo done"
+done
+
+# **中で errexit が落とす記録として数えるのは「その記録自身の失敗で落ちる」ものだけ**
+# （レビュー 5 巡目の実装中に実測で見つけた穴）。直後が `&&` / `||` なら並びの最後の要素では
+# ないので errexit は抑制され、`|` ならパイプの左側、`&` なら背後の実行で、どちらも
+# その失敗は複合の状態にならない——数えると**1 件も走らないスイートが「ゲートしている」**と
+# 読まれる（真値はすべて NOGATE）
+for fatal_suppressed_case in \
+    "false のあとに && が続く:bash ${SUITE_PATH} || { false && echo z ; echo ok ; }" \
+    "false のあとに || が続く:bash ${SUITE_PATH} || { false || echo z ; echo ok ; }" \
+    "false をパイプの左側に置く:bash ${SUITE_PATH} || { false | cat ; echo ok ; }" \
+    "false を背後へ回す:bash ${SUITE_PATH} || { false & echo ok ; }" \
+    "通らないアームの中の false:bash ${SUITE_PATH} || ( if false; then false; fi; echo ok )"
+do
+    assert_not_wired "抑制された記録は複合を落とさない（${fatal_suppressed_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${fatal_suppressed_case#*:}
+          echo done"
+done
+
+# 締めすぎない側: **並びを単独で終える記録なら複合を落とす**（真値 GATES）。
+# 入れ子の部分シェルが失敗する形も、外側の階層では「失敗した 1 つのコマンド」なので落とす
+# （中で `set +e` していても部分シェルの終了状態は非 0 になる）
+for fatal_effective_case in \
+    "単独の false:bash ${SUITE_PATH} || { false ; echo ok ; }" \
+    "入れ子の部分シェルの false:bash ${SUITE_PATH} || { echo a; ( false ); echo ok ; }" \
+    "入れ子の部分シェルの中の set +e:bash ${SUITE_PATH} || { echo a; ( set +e; false ); echo ok ; }"
+do
+    assert_wired "並びを単独で終える記録は複合を落とす（${fatal_effective_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${fatal_effective_case#*:}
+          echo done"
+done
+
+# **`exit` は同じシェルなら複合の中からでもその場で終える**（レビュー 5 巡目）。
+# 素のグループ・制御構造の本体は同じシェルなので、`set +e` の下でも後ろに行があっても
+# ステップの終了状態はその `exit` のものになる（真値 GATES）
+for exit_in_group_case in \
+    "set +e の下のブレースの中:set +e
+          bash ${SUITE_PATH} || { echo x; exit 1 ; }" \
+    "ブレースで囲んだ連鎖:{ bash ${SUITE_PATH} || exit 1 ; }" \
+    "set +e の下でブレースで囲んだ連鎖:set +e
+          { bash ${SUITE_PATH} || exit 1 ; }" \
+    "後ろに || が続く:bash ${SUITE_PATH} || exit 1 || echo z" \
+    "後ろに && が続く:bash ${SUITE_PATH} || exit 1 && echo z"
+do
+    assert_wired "同じシェルの exit は複合の中でも終わらせる（${exit_in_group_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${exit_in_group_case#*:}
+          echo done"
+done
+
+# 締めすぎない側。**子シェルで走る `exit` は呼び出し元のシェルを終えない**（真値 NOGATE）。
+# 部分シェル・パイプの要素・背後の実行がそれぞれ別のシェルで、印を持ち越すと
+# 「1 件も走らないスイートがゲートしている」と読む fail-open になる
+for exit_in_subshell_case in \
+    "set +e の下の部分シェルの中:set +e
+          bash ${SUITE_PATH} || ( echo x; exit 1 )" \
+    "パイプの要素としての exit:bash ${SUITE_PATH} || exit 1 | cat" \
+    "パイプの要素としてのブレース:bash ${SUITE_PATH} || { exit 1 ; } | cat" \
+    "背後へ回した exit:bash ${SUITE_PATH} || exit 1 &"
+do
+    assert_not_wired "子シェルの exit は呼び出し元を終えない（${exit_in_subshell_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${exit_in_subshell_case#*:}
+          echo done"
 done
 
 # **`&&` を伝えるとき、中の記録が既に持つ強い抑制を上書きしない**（レビュー指摘、実測）。
