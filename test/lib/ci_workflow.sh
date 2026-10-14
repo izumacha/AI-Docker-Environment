@@ -2421,6 +2421,18 @@ ci_workflow_extract() {
             }
             return 0
         }
+        # **閉じ括弧／閉じ語に付いた区切りは「複合コマンド全体」のもので、中の並びのものではない**
+        # （issue #191 のレビュー指摘）。`( bash <スイート> && echo ok ) && echo ok` の
+        # `echo ok )` は階層の最後のコマンドでありながら後ろに `&&` を持つので、これを
+        # 中の並びの区切りとして読むと「右辺は階層 0 の複合」に見えて読めず、未配線へ倒れていた
+        # （実 `bash -e` は GATES、`main` も wired。`( set +e; bash <スイート> ) && echo ok` も同じ形）。
+        # 閉じた後の区切りは階層ごとの `scope_op` が運ぶので、ここでは**空（並びの終わり）**を返す
+        function sep_of(cur, s) {
+            # いま居る階層をこの記録が閉じているなら、その区切りは外のもの
+            if ((scope_close_at[s] + 0) == cur) { return "" }
+            # そうでなければ記録自身の区切り（閉じで塗り替わる前の値）
+            return rec_opx[cur]
+        }
         # 連鎖の右辺（同じステップの次の記録）。階層をまたぐかは呼び出し側が見る
         function chain_rhs(cur,   nx) {
             nx = cur + 1
@@ -2441,7 +2453,7 @@ ci_workflow_extract() {
         function record_gates(i,   cur, s, op, nx, ns, ce, ls, absorbed, guard, key, e_here, p_here) {
             # そもそも走らない記録（到達不能・死に体・`exit` の後ろ）は伝わらない
             if (rec_dead[i]) { return 0 }
-            cur = i; s = rec_scope[i]; op = rec_opx[i]; absorbed = 0
+            cur = i; s = rec_scope[i]; op = sep_of(i, s); absorbed = 0
             e_here = rec_e[i]; p_here = rec_p[i]
             guard = 0
             while (guard++ < 1000) {
@@ -2476,7 +2488,7 @@ ci_workflow_extract() {
                             absorbed = 0
                         }
                         else if (op == "&&") { absorbed = 1 }
-                        cur = ce; op = rec_opx[cur]; e_here = rec_e[cur]; p_here = rec_p[cur]; continue
+                        cur = ce; op = sep_of(cur, s); e_here = rec_e[cur]; p_here = rec_p[cur]; continue
                     }
                     if (op == "||") {
                         # `||` の右辺が成功しうるなら失敗はそこで握り潰される。成功しえない
@@ -2488,7 +2500,7 @@ ci_workflow_extract() {
                     # `&&` の左辺が落ちると右辺は走らず、並びの状態は左辺の失敗になる。
                     # 最後の要素ではないので errexit は落とさない＝位置が効く
                     else if (op == "&&") { absorbed = 1 }
-                    cur = nx; op = rec_opx[cur]; e_here = rec_e[cur]; p_here = rec_p[cur]; continue
+                    cur = nx; op = sep_of(cur, s); e_here = rec_e[cur]; p_here = rec_p[cur]; continue
                 }
                 # 区切りが `;` / 改行 / 末尾 —— 並びはここで終わる
                 key = rec_stepid[cur] "\t" s
@@ -2507,7 +2519,26 @@ ci_workflow_extract() {
                 # **errexit の免除は同じシェルの中では外へ出ても続き、部分シェルを出ると消える**
                 # （実測: `( bash <スイート> && echo ok )` ＋ `echo done` は GATES、
                 # `{ bash <スイート> && echo ok ; }` ＋ `echo done` は NOGATE）
-                if (scope_sub[s]) { absorbed = 0 }
+                # **閉じた後ろが `|` なら、その複合はパイプの左側＝子シェルで走る**
+                # （issue #191 のレビュー指摘）。部分シェルと同じく**免除を持ち越さない**
+                # ——中の `&&` が与えた errexit の免除は子シェルを出た時点で消え、親は
+                # パイプラインの失敗として改めて落とす。これが無いと、吸われた失敗を
+                # 「パイプとは無関係」と読んで `pipefail` の有無を見ずに通し、
+                # `{ bash <スイート> && echo ok ; } | tee log` ほか 7 形が wired になる
+                # （実 `bash -e` は NOGATE、`main` も未配線＝**必須スイートが黙って
+                # ゲートしなくなる向き**）。
+                # **`pipefail` の値は閉じた記録のままで足りる**（下の `p_here`）。支えは 2 つで、
+                # **いま効いているのは後者**（実測）: (1) 閉じた断片の区切りが `|` / `&` のとき、
+                # ライブラリは閉じた階層の入口の値へ `errexit` / `pipefail` を戻す
+                # （「フォークした複合の巻き戻し」）、(2) そもそも複合の中に書いた
+                # `set -o pipefail` は記録へ反映されない（issue #203 の fail-closed。
+                # `{ set -o pipefail; echo a ; }` の後ろの `bash <スイート> | cat` は実 `bash -e` で
+                # GATES だがライブラリは未配線と答える。`main` も同じ）。**(1) を外しても
+                # 答えが 1 件も変わらないのは (2) があるからで、#203 を直すと (1) が
+                # この経路を守る唯一の仕掛けになる**——外さないこと。
+                # **階層ごとに入口の値を控える形も書いたが、(1) と答えが同じで 1 件も変わらないので
+                # 入れていない**（何も変えない仕掛けは置かない）
+                if (scope_sub[s] || scope_op[s] == "|") { absorbed = 0 }
                 cur = scope_close_at[s]; op = scope_op[s]; s = scope_parent[s]
                 # **階層の外の errexit / pipefail は包み方で分けず「閉じた記録」の値で読む。** 閉じ語の走査は
                 # 断片の記録を書き出す**前**に回り、部分シェルを閉じるときライブラリは

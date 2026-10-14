@@ -7816,6 +7816,137 @@ jobs:
           )"
 
 
+# --- 複合コマンドがパイプの左側になる形（issue #191 のレビュー指摘）-------------------
+#
+# **閉じた後ろが `|` なら、その複合はパイプの左側＝子シェルで走る。** 2 点が効く:
+# (a) 中の `&&` が与えた errexit の免除は子シェルを出た時点で消える、(b) パイプラインの
+# 状態を決めるのは**親の** `pipefail` なので、複合の中で `set -o pipefail` しても届かない。
+# どちらが欠けても「スイートの失敗が伝わる」と答える fail-open になる（真値 NOGATE なのに
+# wired。実測で `main` はすべて未配線）。**必須スイートが黙ってゲートしなくなる向き**なので、
+# ここは綴りの数だけピンを置く
+
+assert_not_wired "グループをパイプの左側に置くと失敗は捨てられる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          { bash ${SUITE_PATH} && echo ok ; } | tee log"
+
+assert_not_wired "リダイレクトを挟んだパイプでも同じ" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          { bash ${SUITE_PATH} && echo ok ; } 2>&1 | tee log"
+
+assert_not_wired "|& で繋いだパイプでも同じ" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          { bash ${SUITE_PATH} && echo ok ; } |& cat"
+
+assert_not_wired "制御構造の本体をパイプの左側に置いた形も同じ" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          if true; then bash ${SUITE_PATH} && echo ok; fi | cat"
+
+assert_not_wired "入れ子のグループを経てパイプの左側に出る形も同じ" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          { { bash ${SUITE_PATH} && echo ok ; } && echo o2 ; } | cat"
+
+assert_not_wired "パイプラインの後ろに && が続く形も同じ" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          { bash ${SUITE_PATH} && echo ok ; } | cat && echo z"
+
+# **`set -o pipefail` を複合の中で書いても親のパイプラインには効かない。** 素のグループは
+# 同じシェルで走るので中の `set` は親へ残るが、**パイプの左側になったときだけは子シェルで
+# 走る**ので残らない（実 `bash -e` で NOGATE）。**いまこの答えを支えているのは
+# 「複合の中の `set -o pipefail` を記録へ反映しない」という別の未修正（issue #203）**で、
+# それを直したときは閉じた断片の巻き戻し（区切りが `|` / `&` なら階層の入口の値へ戻す）が
+# この形を守る——どちらも消すとこのピンが落ちる（実測で巻き戻しだけを外しても落ちない）
+assert_not_wired "複合の中の set -o pipefail は親のパイプに効かない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          { set -o pipefail; bash ${SUITE_PATH} && echo ok ; } | cat"
+
+# 対照（締めすぎない側）: `pipefail` が**複合の外**で立っていれば失敗は伝わる
+assert_wired "複合の手前の set -o pipefail はパイプに効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          set -o pipefail
+          { bash ${SUITE_PATH} && echo ok ; } | cat"
+
+# 対照: 部分シェル・素の呼び出しだけのグループも同じく捨てられる（向きの確認）
+assert_not_wired "部分シェルをパイプの左側に置いた形" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ( bash ${SUITE_PATH} && echo ok ) | cat"
+
+assert_not_wired "呼び出しだけのグループをパイプの左側に置いた形" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          { bash ${SUITE_PATH} ; } | cat"
+
+# **閉じ括弧に付いた区切りは「複合全体」のもので、中の並びのものではない**（同じ指摘）。
+# 1 断片で「階層の最後のコマンド」と「その階層を閉じる」が重なる綴りで、後ろの `&&` を
+# 中の並びの区切りとして読むと「右辺は外側の複合」に見えて読めず、未配線へ倒れていた
+# （真値 GATES・`main` も wired ＝**正しくゲートしている綴りを赤くする**向き。実測）
+assert_wired "部分シェルの中の && 連鎖が最後で、後ろに && が続く形" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ( bash ${SUITE_PATH} && echo ok ) && echo ok"
+
+assert_wired "部分シェルの中の set +e の下でスイートが最後で、後ろに && が続く形" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ( set +e; bash ${SUITE_PATH} ) && echo ok"
+
+
 # --- ヒアドキュメントの終端判定（bash と同じ厳しさで読む / issue #108）------------------
 #
 # 終端の判定が bash より緩いと、**本文（＝実行されない文字列）が「実行されるコマンド」に化ける**。
