@@ -1974,6 +1974,19 @@ ci_workflow_extract() {
             return (s2 != "")
         }
 
+        # **その断片が自分で何かを走らせるか**（開くだけの `(` / `{` は数えない）。
+        # `carries_command()` は「後ろにコマンドがあるか」を測る述語なので開き記号も
+        # 非空として数えるが、脱出の判定が要るのは「手前で**実際に走って `$?` を
+        # 置き換えた**コマンドがあるか」で、開くだけの断片はそれに当たらない
+        # （数えると `|| (` 改行 `exit` 改行 `exit 1` 改行 `)` の素の `exit` が
+        #  「手前のコマンド次第」に落ち、必ず非 0 で抜ける形を握り潰しと読む fail-closed）
+        function carries_own_command(t,   s2) {
+            s2 = t
+            # 開き記号（`(` / `{` / `!`）を落としてから中身を見る
+            while (sub(/^[[:space:]]*[({!][[:space:]]*/, "", s2)) { }
+            return carries_command(s2)
+        }
+
         # 内側から見て、**走るかどうかがそこで決まる**一番内側の階層を返す（無ければ 0）。
         # 関数の台帳で「同じところで落として戻したか」を測るのに使う。
         # **素の深さでは測れない**（ブレースグループや `if true` の本体は同じシェルで必ず走るので、
@@ -2251,12 +2264,23 @@ ci_workflow_extract() {
         # `( exit 0` / `exit 1 )` は最後が `exit 1` でも `exit 0` で抜けるので並びは成功し、
         # 実 `bash -e` は NOGATE（握り潰し）なのに「ゲートしている」と答える fail-open になる。
         # 引数が読めない `exit` は「成功しうる」側＝握り潰し側へ倒す（`main` と同じ答え）
-        function escape_can_succeed(t,   probe) {
+        function escape_can_succeed(t, preceded,   probe) {
             probe = chain_status_probe(t)
             # 脱出の綴りでなければ関係ない（普通のコマンドは階層を抜けない）
             if (probe !~ /^(exit|return)([[:space:]]+[^[:space:]]+)?$/) { return 0 }
-            # 脱出のうち「成功しえない」と読めるもの（`exit 1` 等）は抜けても並びを失敗させる
-            return chain_never_succeeds(t) ? 0 : 1
+            # 引数が 0 と読めるなら必ず成功して抜ける
+            if (probe ~ /^(exit|return)[[:space:]]+0+$/) { return 1 }
+            # 0 以外の数値リテラルなら必ず失敗する（抜けても並びは失敗する）
+            if (probe ~ /^(exit|return)[[:space:]]+[0-9]+$/) { return 0 }
+            # **引数が読めない脱出（素の `exit` / `exit $rc`）は手前のコマンド次第**
+            # （レビュー指摘。`chain_never_succeeds()` は別の問いに答える関数で、読めない
+            #  引数を「成功しえない」側へ倒すため、そのまま委ねると `|| (` / `echo cleanup` /
+            #  `exit` / `)` が wired になる＝実 `bash -e` は NOGATE で fail-open）。
+            # この印を読むのは `||` の右辺だけで、右辺が走るのは**左辺が落ちたとき**なので、
+            # 手前に何も走っていなければ直前の状態＝左辺の失敗を引き継いで必ず非 0 で抜ける。
+            # 手前に走ったコマンドがあればその状態は読めないので「成功しうる」側＝握り潰し側
+            # （`main` と同じ答え）へ倒す
+            return preceded ? 1 : 0
         }
         function chain_never_succeeds(t,   probe) {
             probe = chain_status_probe(t)
@@ -3666,7 +3690,7 @@ ci_workflow_extract() {
                                     nprom = split(prom_rec, prom_list, " ")
                                     for (pi = 1; pi <= nprom; pi++) {
                                         split(buf[prom_list[pi]], inner, "\t")
-                                        buf[prom_list[pi]] = inner[1] "\t" inner[2] "\t" closed_sub_e "\t" inner[4] "\t" inner[5] "\t" inner[6] "\t" inner[7]
+                                        buf[prom_list[pi]] = inner[1] "\t" inner[2] "\t" closed_sub_e "\t" inner[4] "\t" inner[5] "\t" inner[6]
                                     }
                                 }
                                 # **外側でもまだ握り潰されているなら、引き上げ候補を外側へ引き継ぐ**
@@ -3801,7 +3825,12 @@ ci_workflow_extract() {
                         # **リンタの照会（`top` を渡さない）は巻き込まない**のが要点で、
                         # `test -n "$FILES" && shellcheck $FILES` は正当な綴り——`gate` 側を
                         # 0 にすると、正しく設定されたリンタを「配線されていない」と報告する
-                        buf[nbuf] = step_id "\t" ops[j] "\t" ((dead_depth >= 0 || unreachable || exit_seen) ? 0 : errexit) "\t" pipefail "\t" (uncertain + (chain_in ? 1 : 0) + (closed_inverted ? 1 : 0)) "\t" text "\t" ((subshell > 0 || paren > 0) ? 1 : 0)
+                        # **記録は 6 列**（ステップ番号・直後の区切り・errexit・pipefail・走るか分からない数・本文）。
+                        # 7 列目として「部分シェルの中か」を載せていたが、issue #191 で gate の
+                        # 判定が `record_gates()` へ移った時点で読み手が消えた——部分シェルの
+                        # 情報は階層ごとの `scope_sub` が運ぶので、載せ続けると「この旗が判定に
+                        # 効く」と読める写しになる（レビュー指摘。§6 デッドコード）
+                        buf[nbuf] = step_id "\t" ops[j] "\t" ((dead_depth >= 0 || unreachable || exit_seen) ? 0 : errexit) "\t" pipefail "\t" (uncertain + (chain_in ? 1 : 0) + (closed_inverted ? 1 : 0)) "\t" text
                         rec_at = nbuf
                         # **「走らない記録」と「errexit が切れている記録」を分けて控える**
                         # （issue #191）。どちらも 3 列目は 0 になるので、位置で判定する側
@@ -4512,6 +4541,17 @@ ci_workflow_extract() {
                     # 走らない `exit 1` が `||` の右辺の最後のコマンドに見え、
                     # 「成功しえない右辺」と読んで握り潰しを配線と答える fail-open になる
                     if (carries_command(parts[6]) && !rec_dead[i]) {
+                        # **脱出の印は「手前に走ったコマンドがあるか」を見るので、控える前に判定する**
+                        # （自分自身を「手前のコマンド」に数えないため）
+                        preceded_here = ((parts[1] "\t" rec_scope[i]) in cmd_seen) ? 1 : 0
+                        if (escape_can_succeed(parts[6], preceded_here)) {
+                            sc = rec_scope[i]
+                            while (1) {
+                                scope_exit_ok[parts[1] "\t" sc] = 1
+                                if (sc == 0 || scope_sub[sc]) { break }
+                                sc = scope_parent[sc]
+                            }
+                        }
                         last_scope_cmd[parts[1] "\t" rec_scope[i]] = i
                         # **複合コマンドは親から見れば 1 つのコマンド**なので、祖先の階層にも
                         # 「この位置で何かが走った」と記す。記さないと
@@ -4519,17 +4559,12 @@ ci_workflow_extract() {
                         # 「外側の最後のコマンド」に見え、握り潰された実行を配線と読む
                         sc = rec_scope[i]
                         while (sc > 0) { sc = scope_parent[sc]; last_scope_cmd[parts[1] "\t" sc] = i }
-                    }
-                    # **成功して抜けうる脱出は、抜ける範囲の階層すべてに印を付ける**（issue #191）。
-                    # `exit` が終わらせるのは自分の階層から**いちばん内側の部分シェルまで**
-                    # （部分シェルが無ければステップごと）なので、部分シェルを 1 つ出たら止める
-                    # ——`( ( exit 0 ); exit 1 )` の内側の `exit 0` は外側を終わらせない
-                    if (!rec_dead[i] && escape_can_succeed(parts[6])) {
-                        sc = rec_scope[i]
-                        while (1) {
-                            scope_exit_ok[parts[1] "\t" sc] = 1
-                            if (sc == 0 || scope_sub[sc]) { break }
-                            sc = scope_parent[sc]
+                        # **「この階層で何かが走った」も同じ形で控える**（複合は親から見れば
+                        # 1 つのコマンドなので祖先にも記す）。読むのは上の脱出の判定だけ
+                        if (carries_own_command(parts[6])) {
+                            cmd_seen[parts[1] "\t" rec_scope[i]] = 1
+                            sc = rec_scope[i]
+                            while (sc > 0) { sc = scope_parent[sc]; cmd_seen[parts[1] "\t" sc] = 1 }
                         }
                     }
                 }
@@ -4549,6 +4584,7 @@ ci_workflow_extract() {
             }
             for (i in last_scope_cmd) { delete last_scope_cmd[i] }
             for (i in scope_exit_ok) { delete scope_exit_ok[i] }
+            for (i in cmd_seen) { delete cmd_seen[i] }
             nbuf = 0
             for (i in scope_parent) {
                 delete scope_parent[i]; delete scope_op[i]; delete scope_close_at[i]

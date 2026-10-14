@@ -7629,6 +7629,106 @@ jobs:
         run: |
           ( { bash ${SUITE_PATH} ; } ) && echo ok"
 
+# **引数が読めない脱出（素の `exit` / `exit $rc`）は手前のコマンド次第**（レビュー指摘）。
+# `||` の右辺が走るのは左辺が落ちたときだけなので、手前に何も走っていなければ
+# 直前の状態＝左辺の失敗を引き継いで必ず非 0 で抜ける（＝並びはいつでも失敗する）。
+# 手前に走ったコマンドがあればその状態は読めないので握り潰し側へ倒す
+assert_swallowed "|| の右辺の手前にコマンドがあると素の exit は成功しうる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || (
+          echo cleanup
+          exit
+          )"
+
+assert_swallowed "|| の右辺のグループでも手前のコマンド次第" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || {
+          echo cleanup
+          exit
+          }"
+
+assert_swallowed "|| の右辺の手前にコマンドがある 1 行書きも同じ" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || ( echo cleanup; exit )"
+
+assert_swallowed "|| の右辺の読めない引数の exit も手前次第" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || (
+          echo x
+          exit \$u
+          )"
+
+assert_swallowed "|| の右辺の入れ子の部分シェルも手前のコマンドに数える" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || (
+          (
+          echo x
+          )
+          exit
+          )"
+
+assert_wired "|| の右辺の先頭の素の exit は左辺の失敗を引き継ぐ" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || (
+          exit
+          exit 1
+          )"
+
+assert_wired "|| の右辺の先頭の読めない引数の exit も同じ" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || (
+          exit \$u
+          exit 1
+          )"
+
+assert_wired "開くだけの断片は手前のコマンドに数えない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || (
+          {
+          exit
+          }
+          )"
+
 assert_wired "|| の右辺の入れ子の部分シェルの exit 0 は外側を抜けない" "name: ci
 jobs:
   type-check:
