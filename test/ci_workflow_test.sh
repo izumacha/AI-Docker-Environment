@@ -6432,6 +6432,49 @@ jobs:
           }
           echo done"
 
+# **閉じ括弧が空白で隔てられていても右辺を読む**（レビュー 6 巡目の指摘。`main` も持つ
+# fail-closed）。以前は末尾の閉じを落とす走査が空白を跨げなかったため、`false ) )` が
+# 読めず未配線に倒れ、**空白を 1 つ詰めただけの同じプログラム（`))`）とは答えが食い違って**
+# いた（真値はどちらも GATES）
+for spaced_closer_case in \
+    "部分シェル 2 段の false:( ( bash ${SUITE_PATH} || false ) )" \
+    "部分シェル 2 段の exit 1:( ( bash ${SUITE_PATH} || exit 1 ) )" \
+    "部分シェル 3 段:( ( ( bash ${SUITE_PATH} || false ) ) )" \
+    "空白を詰めた形（対照）:( ( bash ${SUITE_PATH} || false ))"
+do
+    assert_wired "空白を挟んだ閉じでも右辺を読む（${spaced_closer_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${spaced_closer_case#*:}"
+done
+
+# **`$?` を持ち出す脱出は引用・波括弧の 4 綴りすべて読める**（レビュー 6 巡目の指摘。
+# `main` も持つ fail-closed）。`||` の右辺が走るのは左辺が落ちたときだけなので、
+# どの綴りも必ず非 0 で終わる。**`exit "$?"` は shellcheck が勧める書き方**なのに
+# 「読めない引数」に落ちて正しくゲートしている綴りを赤くしていた——綴りの判定が
+# 5 か所に写してあり 1 か所だけ広げ忘れていたのが原因で、同じ巡で `escape_probe()` /
+# `escape_arg_carries_status()` へ一元化した
+for status_escape_case in \
+    "素の \$?:exit \$?" \
+    "引用した \$?:exit \"\$?\"" \
+    "波括弧:exit \${?}" \
+    "引用した波括弧:exit \"\${?}\""
+do
+    assert_wired "\$? を持ち出す脱出は読める（${status_escape_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || ${status_escape_case#*:}
+          echo done"
+done
+
 # **`exit` は同じシェルなら複合の中からでもその場で終える**（レビュー 5 巡目）。
 # 素のグループ・制御構造の本体は同じシェルなので、`set +e` の下でも後ろに行があっても
 # ステップの終了状態はその `exit` のものになる（真値 GATES）

@@ -2215,7 +2215,11 @@ ci_workflow_extract() {
             # **`}` は落とさない**——`{ true; }` は `;` で切られるので左辺は `}` だけの断片になり
             # （下記の残る境界）、落として得るものが無い一方、`{ echo a; true } && …` のように
             # **bash が解析できない綴り**を「真と分かる」と読む口になる（レビューで実測）
-            sub(/[[:space:]]*[;)]*[[:space:]]*$/, "", probe)
+            # **閉じと閉じのあいだに空白があっても落とす**（レビュー指摘。実測）。
+            # `[;)]*` は空白を跨げないので `( ( <呼び出し> || false ) )` の右辺は
+            # `false ) )` のまま読めず、**空白を 1 つ詰めた同じプログラムとだけ答えが
+            # 食い違う**（前者 not-wired ・ 後者 wired。真値はどちらも GATES）
+            sub(/[[:space:]]*([;)][[:space:]]*)*$/, "", probe)
             return trim(probe)
         }
 
@@ -2258,6 +2262,26 @@ ci_workflow_extract() {
         # （＝直前の失敗）で終わるので失敗、数値以外（`exit $rc`）は読めないので
         # 「成功しえない」側へ倒す——`||` の枝の `exit` は失敗を伝えるために書くのが
         # ほぼすべてで、握り潰し扱いにすると上と同じ fail-closed になる
+        # **脱出の綴りをここで一手に引き受ける**（レビュー指摘。§6 一元管理）。
+        # 以前は同じ正規表現が 5 か所に写してあり、**1 か所だけ広げ忘れた**ために
+        # `exit "$?"`（shellcheck が勧める引用形）が「読めない引数」に落ちて
+        # 正しくゲートしている綴りを赤くしていた。綴りを足すときはここだけを直す。
+        # 戻り値は脱出の綴りなら整形後の本文、そうでなければ空文字
+        function escape_probe(t,   probe) {
+            probe = chain_status_probe(t)
+            if (probe !~ /^(exit|return)([[:space:]]+[^[:space:]]+)?$/) { return "" }
+            return probe
+        }
+        # **引数が「直前の状態をそのまま持ち出す」綴りか**（引数なしと `$?` の 4 綴り）。
+        # `||` の右辺が走るのは左辺が落ちたときだけなので、どちらも必ず非 0 で終わる。
+        # 引用の有無と波括弧の有無で 4 通りあり、どれも実測で GATES
+        function escape_arg_carries_status(probe) {
+            return (probe ~ /^(exit|return)([[:space:]]+("\$\?"|\$\?|"\$\{\?\}"|\$\{\?\}))?$/) ? 1 : 0
+        }
+        # **引数が 10 進の数値リテラルか**（剰余の規則は `escape_literal_status()` が持つ）
+        function escape_arg_is_literal(probe) {
+            return (probe ~ /^(exit|return)[[:space:]]+[0-9]+$/) ? 1 : 0
+        }
         # **途中で成功して抜けうる脱出か**（issue #191 のレビュー後に実測で見つけた 3 つ目の穴）。
         # `||` の右辺が複合のとき「成功しえない」と言えるのは**最後のコマンドが成功しえない**
         # ことに加えて、**その手前に成功して抜ける脱出が無い**ときだけ。`bash <スイート> ||`
@@ -2265,12 +2289,12 @@ ci_workflow_extract() {
         # 実 `bash -e` は NOGATE（握り潰し）なのに「ゲートしている」と答える fail-open になる。
         # 引数が読めない `exit` は「成功しうる」側＝握り潰し側へ倒す（`main` と同じ答え）
         function escape_can_succeed(t, preceded,   probe) {
-            probe = chain_status_probe(t)
+            probe = escape_probe(t)
             # 脱出の綴りでなければ関係ない（普通のコマンドは階層を抜けない）
-            if (probe !~ /^(exit|return)([[:space:]]+[^[:space:]]+)?$/) { return 0 }
+            if (probe == "") { return 0 }
             # 0 以外の数値リテラルなら必ず失敗する（抜けても並びは失敗する）。
             # **剰余の規則は `escape_literal_status()` が唯一の源**（`exit 256` は成功して抜ける）
-            if (probe ~ /^(exit|return)[[:space:]]+[0-9]+$/) { return (escape_literal_status(probe) == 0) ? 1 : 0 }
+            if (escape_arg_is_literal(probe)) { return (escape_literal_status(probe) == 0) ? 1 : 0 }
             # **引数が読めない脱出（素の `exit` / `exit $rc`）は手前のコマンド次第**
             # （レビュー指摘。`chain_never_succeeds()` は別の問いに答える関数で、読めない
             #  引数を「成功しえない」側へ倒すため、そのまま委ねると `|| (` / `echo cleanup` /
@@ -2297,13 +2321,13 @@ ci_workflow_extract() {
         # （実測: `rc=0` のとき `bash <スイート> || exit $rc` は実 `bash -e` で NOGATE。
         # 「読めないなら失敗を伝える」と読むと**1 件も走らないスイートが「ゲートしている」**になる）
         function escape_status_unreadable(t,   probe) {
-            probe = chain_status_probe(t)
+            probe = escape_probe(t)
             # 脱出でなければこの問いの対象外
-            if (probe !~ /^(exit|return)([[:space:]]+[^[:space:]]+)?$/) { return 0 }
-            # 引数なし・`$?` は左辺の失敗をそのまま持ち出すので読める
-            if (probe ~ /^(exit|return)([[:space:]]+\$\?)?$/) { return 0 }
+            if (probe == "") { return 0 }
+            # 引数なし・`$?` の 4 綴りは左辺の失敗をそのまま持ち出すので読める
+            if (escape_arg_carries_status(probe)) { return 0 }
             # 数値リテラルも読める
-            if (probe ~ /^(exit|return)[[:space:]]+[0-9]+$/) { return 0 }
+            if (escape_arg_is_literal(probe)) { return 0 }
             # 残りは読めない
             return 1
         }
@@ -2328,9 +2352,9 @@ ci_workflow_extract() {
             sub(/exit.*$/, "", head)
             if (head ~ /\(/) { return 0 }
             # 読める数値リテラルで 0 になるなら「成功して終わる」ので別扱い
-            if (probe ~ /^exit[[:space:]]+[0-9]+$/) { return (escape_literal_status(probe) != 0) ? 1 : 0 }
-            # 引数なし・`$?` は非 0（上の `escape_status_unreadable` の説明と同じ理由）
-            if (probe ~ /^exit([[:space:]]+\$\?)?$/) { return 1 }
+            if (escape_arg_is_literal(probe)) { return (escape_literal_status(probe) != 0) ? 1 : 0 }
+            # 引数なし・`$?` の 4 綴りは非 0（上の `escape_status_unreadable` と同じ理由）
+            if (escape_arg_carries_status(probe)) { return 1 }
             # 読めない引数は主張しない
             return 0
         }
