@@ -6506,6 +6506,87 @@ jobs:
           bash ${SUITE_PATH} || ${ctrl_or_case#*:}"
 done
 
+# **`||` の右辺の制御構造は「本体がいつでも失敗する」と読めない**（レビュー指摘。この差分が
+# 入れた fail-open）。複合の状態は「中で最後に走ったコマンド」のものだが、制御構造の本体は
+# 条件や一覧が空なら**1 度も走らない**ので、`false` や `exit 1` で終わる本体でも複合は
+# 成功して抜けうる（真値 NOGATE）。上の `ctrl_or_case` は本体が必ず成功する綴りだけだったため、
+# 門番（`rec_unc`）を外しても**966 ピンすべてが緑のまま通っていた**（実測）
+for ctrl_or_fail_case in \
+    "条件が読めない if の本体が失敗する:if [ -n \$DEBUG ]; then
+          false
+          fi" \
+    "変数の一覧を回る for の本体が失敗する:for f in \$LIST; do
+          false
+          done" \
+    "条件が読めない if の本体が脱出する:if [ -n \$DEBUG ]; then
+          exit 1
+          fi" \
+    "読み込みの while の本体が失敗する:while read -r l; do
+          false
+          done < /dev/null"
+do
+    assert_not_wired "|| の右辺の制御構造は本体が失敗しても握り潰す（${ctrl_or_fail_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || ${ctrl_or_fail_case#*:}
+          echo tail"
+done
+
+# **門番は「読めない」で打ち切らず下の枝へ落とす**: 本体が読めなくても、手前に「走ると
+# 証明できる」致命的な記録があれば複合はそこで死ぬので並びはいつでも失敗する（真値 GATES。
+# 打ち切る形に変えるとこの 1 形だけが未配線へ倒れる＝fail-closed）
+assert_wired "|| の右辺の複合は手前の致命的な記録で死ぬ（後ろが読めなくても）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || ( false
+          if [ -n \$D ]; then
+          true
+          fi )
+          echo tail"
+
+# **呼ばれていない関数の本体も同じ**（`main` が持つ fail-open。定義しただけの関数は 1 行も
+# 走らないので `|| f() { false; }` は成功して抜ける＝真値 NOGATE）
+assert_not_wired "|| の右辺の関数定義は本体が失敗しても握り潰す" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || f() {
+          false
+          }
+          echo tail"
+
+# **残る境界（記録。真値 GATES なので fail-closed・`main` と同じ答え）**: 本体が必ず走る
+# 制御構造でも、走ると証明する手段が無いので握り潰し側へ倒れる。上の fail-open を閉じる
+# 代償で、6 巡目が同じ理由で受け入れた 4 形と同種（直すときはこのピンを意図して反転させる）
+for ctrl_or_boundary_case in \
+    "リテラルの一覧を回る for の本体が失敗する:for f in a b; do
+          false
+          done" \
+    "リテラルで真の if の本体が失敗する:if true; then
+          false
+          fi"
+do
+    assert_not_wired "残る境界: 本体が必ず走る制御構造も握り潰し側（${ctrl_or_boundary_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || ${ctrl_or_boundary_case#*:}"
+done
+
 # **閉じ括弧が空白で隔てられていても右辺を読む**（レビュー 6 巡目の指摘。`main` も持つ
 # fail-closed）。以前は末尾の閉じを落とす走査が空白を跨げなかったため、`false ) )` が
 # 読めず未配線に倒れ、**空白を 1 つ詰めただけの同じプログラム（`))`）とは答えが食い違って**
