@@ -6299,6 +6299,139 @@ jobs:
           echo done"
 done
 
+# **内側の階層の失敗が外へ届かないなら、その複合は落ちない**（レビュー 6 巡目。実測で
+# 見つけた fail-open）。中の `false` で内側の部分シェル・ブレースは死ぬが、その閉じの
+# 後ろが `||` / `&&` なら受け手がいて、`|` ならパイプの左側、`&` なら背後の実行なので
+# 外側の階層の終了状態にならない——数えると**1 件も走らないスイートが「ゲートしている」**
+# と読まれる（真値はすべて NOGATE）
+for inner_sep_case in \
+    "部分シェルのあとに ||:(:):|| true" \
+    "部分シェルのあとに &&:(:):&& echo z" \
+    "部分シェルをパイプの左側へ:(:):| cat" \
+    "部分シェルを背後へ:(:):& wait" \
+    "ブレースのあとに ||:{:}:|| true" \
+    "ブレースをパイプの左側へ:{:}:| cat"
+do
+    inner_open="$(printf '%s' "${inner_sep_case}" | cut -d: -f2)"
+    inner_close="$(printf '%s' "${inner_sep_case}" | cut -d: -f3)"
+    inner_sep="$(printf '%s' "${inner_sep_case}" | cut -d: -f4)"
+    assert_not_wired "外へ届かない内側の失敗は複合を落とさない（${inner_sep_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || ${inner_open}
+          ${inner_open}
+          false
+          ${inner_close} ${inner_sep}
+          true
+          ${inner_close}"
+done
+
+# 締めすぎない側: **内側の失敗が外へ届くなら落とす**（真値 GATES）
+for inner_sep_ok_case in \
+    "区切り無し:(:):" \
+    "区切りが ;:(:):;" \
+    "ブレースで区切り無し:{:}:"
+do
+    inner_open="$(printf '%s' "${inner_sep_ok_case}" | cut -d: -f2)"
+    inner_close="$(printf '%s' "${inner_sep_ok_case}" | cut -d: -f3)"
+    inner_sep="$(printf '%s' "${inner_sep_ok_case}" | cut -d: -f4)"
+    assert_wired "外へ届く内側の失敗は複合を落とす（${inner_sep_ok_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || ${inner_open}
+          ${inner_open}
+          false
+          ${inner_close} ${inner_sep}
+          true
+          ${inner_close}
+          echo done"
+done
+
+# **走ると証明できない記録は複合を落とさない**（レビュー 6 巡目。実測で見つけた fail-open）。
+# 呼ばれない関数の本体・空になりうる `for` の本体・一致しない `case` のアームはどれも
+# 走るとは限らないので、その中の失敗を当てにできない。**`||` の受け皿に補助関数を書く**
+# のはごく普通の綴りなので、これは偶然成立する（真値はすべて NOGATE）
+for unproven_body_case in \
+    "呼ばない関数の false:g() {
+          false
+          }
+          echo ignored" \
+    "呼ばない関数の exit 1:g() {
+          exit 1
+          }
+          echo ignored" \
+    "呼ばない関数の return 1:g() {
+          return 1
+          }
+          echo ignored" \
+    "空になりうる for の本体:for f in \$FILES; do
+          false
+          done
+          echo ignored" \
+    "until の本体:until true; do
+          false
+          done
+          echo ignored" \
+    "一致しない case のアーム:case y in
+          x)
+          false
+          ;;
+          esac
+          echo ignored"
+do
+    assert_not_wired "走ると証明できない記録は複合を落とさない（${unproven_body_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || (
+          ${unproven_body_case#*:}
+          )"
+done
+
+# **複合が並びの最後の要素でなければ、中の errexit は抑制される**（レビュー 5 巡目の機構に
+# 6 巡目で付けたピン。それまで**どの変異でも落ちなかった**）。`) && echo z` の複合は
+# AND-OR 並びの左辺なので中の `false` では死なず、`true` まで進んで成功する（真値 NOGATE）。
+# **後ろに行を置くと位置の判定が先に未配線へ倒すので、この条件だけを見るには行を置かない**
+assert_not_wired "最後の要素でない複合は中の errexit で落ちない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || (
+          false
+          true
+          ) && echo z"
+
+# **複合の中の反転した記録も errexit を落とさない**（同じく 6 巡目で付けたピン）。
+# `! true` はいつでも失敗するが反転した失敗では errexit が落ちないので、`echo ok` まで
+# 進んで複合は成功する（真値 NOGATE）。**1 断片に畳んだ `|| { ! true ; }` は複合ではなく
+# 連鎖として読まれる経路なので、この条件を通らない**——複数行で書く必要がある
+assert_not_wired "複合の中の反転した記録は errexit を落とさない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || {
+          ! true
+          echo ok
+          }
+          echo done"
+
 # **`exit` は同じシェルなら複合の中からでもその場で終える**（レビュー 5 巡目）。
 # 素のグループ・制御構造の本体は同じシェルなので、`set +e` の下でも後ろに行があっても
 # ステップの終了状態はその `exit` のものになる（真値 GATES）

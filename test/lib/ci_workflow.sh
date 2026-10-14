@@ -3981,6 +3981,10 @@ ci_workflow_extract() {
                         # （`set +e` の下でステップ最後なら伝わる）が区別できないと、
                         # 到達不能な呼び出しを「ゲートしている」と読む fail-open になる
                         rec_dead[nbuf] = (dead_depth >= 0 || unreachable || exit_seen) ? 1 : 0
+                        # **「走ると証明できない理由」のうち制御構造の分だけを控える**。
+                        # 記録の 5 列目は `chain_in`・反転を足した合計なので、`|| (` の中
+                        # （連鎖の右辺なので `chain_in` が立つ）が区別できない
+                        rec_unc[nbuf] = uncertain
                         # **閉じた階層の区切りは「閉じたあとに続く区切り」**（この断片の区切り）で、
                         # 付けるのは**この断片が閉じた一番外側の階層だけ**（`closed_scope` は
                         # 内側から積むので末尾が一番外側）。内側の階層にも同じ区切りを付けると、
@@ -4714,12 +4718,31 @@ ci_workflow_extract() {
                         # 失敗では errexit が落ちないので、`|| { ! true ; echo ok ; }` は
                         # `echo ok` まで進んで成功する＝握り潰し（実 `bash -e` は NOGATE）。
                         # 判定は `chain_never_succeeds()` が最後に読んだ反転の偶奇で見る
+                        # **走ると証明できない記録は数えない**（レビュー指摘。実測で見つけた
+                        # fail-open）。`rec_unc[i]` は囲っている制御構造のうち走ると
+                        # 証明できないものの数で、呼ばれない関数の本体・空になりうる `for` の
+                        # 本体・一致しない `case` のアームはいずれも立てる（記録の 5 列目では
+                        # なく素の `uncertain` を見るのは、5 列目が `chain_in` を足した合計で、
+                        # `|| (` の中——連鎖の右辺なのでこれが立つ——を区別できないため）。数えると
+                        # `bash <スイート> || (` / `die() {` / `exit 1` / `}` / `echo ignored` / `)`
+                        # ——`||` の受け皿に補助関数を書くというごく普通の綴り——で、呼ばれない
+                        # `exit 1` が「この複合はいつでも失敗する」と読まれ、握り潰しを配線と
+                        # 答える（実 `bash -e` は NOGATE）
                         if (rec_e[i] && (parts[2] == "" || parts[2] == ";") \
+                            && rec_unc[i] == 0 \
                             && chain_never_succeeds(parts[6]) && !CHAIN_PROBE_FLIP) {
                             if (!((parts[1] "\t" rec_scope[i]) in scope_fatal)) {
                                 scope_fatal[parts[1] "\t" rec_scope[i]] = i
                                 sc = rec_scope[i]
                                 while (sc > 0) {
+                                    # **その階層の失敗が親へ届くときだけ祖先へ記す**（レビュー指摘。
+                                    # 実測で見つけた fail-open）。階層の閉じの後ろが `&&` / `||` なら
+                                    # その中の errexit は抑制され、`|` ならパイプの左側、`&` なら
+                                    # 背後の実行で、どちらも親の終了状態にならない——
+                                    # `|| (` / `(` / `false` / `) || true` / `true` / `)` は
+                                    # 内側が死んでも `|| true` が受けるので外側は成功する
+                                    # （実 `bash -e` は NOGATE）
+                                    if (scope_op[sc] != "" && scope_op[sc] != ";") { break }
                                     sc = scope_parent[sc]
                                     if (!((parts[1] "\t" sc) in scope_fatal)) { scope_fatal[parts[1] "\t" sc] = i }
                                 }
@@ -4752,7 +4775,7 @@ ci_workflow_extract() {
             for (i = 1; i <= nenv; i++) { delete envbuf[i] }
             nenv = 0
             for (i = 1; i <= nbuf; i++) {
-                delete buf[i]; delete rec_scope[i]; delete rec_dead[i]
+                delete buf[i]; delete rec_scope[i]; delete rec_dead[i]; delete rec_unc[i]
                 delete rec_stepid[i]; delete rec_txt[i]; delete rec_opx[i]; delete rec_e[i]; delete rec_p[i]
             }
             for (i in last_scope_cmd) { delete last_scope_cmd[i] }
