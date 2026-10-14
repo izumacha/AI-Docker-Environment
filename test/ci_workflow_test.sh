@@ -4503,6 +4503,32 @@ jobs:
           ${sub_promote_case#*:}"
 done
 
+# 締めすぎない側: **`pipefail` 無しでパイプの左に置いたスイートは握り潰される**（真値 NOGATE）。
+# 上の引き上げは `&&` の短絡が失敗をそのまま部分シェルの状態にする形に限る——引き上げる
+# 区切りの集合をパイプまで広げると、この形が「配線済み」へ倒れる向きになる（issue #199。
+# 広げても**いま答えは 1 件も変わらない**が、変わらないことを確かめるにはこの対が要る）
+for sub_pipe_swallow_case in \
+    "閉じ括弧が同じ断片:(
+          set +e
+          bash ${SUITE_PATH} | cat )" \
+    "閉じ括弧を別行:(
+          set +e
+          bash ${SUITE_PATH} | cat
+          )" \
+    "グループ:{
+          set +e
+          bash ${SUITE_PATH} | cat ; }"
+do
+    assert_not_wired "pipefail 無しのパイプの左は握り潰される（${sub_pipe_swallow_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${sub_pipe_swallow_case#*:}"
+done
+
 # **`&&` でつながった並びが部分シェルの最後のコマンドなら、どの要素の失敗も親へ伝わる**
 # （issue #193）。`&&` は左が落ちた時点で短絡するので、その失敗がそのまま部分シェルの
 # 終了状態になる（実 `bash -e` で GATES）。候補を 1 件しか控えない形だと右辺（`echo ok`）が
@@ -4588,6 +4614,20 @@ for sub_and_chain_case in \
           (
           set +e
           bash ${SUITE_PATH} | cat
+          )" \
+    "&& の右辺がパイプで閉じ括弧が同じ断片:(
+          set +e
+          bash ${SUITE_PATH} && echo ok | cat )" \
+    "&& の右辺がパイプで閉じ括弧を別行:(
+          set +e
+          bash ${SUITE_PATH} && echo ok | cat
+          )" \
+    "グループで && の右辺がパイプ:{
+          set +e
+          bash ${SUITE_PATH} && echo ok | cat ; }" \
+    "&& の右辺が多段パイプ:(
+          set +e
+          bash ${SUITE_PATH} && echo ok | cat | tee log
           )"
 do
     assert_wired "&& の連鎖が部分シェルの最後なら引き上げる（${sub_and_chain_case%%:*}）" "name: ci
