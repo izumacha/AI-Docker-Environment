@@ -6432,6 +6432,80 @@ jobs:
           }
           echo done"
 
+# **`&&` の右辺が制御構造なら、連鎖の終わりは閉じ語**（issue #198）。`if true; then` /
+# `for f in a; do` / `case x in` の見出しは**条件や一覧を外側の階層で走らせる**ので記録は
+# 外側に載るが、並びの要素としては `fi` / `done` / `esac` までが 1 つのコマンド。見出しで
+# 連鎖が終わると本体が「後ろに続くコマンド」に見え、位置の判定が gate を 0 にする
+# （真値 GATES なので fail-closed。`( … )` / `{ … ; }` は開き記号が命令の手前に来るので
+# 記録自身が内側に載り、以前から正しく読めていた——**改行の位置ではなく綴りの違い**）
+for ctrl_rhs_case in \
+    "if true の本体:if true; then
+          echo x
+          fi" \
+    "リテラルの一覧を回る for:for f in a; do
+          echo x
+          done" \
+    "変数の一覧を回る for:for f in \$LIST; do
+          echo x
+          done" \
+    "case の見出し:case x in
+          x) echo hi ;;
+          esac"
+do
+    assert_wired "&& の右辺の制御構造は閉じ語まで 1 つの要素（${ctrl_rhs_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} && ${ctrl_rhs_case#*:}"
+done
+
+# 締めすぎない側: **後ろに行があれば握り潰される**（真値 NOGATE）。連鎖の状態は閉じ語で
+# 確定するが、その後ろに行があればステップの状態はその行のものになる
+for ctrl_rhs_tail_case in \
+    "if true の本体:if true; then
+          echo x
+          fi" \
+    "リテラルの一覧を回る for:for f in a; do
+          echo x
+          done" \
+    "case の見出し:case x in
+          x) echo hi ;;
+          esac"
+do
+    assert_not_wired "制御構造の後ろに行があれば握り潰される（${ctrl_rhs_tail_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} && ${ctrl_rhs_tail_case#*:}
+          echo tail"
+done
+
+# 締めすぎない側: **`||` の右辺の制御構造は握り潰す**（真値 NOGATE）。本体が走れば複合は
+# 成功しうるので、失敗はそこで受け止められる
+for ctrl_or_case in \
+    "if true の本体:if true; then
+          echo x
+          fi" \
+    "case の見出し:case x in
+          x) echo hi ;;
+          esac"
+do
+    assert_not_wired "|| の右辺の制御構造は握り潰す（${ctrl_or_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || ${ctrl_or_case#*:}"
+done
+
 # **閉じ括弧が空白で隔てられていても右辺を読む**（レビュー 6 巡目の指摘。`main` も持つ
 # fail-closed）。以前は末尾の閉じを落とす走査が空白を跨げなかったため、`false ) )` が
 # 読めず未配線に倒れ、**空白を 1 つ詰めただけの同じプログラム（`))`）とは答えが食い違って**
