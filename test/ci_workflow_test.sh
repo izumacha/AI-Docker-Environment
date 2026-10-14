@@ -4503,18 +4503,31 @@ jobs:
           ${sub_promote_case#*:}"
 done
 
+# **グループ（`{ … ; }`）でも `&&` の連鎖がパイプで終われば失敗はステップの状態になる**
+# （真値 GATES）。**部分シェルの引き上げとは別の理由**で——グループはフォークせず
+# 閉じても errexit を戻さないので、並びの失敗がそのままステップの終了状態になる。
+# 上のループのアサート文は「部分シェル」と名乗るので、同じ文で報告しない
+assert_wired "グループの && の連鎖がパイプで終わっても合否に効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          {
+          set +e
+          bash ${SUITE_PATH} && echo ok | cat ; }"
+
 # 締めすぎない側: **`pipefail` 無しでパイプの左に置いたスイートは握り潰される**（真値 NOGATE）。
-# 上の引き上げは `&&` の短絡が失敗をそのまま部分シェルの状態にする形に限る——引き上げる
-# 区切りの集合をパイプまで広げると、この形が「配線済み」へ倒れる向きになる（issue #199。
-# 広げても**いま答えは 1 件も変わらない**が、変わらないことを確かめるにはこの対が要る）
+# **この向きを決めているのは `record_gates()` のパイプの落とし**（`op == "|" && !absorbed && !p_here`
+# なら未配線へ倒す）で、**部分シェルの引き上げ（`prom_rec`）ではない**——issue #199 は
+# 引き上げの門番が見る区切りの集合を広げるよう提案しているが、広げても答えは 1 件も変わらない
+# （実測。989 ピン・36 形・corpus 7 本 3,530 形すべて同一）。**同じ本体のピンは既にあり**
+# （`パイプで握り潰す`）、ここは閉じ括弧を同じ断片に置く形とグループだけを足している
 for sub_pipe_swallow_case in \
     "閉じ括弧が同じ断片:(
           set +e
           bash ${SUITE_PATH} | cat )" \
-    "閉じ括弧を別行:(
-          set +e
-          bash ${SUITE_PATH} | cat
-          )" \
     "グループ:{
           set +e
           bash ${SUITE_PATH} | cat ; }"
@@ -4617,18 +4630,7 @@ for sub_and_chain_case in \
           )" \
     "&& の右辺がパイプで閉じ括弧が同じ断片:(
           set +e
-          bash ${SUITE_PATH} && echo ok | cat )" \
-    "&& の右辺がパイプで閉じ括弧を別行:(
-          set +e
-          bash ${SUITE_PATH} && echo ok | cat
-          )" \
-    "グループで && の右辺がパイプ:{
-          set +e
-          bash ${SUITE_PATH} && echo ok | cat ; }" \
-    "&& の右辺が多段パイプ:(
-          set +e
-          bash ${SUITE_PATH} && echo ok | cat | tee log
-          )"
+          bash ${SUITE_PATH} && echo ok | cat )"
 do
     assert_wired "&& の連鎖が部分シェルの最後なら引き上げる（${sub_and_chain_case%%:*}）" "name: ci
 jobs:
