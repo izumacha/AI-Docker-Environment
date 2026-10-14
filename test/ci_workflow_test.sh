@@ -6552,19 +6552,85 @@ jobs:
           fi )
           echo tail"
 
-# **呼ばれていない関数の本体も同じ**（`main` が持つ fail-open。定義しただけの関数は 1 行も
-# 走らないので `|| f() { false; }` は成功して抜ける＝真値 NOGATE）
-assert_not_wired "|| の右辺の関数定義は本体が失敗しても握り潰す" "name: ci
+# **呼ばれていない関数の本体は `main` が持つ fail-open のまま**（真値 NOGATE なのに配線済み）。
+# ここにピンは置かない——閉じるには「その階層が走るか」を**階層ごと**に答える機構が要り、
+# 包んだ制御構造（`|| ( if true; then false; fi )` ＝真値 GATES で `main` も配線済み）を
+# 巻き添えにせずに分ける必要がある。別 issue で扱う（この差分の範囲は #198）
+
+# **包んだ制御構造は `main` の経路なので答えを変えない**（レビュー 9 巡目の指摘。上の門番を
+# 一律に掛けると `( … )` / `{ … ; }` で包んだ形まで握り潰し側へ倒れ、**`main` が正しく
+# 配線済みと答えていた 20 形が退行**していた＝正しくゲートしているワークフローを赤くする向き。
+# 門番は見出しの複合を受け入れる新しい経路（`rec_opened`）だけに掛ける）
+for wrapped_ctrl_case in \
+    "部分シェルで包む:( if true; then
+          false
+          fi )" \
+    "グループで包む:{ if true; then
+          false
+          fi ; }" \
+    "部分シェルで包んだ for:( for f in a b; do
+          false
+          done )"
+do
+    assert_wired "包んだ制御構造は答えを変えない（${wrapped_ctrl_case%%:*}）" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
     steps:
       - name: subject
         run: |
-          bash ${SUITE_PATH} || f() {
-          false
-          }
-          echo tail"
+          bash ${SUITE_PATH} || ${wrapped_ctrl_case#*:}"
+done
+
+# **連鎖の右辺が無い複合は読めない**（レビュー 9 巡目。この差分が入れた fail-open）。
+# `bash -n` が通らない＝スイートが 1 件も走らないので真値 NOGATE・`main` も未配線だが、
+# 見出しの複合を受け入れるようにした結果「複合の位置」だけで配線済みと答えていた
+for dangling_chain_case in \
+    "閉じ語の直前:if true; then
+          echo a &&
+          fi" \
+    "継続語の直前:if true; then
+          echo a &&
+          else
+          echo b
+          fi" \
+    "ループの閉じ語の直前:for f in a; do
+          echo a &&
+          done" \
+    "case の閉じ語の直前:case x in
+          x) echo a && ;;
+          esac"
+do
+    assert_not_wired "連鎖の右辺が無い複合は未配線（${dangling_chain_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} && ${dangling_chain_case#*:}"
+done
+
+# 締めすぎない側: **右辺のある連鎖は読める**（真値 GATES）。上の門番が「区切りが `&&` なら
+# 落とす」へ広がっていないことを固定する
+for inner_chain_case in \
+    "改行をまたぐ連鎖:if true; then
+          echo a &&
+          echo b
+          fi" \
+    "1 行の連鎖:if true; then
+          echo a && echo b
+          fi"
+do
+    assert_wired "右辺のある連鎖は読める（${inner_chain_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} && ${inner_chain_case#*:}"
+done
 
 # **残る境界（記録。真値 GATES なので fail-closed・`main` と同じ答え）**: 本体が必ず走る
 # 制御構造でも、走ると証明する手段が無いので握り潰し側へ倒れる。上の fail-open を閉じる

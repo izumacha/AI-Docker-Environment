@@ -2543,7 +2543,7 @@ ci_workflow_extract() {
         # `absorbed` は「追っている失敗が並びに吸われて、その場では落ちない」状態で、
         # 階層を出るたびに消える（複合コマンドの失敗は親から見れば 1 つのコマンドの失敗で、
         # そこでは errexit がその場で落とす）
-        function record_gates(i,   cur, s, op, nx, ns, ce, ls, absorbed, guard, key, e_here, p_here, inv, aborts) {
+        function record_gates(i,   cur, s, op, nx, ns, ce, ls, absorbed, guard, key, e_here, p_here, inv, aborts, via_opened, dg, dgp, dgq) {
             # そもそも走らない記録（到達不能・死に体・`exit` の後ろ）は伝わらない
             if (rec_dead[i]) { return 0 }
             cur = i; s = rec_scope[i]; op = sep_of(i, s); absorbed = 0
@@ -2580,6 +2580,7 @@ ci_workflow_extract() {
                     if (rec_scope[nx] != s) {
                         ns = rec_scope[nx]
                         while (ns > 0 && scope_parent[ns] != s) { ns = scope_parent[ns] }
+                        via_opened = 0
                     }
                     # 控えは「コマンドの階層のすぐ内側」なので、その親は常にこの階層
                     # （`scope_at[run_depth + 1]` の親は `scope_at[run_depth]`）。
@@ -2588,18 +2589,38 @@ ci_workflow_extract() {
                     # 閉じる形）でも答えが 1 件も変わらなかった（何も変えない仕掛けは置かない）
                     else if ((rec_opened[nx] + 0) > 0) {
                         ns = rec_opened[nx] + 0
+                        via_opened = 1
                     }
-                    else { ns = 0 }
+                    else { ns = 0; via_opened = 0 }
                     # **残る境界（レビュー 8 巡目の記録）**: 上のたどりが `s` を親に持つ先祖を
                     # 見つけられないと `ns` は 0 のまま進み、**別の階層の記録をこの階層の帳簿で
-                    # 測る**ことになる。釣り合いの取れた入れ子では起こらない（974 ピンと 96 形で
-                    # 到達しない＝実測）が、構造として保証されているわけではない。未配線へ倒す
-                    # 門番を書いて測ったが**ピンも 96 形も 1 件も答えが変わらなかった**ので
-                    # 置いていない（何も変えない仕掛けは「守られている」と誤解させる。§6）
+                    # 測る**ことになる。釣り合いの取れた入れ子では起こらない（全ピンと、構成した
+                    # 綴り——見出しをそのまま置く形と `( … )` / `{ … ; }` で包んだ形——で到達しない
+                    # ＝実測）が、構造として保証されているわけではない。未配線へ倒す門番を書いて
+                    # 測ったが**1 件も答えが変わらなかった**ので置いていない
+                    # （何も変えない仕掛けは「守られている」と誤解させる。§6）
                     if (ns > 0) {
                         ce = scope_close_at[ns] + 0
                         # 閉じていない（読めない）形は握り潰し側＝未配線へ倒す
                         if (ce == 0 || ce <= cur) { return 0 }
+                        # **連鎖の右辺が無い複合も読めない**（レビュー 9 巡目。この差分が入れた
+                        # fail-open）。見出しの複合を受け入れるようにした結果、
+                        # `bash <スイート> && if true; then` 改行 `echo a &&` 改行 `fi` のように
+                        # **構文エラーでスイートが 1 件も走らない**綴りまで配線済みと答えていた
+                        # （実 `bash -e` は NOGATE・`main` も未配線）。見るのは「中の記録の区切りが
+                        # `&&` / `||` なのに、その次が閉じ語か継続語（`else` / `elif`）」という、
+                        # **右辺が無いことがその場で分かる形だけ**——`bash` の構文は再実装しない
+                        # （綴りを 1 つずつ足す道は取らない。残る境界は `docs/requirements.md` に記録）
+                        if (via_opened) {
+                            for (dg = nx + 1; dg < ce; dg++) {
+                                if (!(dg in buf)) { continue }
+                                split(buf[dg], dgp, "\t")
+                                if (dgp[2] != "&&" && dgp[2] != "||") { continue }
+                                if (!((dg + 1) in buf)) { return 0 }
+                                split(buf[dg + 1], dgq, "\t")
+                                if (dg + 1 == ce || dgq[6] ~ /^(else|elif)([[:space:]]|;|$)/) { return 0 }
+                            }
+                        }
                         if (op == "||") {
                             # 複合の状態は「その中で最後に走ったコマンド」の状態。
                             # 成功しえないなら並びはいつでも失敗する（issue #198 の一部。
@@ -2615,7 +2636,7 @@ ci_workflow_extract() {
                             # **`return 0` ではなく下の枝へ落とす**——本体が読めなくても手前に
                             # 「走ると証明できる」致命的な記録があれば複合はそこで死ぬので
                             # （実測: `|| ( false; if [ -n "$D" ]; then true; fi )` は GATES）
-                            if (rec_unc[ls] == 0 && chain_never_succeeds(rec_txt[ls])) {
+                            if ((!via_opened || rec_unc[ls] == 0) && chain_never_succeeds(rec_txt[ls])) {
                                 # 反転の扱いは素の右辺と同じ（`|| { ! true ; }`。下の `||` の枝を参照）
                                 inv = CHAIN_PROBE_FLIP
                             }
