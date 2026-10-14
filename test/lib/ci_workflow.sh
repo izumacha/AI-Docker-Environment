@@ -1965,8 +1965,10 @@ ci_workflow_extract() {
                 sub(/^[[:space:]]*/, "", s2)
                 if (sub(/^[);]+[[:space:]]*/, "", s2)) { closed = 1 }
                 # **閉じ括弧に付いたリダイレクトは終了状態を変えないのでコマンドに数えない**
-                # （issue #152 のレビュー指摘。`) >/dev/null` を「後ろにコマンドがある」と
-                #  読むと引き上げを見送り、正しくゲートしている綴りを未配線と報告した＝実測）
+                # （issue #152 のレビュー指摘。当時の消費側は引き上げで、`) >/dev/null` を
+                #  「後ろにコマンドがある」と読むと引き上げを見送っていた——**その機構は
+                #  issue #199 で削除した**ので、いま同じ取り違えが出る先は上の 3 つのうち
+                #  「ステップ最後のコマンドの照会」で、向きは変わらず fail-closed＝実測）
                 # **ただし閉じ括弧を伴わない裸のリダイレクトは 1 つのコマンド**で、`$?` を 0 に
                 # する（レビュー指摘、実測）。区別しないと `bash <スイート> && echo ok` の次の行に
                 # `> out` だけを置いた形で「連鎖がステップの最後」と読まれ、握り潰された実行が
@@ -2774,7 +2776,7 @@ ci_workflow_extract() {
             scope_op[scope_serial] = ""
             scope_close_at[scope_serial] = 0
         }
-        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, k, fndef, fndef_at, struct_text, set_probe, set_open_n, set_crossed_sub, set_sub, set_res_at, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, closed_any, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fnexit, fnret, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, closed_subshell, closed_uncertain, chain_in, inverted, arm_masked, arm_at, arm_expected, case_scope, opens_case, opens_case_here, case_opens_at, close_probe, close_rest, close_first, open_head, esac_probe, esac_rest, esac_first, dead_probe, dead_lead, close_n, exit_seen, chain_at, chain_depth, closed_sub_seen, closed_sub_e, closed_sub_p, sub_id, open_stripped, head_inverted, inverted_at, closed_inverted, sub_serial, seg_prev_op, depth_in, cmd_rest, cmd_sub, cmd_fndef, cmd_fnname, cmd_fnat, fn_name_here, esc_probe, esc_sub, sub_lead_in, fn_lead, call_sub, exit_here, exit_sub,
+        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, k, fndef, fndef_at, struct_text, set_probe, set_open_n, set_crossed_sub, set_sub, set_res_at, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fnexit, fnret, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, closed_subshell, closed_uncertain, chain_in, inverted, arm_masked, arm_at, arm_expected, case_scope, opens_case, opens_case_here, case_opens_at, close_probe, close_rest, close_first, open_head, esac_probe, esac_rest, esac_first, dead_probe, dead_lead, close_n, exit_seen, chain_at, chain_depth, closed_sub_seen, closed_sub_e, closed_sub_p, sub_id, open_stripped, head_inverted, inverted_at, closed_inverted, sub_serial, depth_in, cmd_rest, cmd_sub, cmd_fndef, cmd_fnname, cmd_fnat, fn_name_here, esc_probe, esc_sub, sub_lead_in, fn_lead, call_sub, exit_here, exit_sub,
                               cmd_opens, run_depth, rec_at, nclosed_scope, closed_scope, ci) {
             # **シェルのオプションはステップごとにリセットする。** ステップは 1 つずつ
             # 別のシェルで走るので、前のステップの `set +e` / `pipefail` は引き継がれない。
@@ -2921,19 +2923,6 @@ ci_workflow_extract() {
                             else if (prev_op == "&&") { unreachable = (chain_status == "f") }
                             else { unreachable = (chain_status == "t") }
                         }
-                        # この断片が `case` のアーム見出しか。**使う前にここで求める**——
-                        # 下の `set` の判定側で求めると 1 周ずれ、アーム見出しの**次**の断片で
-                        # 生きている記録を誤って捨てる（`a) set +e` の次の `echo m` で消え、
-                        # 同じアームの `set -e` が打ち消せなくなる。実 bash と差分照合して実測）
-                        # **伏せた本文で測る。** 引用の中の `) `（`echo "a) b"`）をアームの移動と
-                        # 読むと、生きている括りの記録を捨てて正しくゲートしているステップを赤くする
-                        # **手前の区切りをこの断片の間ずっと読めるように控える**（issue #193）。
-                        # `prev_op` は記録を書き出したあと（開きを数えるより**前**）に次の値へ
-                        # 進むので、開いた階層へ「`&&` の右辺として開かれたか」を控える側が
-                        # 素直に読むと必ず空になる（実測で入れ子の引き継ぎが 1 形も動かなかった）
-                        seg_prev_op = prev_op
-                        # この断片で実際に階層を閉じたか（下の記録の捨て方に使う）
-                        closed_any = 0
                         # **この断片に入る前のオプションを控える。** 下でこの断片が階層を開いたら
                         # その階層の「入口の姿」として記録し、フォークして閉じたときに巻き戻す
                         # （issue #123 (1)）。断片の**末尾**で開く一方 `set` は断片の**途中**で
@@ -2956,6 +2945,12 @@ ci_workflow_extract() {
                         # 関数定義かどうかは同じ断片の中で変わらないので 1 度だけ求める
                         # （`function_form()` は正規表現を組み立てるので呼び直すと無駄が大きい）
                         fn_form = function_form(struct_text)
+                        # この断片が `case` のアーム見出しか。**使う前にここで求める**——
+                        # 下の `set` の判定側で求めると 1 周ずれ、アーム見出しの**次**の断片で
+                        # 生きている記録を誤って捨てる（`a) set +e` の次の `echo m` で消え、
+                        # 同じアームの `set -e` が打ち消せなくなる。実 bash と差分照合して実測）
+                        # **伏せた本文で測る。** 引用の中の `) `（`echo "a) b"`）をアームの移動と
+                        # 読むと、生きている括りの記録を捨てて正しくゲートしているステップを赤くする
                         # **部分シェルの中ではアーム見出しと読まない。** `split_commands` は
                         # 括弧に関係なく `;` で切るので、`( cd /tmp; echo prep )` の後半は
                         # `echo prep )` という断片になる。これをアーム見出しとして剥がすと
@@ -3868,7 +3863,7 @@ ci_workflow_extract() {
                             closed_entry_e = entry_errexit[depth]; closed_entry_p = entry_pipefail[depth]; closed_entry_seen = 1
                             # 閉じた階層を控える（区切りはこの断片の記録を書くときに入れる）
                             nclosed_scope++; closed_scope[nclosed_scope] = scope_at[depth]
-                            depth--; closed_any = 1
+                            depth--
                         }
                         # **フォークして閉じた複合コマンドの中の `set` は親へ漏れない。**
                         # `while …; do set +e; done | cat` / `{ set +e; } | cat` / `… &` は
@@ -3888,7 +3883,10 @@ ci_workflow_extract() {
                         # 途中にフォークする複合が挟まるだけで `set -e` が打ち消せなくなり、
                         # 正しくゲートしているステップを「未配線」と誤報して赤くする
                         # （fail-closed。レビューで実測）。閉じたブロックの**中**で落とした分は
-                        # すぐ下の `closed_any && weak_depth > depth` が既に捨てている
+                        # 下の `(closed_subshell || closed_uncertain) && weak_depth > depth` が
+                        # 捨てている——**「閉じたら必ず」ではない**（フォークした階層と、走ると
+                        # 証明できない階層だけ）。issue #199 まではここに「どの階層でも閉じたら」と
+                        # 読める旗の名前が書いてあり、内側の `set +e` は常に捨てられると誤読できた
                         # **部分シェルを閉じたら、区切りに関係なく入口の姿へ戻す**（issue #152）。
                         # `( … )` は常に子シェルで走るのでオプションは親へ漏れない。戻さないと
                         # 中の `set +e` が親へ漏れ、正しくゲートしているステップを「握り潰されて
