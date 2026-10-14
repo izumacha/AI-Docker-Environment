@@ -7405,6 +7405,317 @@ jobs:
           echo x
           } )"
 
+# **ここから下はレビュー指摘で見つけた 3 つの穴**（どれも実 `bash -e` と突き合わせて実測）。
+# (1) 走らない記録を「最後に走ったコマンド」に数えると、`||` の右辺の到達不能な `exit 1` を
+#     「成功しえない右辺」と読んで握り潰しを配線と答える（fail-open）。
+# (2) 1 断片で入れ子をまとめて閉じたとき、内側の階層にも断片の区切りを付けると、歩きが
+#     内側を出た時点で `&&` を拾って「吸われた」と判断し、まだ部分シェルを出ていないのに
+#     位置の判定を省く（fail-closed）。
+# (3) `||` の右辺が複合のとき「最後のコマンドが成功しえない」だけでは足りない——手前に
+#     成功して抜ける脱出（`exit 0`）があれば並びは成功する（fail-open）。
+
+assert_swallowed "|| の右辺の通らない exit は最後のコマンドではない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || (
+          if false; then
+          exit 1
+          fi
+          )"
+
+assert_swallowed "|| の右辺の通らない exit（グループ）も数えない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || {
+          if false; then
+          exit 1
+          fi
+          }"
+
+assert_swallowed "|| の右辺が通らない exit で終わるなら握り潰し" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || (
+          echo x
+          if false; then
+          exit 1
+          fi
+          )"
+
+assert_wired "|| の右辺の通る exit は成功しえないので届く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || (
+          if true; then
+          exit 1
+          fi
+          )"
+
+assert_swallowed "|| の右辺は手前の exit 0 で成功しうる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || (
+          exit 0
+          exit 1
+          )"
+
+assert_swallowed "|| の右辺の exit 0 は 1 行書きでも成功しうる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || ( exit 0; exit 1 )"
+
+assert_swallowed "|| の右辺のグループの exit 0 も部分シェルを抜ける" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || {
+          exit 0
+          exit 1
+          }"
+
+assert_swallowed "|| の右辺の中のグループの exit 0 も外側を抜ける" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || (
+          { exit 0; }
+          exit 1
+          )"
+
+assert_swallowed "|| の右辺のアームの通る exit 0 でも成功しうる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || (
+          if true; then
+          exit 0
+          fi
+          exit 1
+          )"
+
+assert_wired "|| の右辺の引数なしの exit は成功しうるが最後なら届く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || (
+          exit
+          exit 1
+          )"
+
+assert_wired "|| の右辺の手前の exit が非 0 なら並びは失敗する" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || (
+          exit 2
+          exit 1
+          )"
+
+assert_wired "|| の右辺の手前が普通のコマンドなら最後の exit で失敗する" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || (
+          echo x
+          exit 1
+          )"
+
+assert_wired "|| の右辺の定義しただけの本文の exit 0 は抜けない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || (
+          f() { exit 0; }
+          exit 1
+          )"
+
+assert_wired "入れ子をまとめて閉じた部分シェルは && の左辺でも届く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ( { bash ${SUITE_PATH} ; } ) && echo ok"
+
+assert_wired "入れ子をまとめて閉じたアームも && の左辺で届く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ( if true; then bash ${SUITE_PATH}; fi ) && echo ok"
+
+assert_wired "部分シェルを二重に閉じた断片も && の左辺で届く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ( ( bash ${SUITE_PATH} ; ) ) && echo ok"
+
+assert_wired "部分シェルとグループを混ぜて閉じた断片も届く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ( ( { bash ${SUITE_PATH} ; } ) ) && echo ok"
+
+assert_wired "入れ子をまとめて閉じた部分シェルは pipefail のパイプでも届く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          set -o pipefail
+          ( { bash ${SUITE_PATH} ; } ) | cat"
+
+assert_swallowed "入れ子をまとめて閉じても後ろにコマンドがあれば握り潰し" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ( { bash ${SUITE_PATH} ; } ) && echo ok"
+
+assert_wired "|| の右辺の入れ子の部分シェルの exit 0 は外側を抜けない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || (
+          (
+          exit 0
+          )
+          exit 1
+          )
+          echo done"
+
+assert_wired "|| の右辺の通らないアームの exit 0 は印を付けない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || (
+          if false; then
+          exit 0
+          fi
+          exit 1
+          )
+          echo done"
+
+# **閉じていない複合の右辺は読めないので握り潰し側へ倒す。** 閉じ語の無い綴り
+# （bash の構文エラーでスイートは 1 行も走らない）で連鎖の歩きを進めると、閉じた位置が
+# 読めないまま外へ出て「失敗が伝わる」と答える（真値 NOGATE なのに wired ＝fail-open。実測）
+assert_not_wired "閉じていないグループを && の右辺に置いた形は配線と読まない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} && {
+          echo x"
+
+assert_not_wired "閉じていない部分シェルを || の右辺に置いた形も配線と読まない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || (
+          exit 1"
+
+# **連鎖の右辺はステップをまたがない。** `run:` はステップごとに別のシェルで走るので、
+# 末尾に区切りだけが残った綴り（bash の構文エラーでスイートは 1 行も走らない）の
+# 右辺を次のステップの先頭から拾ってはいけない（真値 NOGATE。拾うと「成功しえない右辺」と
+# 読んで wired ＝fail-open になる。実測で `main` も not-wired）
+assert_not_wired "連鎖の右辺を次のステップから拾わない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} &&
+      - name: next
+        run: |
+          exit 1"
+
+# **残る境界（fail-closed・`main` と同じ答え）**: `||` の右辺の中で**部分シェルに包んだ**
+# `exit 0` を 1 行で書く綴り（`( ( exit 0 ); exit 1 )`）は、包んだ部分シェルが同じ断片で
+# 開いて閉じるため記録が**外側の階層**に載り、「外側を抜ける脱出」と読んで握り潰し側へ倒れる
+# （真値 GATES・`main` も not-wired）。包みを見分けるには断片の中の括弧の対応を
+# 読む必要があり、綴りを数える近似を増やすより安全側に倒すほうを採った
+assert_swallowed "包んだ exit 0 は安全側に倒す（残る境界）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || (
+          ( exit 0 )
+          exit 1
+          )"
+
+
 # --- ヒアドキュメントの終端判定（bash と同じ厳しさで読む / issue #108）------------------
 #
 # 終端の判定が bash より緩いと、**本文（＝実行されない文字列）が「実行されるコマンド」に化ける**。
