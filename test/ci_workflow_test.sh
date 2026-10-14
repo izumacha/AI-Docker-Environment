@@ -127,6 +127,19 @@ assert_wired() { assert_verdict "wired" "$@"; }
 # 「配線されていない（あるいは合否に効かない）」と判定されるべき合成ワークフローを検査する
 assert_not_wired() { assert_verdict "not-wired" "$@"; }
 
+# **握り潰しのピン**（`set +e` などで失敗が外へ出ないこと）は、スイートの**後ろに 1 行足して**
+# 判定する。`run:` の終了状態は「最後に走ったコマンドの状態」なので、スイートが最後の行だと
+# 握り潰しても失敗はそのままステップの終了状態になる（実 `bash -e` で GATES。issue #175 /
+# #189 がこの fail-closed を挙げていた）。後ろに 1 行足せば握り潰しが観測でき、しかも
+# **errexit が生きていれば位置に関わらず伝わる**ので、このピンは「`set` を読めているか」を
+# 以前より強く固定する（読めていなければ errexit がその場で落とす＝wired になって落ちる）。
+# 足す行は最後の行と同じ字下げに合わせる（`run: |` の中に収める）
+assert_swallowed() {
+    local workflow="$2" indent
+    indent="$(printf '%s' "${workflow##*$'\n'}" | sed 's/[^ ].*//')"
+    assert_verdict "not-wired" "$1" "${workflow}"$'\n'"${indent}echo done" "${3-}"
+}
+
 # 何も特別なことをしていない土台。ジョブ名の絞り込みなど、書き方の違いが関係しないケースで使う
 BASE_WORKFLOW="name: ci
 jobs:
@@ -145,6 +158,12 @@ assert_wired "ジョブ名で絞り込んでも読まれる" "${BASE_WORKFLOW}" 
 assert_not_wired "別のジョブ名で絞り込むと読まれない" "${BASE_WORKFLOW}" "e2e"
 
 # --- シェルの指定（既定の `bash -e` から外れると合否に効かない） --------------------
+#
+# **この節の握り潰しのピンは `run:` を 2 行にする**（`assert_swallowed` と同じ理由）。
+# 自前テンプレート（`bash {0}`）は `-e` を外すだけで、スクリプトの終了状態は
+# 「最後に走ったコマンドの状態」のままなので、1 行しかないと**スイートの失敗はそのまま
+# ステップの失敗になる**（実測）。後ろに 1 行足すと `-e` が無いことが観測でき、
+# 既定シェル（`-e` あり）との違いが出る
 
 assert_not_wired "ステップの shell: が自前テンプレート（-e が消える）" "name: ci
 jobs:
@@ -153,7 +172,9 @@ jobs:
     steps:
       - name: subject
         shell: bash {0}
-        run: bash ${SUITE_PATH}"
+        run: |
+          bash ${SUITE_PATH}
+          echo done"
 
 assert_wired "ステップの shell: bash（-e を含むキーワード形式）" "name: ci
 jobs:
@@ -208,7 +229,9 @@ jobs:
         shell: bash {0}
     steps:
       - name: subject
-        run: bash ${SUITE_PATH}"
+        run: |
+          bash ${SUITE_PATH}
+          echo done"
 
 assert_not_wired "ワークフローの defaults: が自前テンプレート" "name: ci
 defaults:
@@ -219,7 +242,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: subject
-        run: bash ${SUITE_PATH}"
+        run: |
+          bash ${SUITE_PATH}
+          echo done"
 
 assert_not_wired "defaults: が jobs: の後ろにあっても効く（キー順は自由）" "name: ci
 jobs:
@@ -227,7 +252,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: subject
-        run: bash ${SUITE_PATH}
+        run: |
+          bash ${SUITE_PATH}
+          echo done
 defaults:
   run:
     shell: bash {0}"
@@ -239,7 +266,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: subject
-        run: bash ${SUITE_PATH}"
+        run: |
+          bash ${SUITE_PATH}
+          echo done"
 
 assert_wired "ジョブの defaults: が bash キーワードなら効く" "name: ci
 jobs:
@@ -258,7 +287,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: subject
-        run: bash ${SUITE_PATH}
+        run: |
+          bash ${SUITE_PATH}
+          echo done
       - name: trailing
         run: echo done
     defaults:
@@ -403,7 +434,7 @@ jobs:
       - name: subject
         run: bash ${SUITE_PATH} > log 2>&1"
 
-assert_not_wired "set +ex で errexit が落ちている" "name: ci
+assert_swallowed "set +ex で errexit が落ちている" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -483,7 +514,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: subject
-        run: bash ${SUITE_PATH}"
+        run: |
+          bash ${SUITE_PATH}
+          echo done"
 
 assert_not_wired "ジョブの defaults: の run: がフロー形式" "name: ci
 jobs:
@@ -493,7 +526,9 @@ jobs:
       run: {shell: bash {0}}
     steps:
       - name: subject
-        run: bash ${SUITE_PATH}"
+        run: |
+          bash ${SUITE_PATH}
+          echo done"
 
 assert_not_wired "引用符付きの鍵（\"shell\": 自前テンプレート）" "name: ci
 jobs:
@@ -502,7 +537,9 @@ jobs:
     steps:
       - name: subject
         \"shell\": bash {0}
-        run: bash ${SUITE_PATH}"
+        run: |
+          bash ${SUITE_PATH}
+          echo done"
 
 assert_wired "steps: より前の入れ子に defaults という名前があってもよい" "name: ci
 jobs:
@@ -858,7 +895,7 @@ jobs:
           ( cd /tmp; echo hi )
           bash ${SUITE_PATH}"
 
-assert_not_wired "通らない分岐の set -e は握り潰しを隠さない" "name: ci
+assert_swallowed "通らない分岐の set -e は握り潰しを隠さない" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -881,7 +918,7 @@ jobs:
 # 穴の側: `$CI` は GitHub Actions で**常に設定されている**ので、この `set +e` は必ず走る。
 # 以前はこれを「走るか分からない」として無視しており、3 行足すだけでスイートの失敗を
 # 握り潰しながら全表明を緑のまま通せた（`continue-on-error: true` と同じ効果）
-assert_not_wired "通るか分からない分岐の set +e も握り潰しとして数える" "name: ci
+assert_swallowed "通るか分からない分岐の set +e も握り潰しとして数える" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -896,7 +933,7 @@ jobs:
 # 締めすぎの側（許容している代償）: この分岐は通らないかもしれないので、実際には
 # ゲートしている可能性がある。それでも「未配線」と読むのは、外したときに CI が赤くなって
 # 人が見る fail-closed 側だから。**この期待値が緑のまま裏返ったら穴が開いている**
-assert_not_wired "通らないかもしれない分岐の set +e は安全側に倒して数える" "name: ci
+assert_swallowed "通らないかもしれない分岐の set +e は安全側に倒して数える" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -910,7 +947,7 @@ jobs:
 
 # 強める向きは非対称に扱う: 制御構造の中の `set -e` は今までどおり反映しない。
 # 反映すると、通らない分岐の `set -e` が外側の握り潰しを隠す（fail-open）
-assert_not_wired "通るか分からない分岐の set -e は握り潰しを打ち消さない" "name: ci
+assert_swallowed "通るか分からない分岐の set -e は握り潰しを打ち消さない" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -924,7 +961,7 @@ jobs:
           bash ${SUITE_PATH}"
 
 # 長い綴り（POSIX 形式）でも同じ非対称性が効くことを固定する
-assert_not_wired "制御構造の中の set +o errexit も握り潰しとして数える" "name: ci
+assert_swallowed "制御構造の中の set +o errexit も握り潰しとして数える" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -981,7 +1018,7 @@ jobs:
 # `split_commands` が `;` で切るため、断片の本文は `then set +e` / `do set +e` になる。
 # `^set` だけで探すと当たらず、**同じ意味を 1 行に畳むだけ**で握り潰しが見えなくなる
 
-assert_not_wired "1 行の if …; then set +e; fi も握り潰しとして数える" "name: ci
+assert_swallowed "1 行の if …; then set +e; fi も握り潰しとして数える" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -991,7 +1028,7 @@ jobs:
           if [ -n \"${DOLLAR}CI\" ]; then set +e; fi
           bash ${SUITE_PATH}"
 
-assert_not_wired "1 行の for …; do set +e; done も握り潰しとして数える" "name: ci
+assert_swallowed "1 行の for …; do set +e; done も握り潰しとして数える" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -1003,7 +1040,7 @@ jobs:
 
 # ブレースグループは条件を持たず**無条件に走る**ので、これを見落とすと
 # 1 行足すだけで確実にゲートを外せる（分岐より短い最悪の綴り）
-assert_not_wired "ブレースグループの中の set +e は無条件に効く" "name: ci
+assert_swallowed "ブレースグループの中の set +e は無条件に効く" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -1014,7 +1051,7 @@ jobs:
           bash ${SUITE_PATH}"
 
 # `if false` の**else 側は必ず走る**。偽の印を持ち越すと 1 行で握り潰しを隠せる
-assert_not_wired "偽と分かる条件の else 側の set +e は効く" "name: ci
+assert_swallowed "偽と分かる条件の else 側の set +e は効く" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -1066,7 +1103,7 @@ jobs:
           set +e -e
           bash ${SUITE_PATH}"
 
-assert_not_wired "set -e +e は後ろの +e が勝つ" "name: ci
+assert_swallowed "set -e +e は後ろの +e が勝つ" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -1127,7 +1164,7 @@ jobs:
 # 綴りを 1 つずつ足す限り必ず漏れるので、**置けなかった `set` は
 # 「弱める向きだけ反映する」** に倒す（強める向きは決して信用しない）
 
-assert_not_wired "1 行の then の中のブレースグループの set +e" "name: ci
+assert_swallowed "1 行の then の中のブレースグループの set +e" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -1137,7 +1174,7 @@ jobs:
           if [ -n \"${DOLLAR}CI\" ]; then { set +e; }; fi
           bash ${SUITE_PATH}"
 
-assert_not_wired "1 行の case アームの中の set +e" "name: ci
+assert_swallowed "1 行の case アームの中の set +e" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -1174,7 +1211,7 @@ jobs:
 
 # `&&` の右は条件次第でしか走らないのに `uncertain` は 0 のまま。
 # ここで強める向きを信用すると、握り潰しを打ち消したように見える（fail-open）
-assert_not_wired "&& で守られた set -e は握り潰しを打ち消さない" "name: ci
+assert_swallowed "&& で守られた set -e は握り潰しを打ち消さない" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -1215,7 +1252,7 @@ jobs:
 
 # `elif` を挟んでも印は残る。**偽の解除を先に見ると**、直前に付けた
 # 「真と分かる条件だから走らない」印が 2 語足すだけで解除される
-assert_not_wired "真と分かる条件は elif を挟んでも残りのアームが走らない" "name: ci
+assert_swallowed "真と分かる条件は elif を挟んでも残りのアームが走らない" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -1229,7 +1266,7 @@ jobs:
 # --- 子シェルで走る `set`（親のオプションは変わらない） ------------------------------
 
 # パイプの構成要素は子シェルなので、親の握り潰しは打ち消されない
-assert_not_wired "パイプの中の set -e は親の握り潰しを打ち消さない" "name: ci
+assert_swallowed "パイプの中の set -e は親の握り潰しを打ち消さない" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -1241,7 +1278,7 @@ jobs:
           bash ${SUITE_PATH}"
 
 # バックグラウンドも同じく子シェル
-assert_not_wired "バックグラウンドの set -e は親の握り潰しを打ち消さない" "name: ci
+assert_swallowed "バックグラウンドの set -e は親の握り潰しを打ち消さない" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -1257,7 +1294,7 @@ jobs:
 
 # `case` のアームは POSIX で先頭に `(` を書ける。単に `(` の有無で部分シェルと
 # 見なすと、1 文字足すだけで握り潰しが見えなくなる
-assert_not_wired "先頭に ( を書いた case アームの set +e" "name: ci
+assert_swallowed "先頭に ( を書いた case アームの set +e" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -1272,7 +1309,7 @@ jobs:
 
 # --- 引用符付きのオプション（bash には同じ意味） ------------------------------------
 
-assert_not_wired "set \"+e\" は set +e と同じ" "name: ci
+assert_swallowed "set \"+e\" は set +e と同じ" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -1346,7 +1383,7 @@ jobs:
 # 「常に反映する」実装でも半分が緑になり、検出網として働かない。
 
 # 呼ばれた時点で握り潰しが効く（3 綴りすべてで同じ答えになること）
-assert_not_wired "1 行で定義した関数を呼ぶと本文の set +e が効く" "name: ci
+assert_swallowed "1 行で定義した関数を呼ぶと本文の set +e が効く" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -1357,7 +1394,7 @@ jobs:
           f
           bash ${SUITE_PATH}"
 
-assert_not_wired "複数行で定義した関数を呼ぶと本文の set +e が効く" "name: ci
+assert_swallowed "複数行で定義した関数を呼ぶと本文の set +e が効く" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -1370,7 +1407,7 @@ jobs:
           f
           bash ${SUITE_PATH}"
 
-assert_not_wired "function 綴りで定義した関数を呼んでも効く" "name: ci
+assert_swallowed "function 綴りで定義した関数を呼んでも効く" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -1382,7 +1419,7 @@ jobs:
           bash ${SUITE_PATH}"
 
 # 長い綴りでも同じ。片方だけ控えると、`+e` を `+o errexit` に書き換えるだけで素通りする
-assert_not_wired "set +o errexit を持つ関数を呼んでも効く" "name: ci
+assert_swallowed "set +o errexit を持つ関数を呼んでも効く" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -1394,7 +1431,7 @@ jobs:
           bash ${SUITE_PATH}"
 
 # 引数付きの呼び出しも呼び出し（`f` だけを呼び出しと読むと 1 語足すだけで素通りする）
-assert_not_wired "引数を付けて呼んでも本文の set +e が効く" "name: ci
+assert_swallowed "引数を付けて呼んでも本文の set +e が効く" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -1406,7 +1443,7 @@ jobs:
           bash ${SUITE_PATH}"
 
 # 継続語の後ろの呼び出しも呼び出し。`then` を関数名と読むと 3 行で素通りする
-assert_not_wired "then の後ろで呼んでも本文の set +e が効く" "name: ci
+assert_swallowed "then の後ろで呼んでも本文の set +e が効く" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -1523,7 +1560,7 @@ jobs:
 # **強める向きは呼び出しでも信用しない。** 実 bash はここでゲートするが、
 # 反映すると「呼ばれるとは限らない関数の `set -e`」が外側の握り潰しを隠せてしまう
 # （fail-open）。`set` 本体で採っている非対称の扱いと揃え、fail-closed 側へ倒す
-assert_not_wired "本文が set -e の関数を呼んでも強める向きは credit しない" "name: ci
+assert_swallowed "本文が set -e の関数を呼んでも強める向きは credit しない" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -1541,7 +1578,7 @@ jobs:
 # `{ f; }` は 2 文字の抜け道だった（レビューで実測。fail-open）。
 # 期待値はすべて実 `bash -e` との差分照合で確かめてある。
 
-assert_not_wired "ブレースグループ越しの呼び出しでも効く" "name: ci
+assert_swallowed "ブレースグループ越しの呼び出しでも効く" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -1552,7 +1589,7 @@ jobs:
           { f; }
           bash ${SUITE_PATH}"
 
-assert_not_wired "! を前置きした呼び出しでも効く" "name: ci
+assert_swallowed "! を前置きした呼び出しでも効く" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -1563,7 +1600,7 @@ jobs:
           ! f
           bash ${SUITE_PATH}"
 
-assert_not_wired "eval 越しの呼び出しでも効く" "name: ci
+assert_swallowed "eval 越しの呼び出しでも効く" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -1574,7 +1611,7 @@ jobs:
           eval f
           bash ${SUITE_PATH}"
 
-assert_not_wired "time 越しの呼び出しでも効く" "name: ci
+assert_swallowed "time 越しの呼び出しでも効く" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -1585,7 +1622,7 @@ jobs:
           time f
           bash ${SUITE_PATH}"
 
-assert_not_wired "変数代入を前置きした呼び出しでも効く" "name: ci
+assert_swallowed "変数代入を前置きした呼び出しでも効く" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -1789,7 +1826,7 @@ jobs:
           bash ${SUITE_PATH}"
 
 # 逆向きも対で固定する（後から弱める本文へ差し替えたら、そちらが効く）
-assert_not_wired "定義し直して弱めるようになれば効く" "name: ci
+assert_swallowed "定義し直して弱めるようになれば効く" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -1803,7 +1840,7 @@ jobs:
 
 # 穴の側: **条件の中で戻す**綴りは打ち消さない（走るとは限らないため）。
 # 打ち消すと、実際には握り潰されている呼び出しが「ゲートしている」と読まれる
-assert_not_wired "条件の中でしか戻さない関数は打ち消しにならない" "name: ci
+assert_swallowed "条件の中でしか戻さない関数は打ち消しにならない" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -1838,7 +1875,7 @@ jobs:
 # 剥がすのは `set` と呼び出しを探す側だけで、`struct_text` では剥がさない
 # （あちらは `if` が 1 階層開くことを数えるための本文。剥がすと深さの勘定が壊れる）。
 
-assert_not_wired "条件の位置の set +e も効く（if）" "name: ci
+assert_swallowed "条件の位置の set +e も効く（if）" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -1848,7 +1885,7 @@ jobs:
           if set +e; then :; fi
           bash ${SUITE_PATH}"
 
-assert_not_wired "条件の位置の set +e も効く（while）" "name: ci
+assert_swallowed "条件の位置の set +e も効く（while）" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -1858,7 +1895,7 @@ jobs:
           while set +e; do break; done
           bash ${SUITE_PATH}"
 
-assert_not_wired "条件の位置の set +e も効く（until）" "name: ci
+assert_swallowed "条件の位置の set +e も効く（until）" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -1868,7 +1905,7 @@ jobs:
           until set +e; do break; done
           bash ${SUITE_PATH}"
 
-assert_not_wired "条件の位置の set +e も効く（elif）" "name: ci
+assert_swallowed "条件の位置の set +e も効く（elif）" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -1879,7 +1916,7 @@ jobs:
           bash ${SUITE_PATH}"
 
 # 呼び出しも同じ位置に書ける（剥がす一覧を共有していないと 3 トークンで抜けられる）
-assert_not_wired "条件の位置の呼び出しでも本文の set +e が効く" "name: ci
+assert_swallowed "条件の位置の呼び出しでも本文の set +e が効く" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -1890,7 +1927,7 @@ jobs:
           if f; then :; fi
           bash ${SUITE_PATH}"
 
-assert_not_wired "while の条件で呼んでも本文の set +e が効く" "name: ci
+assert_swallowed "while の条件で呼んでも本文の set +e が効く" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -1902,7 +1939,7 @@ jobs:
           bash ${SUITE_PATH}"
 
 # 締めすぎの側: 強める向きは条件の位置でも credit しない（条件次第でしか走らない）
-assert_not_wired "条件の位置の set -e は打ち消しに使わない" "name: ci
+assert_swallowed "条件の位置の set -e は打ち消しに使わない" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -1933,7 +1970,7 @@ jobs:
 # （`(` を 1 つ足すだけで塞いだ穴が開き直す。レビューで検出。fail-open）。
 # 同じ綴りを 2 行に分けた場合は元から正しく扱えるので、対で固定する。
 
-assert_not_wired "1 行の POSIX アームの後ろの呼び出しでも効く" "name: ci
+assert_swallowed "1 行の POSIX アームの後ろの呼び出しでも効く" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -1944,7 +1981,7 @@ jobs:
           case linux in (linux) f ;; esac
           bash ${SUITE_PATH}"
 
-assert_not_wired "2 行に分けた POSIX アームでも効く" "name: ci
+assert_swallowed "2 行に分けた POSIX アームでも効く" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -1985,7 +2022,7 @@ jobs:
 # `[^)]*` が `\$(` を跨いで `f \$(date)` のような呼び出しを丸ごと消してしまい、
 # 弱めが反映されない（握り潰されたスイートが「ゲートしている」と読まれる fail-open。
 # レビューで実測。1 度この形で入れて即座に検出された）
-assert_not_wired "アームの中身の呼び出しは引数のコマンド置換で消えない" "name: ci
+assert_swallowed "アームの中身の呼び出しは引数のコマンド置換で消えない" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -2006,7 +2043,7 @@ jobs:
 # （＝存在自体を見落とす。fail-open）。複数行で書いた同じコードは正しく扱えるので、
 # **1 行に畳むだけで穴が開く**形だった。
 
-assert_not_wired "入れ子の 1 行定義でも呼べば set +e が効く" "name: ci
+assert_swallowed "入れ子の 1 行定義でも呼べば set +e が効く" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -2058,7 +2095,7 @@ jobs:
 # `^` で錨を打つ判定が継続語を剥がさないと、内側の `if false` が丸ごと見えず、
 # **走らないブロックの中の `set -e` が最上位で走ったように扱われる**（fail-open）
 
-assert_not_wired "1 行で入れ子にした if false の中の set -e は効かない" "name: ci
+assert_swallowed "1 行で入れ子にした if false の中の set -e は効かない" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -2069,7 +2106,7 @@ jobs:
           if true; then if false; then set -e; fi; fi
           bash ${SUITE_PATH}"
 
-assert_not_wired "1 行で入れ子にした while false の中の set -e は効かない" "name: ci
+assert_swallowed "1 行で入れ子にした while false の中の set -e は効かない" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -2082,7 +2119,7 @@ jobs:
 
 # ブレースグループと開き語が同じ断片に載る綴り。剥がした側に開き語が混ざるので、
 # **強める向きは断片の先頭そのもののときだけ**信用する
-assert_not_wired "ブレースグループの中に 1 行で入れ子にした if false" "name: ci
+assert_swallowed "ブレースグループの中に 1 行で入れ子にした if false" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -2095,7 +2132,7 @@ jobs:
 
 # `else` は**内側の if** に結び付く。外側の `if true` の印に吸われると、
 # 実際には走る set +e が握り潰しとして数えられない
-assert_not_wired "入れ子の else は内側の if に結び付く" "name: ci
+assert_swallowed "入れ子の else は内側の if に結び付く" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -2118,7 +2155,7 @@ jobs:
 
 # 見出しの次の行が `{ set -e; }` の綴り。予約の消費を set の判定より後に置くと、
 # まだ fndef が立っていない状態で定義の本文を最上位のコードとして読む
-assert_not_wired "見出しの次の行の { set -e; } は定義の本文" "name: ci
+assert_swallowed "見出しの次の行の { set -e; } は定義の本文" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -2142,7 +2179,7 @@ jobs:
           set -Eeuo pipefail
           bash ${SUITE_PATH} | tee log"
 
-assert_not_wired "set +eE は errexit を落とす" "name: ci
+assert_swallowed "set +eE は errexit を落とす" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -2179,7 +2216,7 @@ jobs:
 # --- 同じ組み込みを呼ぶ書き方（現在のシェルで効く） --------------------------------
 
 # `eval` は現在のシェルで走るので、引用の中身も本物の `set`
-assert_not_wired "eval \"set +e\" は現在のシェルで効く" "name: ci
+assert_swallowed "eval \"set +e\" は現在のシェルで効く" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -2189,7 +2226,7 @@ jobs:
           eval \"set +e\"
           bash ${SUITE_PATH}"
 
-assert_not_wired "builtin set +e も同じ組み込み" "name: ci
+assert_swallowed "builtin set +e も同じ組み込み" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -2199,7 +2236,7 @@ jobs:
           builtin set +e
           bash ${SUITE_PATH}"
 
-assert_not_wired "command set +e も同じ組み込み" "name: ci
+assert_swallowed "command set +e も同じ組み込み" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -2240,7 +2277,7 @@ jobs:
           bash ${SUITE_PATH}"
 
 # 締めすぎない代わりに、**外側**の握り潰しは隠さない（階層が違えば戻せない）
-assert_not_wired "外側の set +e は内側の set -e で戻らない" "name: ci
+assert_swallowed "外側の set +e は内側の set -e で戻らない" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -2252,7 +2289,7 @@ jobs:
           bash ${SUITE_PATH}"
 
 # 別のブロックへ持ち越さない（階層の数字が同じでも別のブロック）
-assert_not_wired "別ブロックの同じ深さの set -e では戻らない" "name: ci
+assert_swallowed "別ブロックの同じ深さの set -e では戻らない" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -2281,7 +2318,7 @@ jobs:
 
 # --- 丸括弧付きの case アームは 1 行書きでも拾う -----------------------------------
 
-assert_not_wired "case … in (a) set +e を 1 行で書いた綴り" "name: ci
+assert_swallowed "case … in (a) set +e を 1 行で書いた綴り" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -2294,7 +2331,7 @@ jobs:
 
 # 打ち消しは「有効へ戻す」だけで、**外側でまだ効いている握り潰しは消さない**。
 # 内側の `set +e` に記録を上書きさせると、外側の `set +e` ごと消える（fail-open）
-assert_not_wired "内側の括りは外側の set +e を消さない" "name: ci
+assert_swallowed "内側の括りは外側の set +e を消さない" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -2337,7 +2374,7 @@ jobs:
           done || true"
 
 # **最初の非オプション語でオプションの解釈は終わる**（後ろは位置パラメータ）
-assert_not_wired "set +e foo -e の -e は位置パラメータ" "name: ci
+assert_swallowed "set +e foo -e の -e は位置パラメータ" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -2353,7 +2390,7 @@ jobs:
 # **1 つの断片が開き語を 2 つ運ぶ**綴りがあり、そのときの `uncertain` は内側をまだ数えていない。
 # そこで強める向きは「`set` が断片の先頭そのもの」のときだけ信用する側に倒してある。
 # 向きは fail-closed（CI が赤くなって人が見る）。直すなら 1 断片で複数の階層を開けるようにする
-assert_not_wired "既知の残件: ブレースグループの中の set -e は credit しない" "name: ci
+assert_swallowed "既知の残件: ブレースグループの中の set -e は credit しない" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -2376,7 +2413,8 @@ jobs:
         run: |
           EMPTY=\"\"
           for f in ${DOLLAR}EMPTY; do set +e; :; set -e; done
-          bash ${SUITE_PATH}"
+          bash ${SUITE_PATH}
+          echo done"
 
 # 括りの記録は errexit のものなので、pipefail の判断には使わない。
 # 巻き込むと、無関係な set +e が同じ階層で開いているだけで
@@ -2403,7 +2441,7 @@ jobs:
 # 同じ深さなので打ち消しが成立してしまい、握り潰されたスイートが
 # 「ゲートしている」と読まれる（fail-open）
 
-assert_not_wired "else 側の set -e は then 側の set +e を打ち消さない" "name: ci
+assert_swallowed "else 側の set -e は then 側の set +e を打ち消さない" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -2418,7 +2456,7 @@ jobs:
           fi
           bash ${SUITE_PATH}"
 
-assert_not_wired "elif 側の set -e も打ち消さない" "name: ci
+assert_swallowed "elif 側の set -e も打ち消さない" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -2432,7 +2470,7 @@ jobs:
           fi
           bash ${SUITE_PATH}"
 
-assert_not_wired "長い綴りでも排他なアームは打ち消し合わない" "name: ci
+assert_swallowed "長い綴りでも排他なアームは打ち消し合わない" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -2447,7 +2485,7 @@ jobs:
           fi
           bash ${SUITE_PATH}"
 
-assert_not_wired "別の case アームの set -e も打ち消さない" "name: ci
+assert_swallowed "別の case アームの set -e も打ち消さない" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -2462,7 +2500,7 @@ jobs:
 
 # 複数行で書いたアームは**それぞれの `set` が断片の先頭**になるので、
 # 1 行書きと違って深さだけでは区別できない（1 行書きだけを固定すると空振りする）
-assert_not_wired "複数行で書いた case アームも打ち消し合わない" "name: ci
+assert_swallowed "複数行で書いた case アームも打ち消し合わない" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -2480,7 +2518,7 @@ jobs:
           bash ${SUITE_PATH}"
 
 # 途中でループを抜ける綴りがあると、括りの後半は走るとは限らない
-assert_not_wired "continue を挟んだ括りは打ち消しにしない" "name: ci
+assert_swallowed "continue を挟んだ括りは打ち消しにしない" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -2495,7 +2533,7 @@ jobs:
           bash ${SUITE_PATH}"
 
 # 主語にコマンド置換があっても本物のアームを取り逃がさない
-assert_not_wired "case の主語がコマンド置換でもアームを見つける" "name: ci
+assert_swallowed "case の主語がコマンド置換でもアームを見つける" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -2506,7 +2544,7 @@ jobs:
           bash ${SUITE_PATH}"
 
 # アーム模様の `|` は選択肢の区切りであってパイプではない
-assert_not_wired "選択肢を持つ case アームの set +e" "name: ci
+assert_swallowed "選択肢を持つ case アームの set +e" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -2532,7 +2570,7 @@ jobs:
 # 括りの記録は**閉じた階層の外へ持ち出さない**。持ち出すと、別のブロックの
 # `set -e` が深さの数字だけで一致して打ち消しを成立させる（複数行で書くと
 # `set_probe == text` の条件も満たしてしまうので、これが最後の砦になる）
-assert_not_wired "閉じたブロックの括り記録は次のブロックへ持ち越さない" "name: ci
+assert_swallowed "閉じたブロックの括り記録は次のブロックへ持ち越さない" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -2549,7 +2587,7 @@ jobs:
 
 # `case` の入れ子数も**継続語を剥がした本文**で数える。`then case … in` の断片で
 # 数え損ねると、アーム模様の `|` がパイプと読まれてアームの中の `set +e` が丸ごと落ちる
-assert_not_wired "継続語の後ろに書いた case のアーム模様も選択肢と読む" "name: ci
+assert_swallowed "継続語の後ろに書いた case のアーム模様も選択肢と読む" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -2559,7 +2597,7 @@ jobs:
           if true; then case \"${DOLLAR}X\" in a|b) set +e ;; esac; fi
           bash ${SUITE_PATH}"
 
-assert_not_wired "ループの中に書いた case でも同じ" "name: ci
+assert_swallowed "ループの中に書いた case でも同じ" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -2620,7 +2658,7 @@ jobs:
           bash ${SUITE_PATH}"
 
 # 締めすぎない側: **届く** continue は今までどおり括りを壊す
-assert_not_wired "届く continue は括りを壊す" "name: ci
+assert_swallowed "届く continue は括りを壊す" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -2950,7 +2988,7 @@ done
 # 落としてよいのはブレースグループ / 変数代入 / `builtin` / `command` / `eval` だけ。
 # アームの中でも同じ判定を通すので、1 トークン足しただけで穴が開かない
 
-assert_not_wired "case アームの中の command set +e" "name: ci
+assert_swallowed "case アームの中の command set +e" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -2960,7 +2998,7 @@ jobs:
           case a in a) command set +e ;; esac
           bash ${SUITE_PATH}"
 
-assert_not_wired "case アームの中のブレースグループの set +e" "name: ci
+assert_swallowed "case アームの中のブレースグループの set +e" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -2970,7 +3008,7 @@ jobs:
           case a in a) { set +e; } ;; esac
           bash ${SUITE_PATH}"
 
-assert_not_wired "ブレースグループの中の eval \"set +e\"" "name: ci
+assert_swallowed "ブレースグループの中の eval \"set +e\"" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -2980,7 +3018,7 @@ jobs:
           { eval \"set +e\"; }
           bash ${SUITE_PATH}"
 
-assert_not_wired "変数代入を前置きした set +e" "name: ci
+assert_swallowed "変数代入を前置きした set +e" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -3064,7 +3102,7 @@ jobs:
 
 # --- 同じシェルのまま set を呼ぶ、残りの綴り --------------------------------------
 
-assert_not_wired "エイリアスを止める \\set +e" "name: ci
+assert_swallowed "エイリアスを止める \\set +e" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -3074,7 +3112,7 @@ jobs:
           \\set +e
           bash ${SUITE_PATH}"
 
-assert_not_wired "終了状態を反転する ! set +e" "name: ci
+assert_swallowed "終了状態を反転する ! set +e" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -3084,7 +3122,7 @@ jobs:
           ! set +e
           bash ${SUITE_PATH}"
 
-assert_not_wired "time set +e" "name: ci
+assert_swallowed "time set +e" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -3094,7 +3132,7 @@ jobs:
           time set +e
           bash ${SUITE_PATH}"
 
-assert_not_wired "先頭に置いたリダイレクト付きの set +e" "name: ci
+assert_swallowed "先頭に置いたリダイレクト付きの set +e" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -3117,7 +3155,7 @@ for redirect_prefix_case in \
     "まとめリダイレクト:&> /dev/null set +e" \
     "ここ文字列:<<< x set +e"
 do
-    assert_not_wired "先頭に置いたリダイレクト付きの set +e（${redirect_prefix_case%%:*}）" "name: ci
+    assert_swallowed "先頭に置いたリダイレクト付きの set +e（${redirect_prefix_case%%:*}）" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -3147,7 +3185,7 @@ jobs:
 # `[^()]*` は `(` を跨げないので、先頭の `(` を任意扱いで明示しないと
 # 丸括弧付きのアームだけ判定から外れ、アーム同士の排他が効かなくなる
 
-assert_not_wired "丸括弧付きの別アームの set -e は打ち消さない" "name: ci
+assert_swallowed "丸括弧付きの別アームの set -e は打ち消さない" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -3198,7 +3236,7 @@ jobs:
 # 部分シェルの中の `)` はアーム見出しではなく閉じ括弧。アームとして剥がすと
 # 釣り合いから消え、`subshell` が 0 に戻らないまま以降の `set +e` が
 # すべて「子シェルの中」として無視される（握り潰しが「ゲート」に化ける）
-assert_not_wired "case アームの中の部分シェルを閉じた後の set +e" "name: ci
+assert_swallowed "case アームの中の部分シェルを閉じた後の set +e" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -3218,7 +3256,7 @@ jobs:
 # 除くのは**短絡で結論が変わりうる向きだけ**。無条件に除くと本当に走らない本体まで
 # 生きていると読み、無条件に印を付けると走る本体の set +e を捨てる（両向きで実測）
 
-assert_not_wired "if false || <条件> の本体の set +e は効く" "name: ci
+assert_swallowed "if false || <条件> の本体の set +e は効く" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -3228,7 +3266,7 @@ jobs:
           if false || true; then set +e; fi
           bash ${SUITE_PATH}"
 
-assert_not_wired "until true && <条件> の本体の set +e も効く" "name: ci
+assert_swallowed "until true && <条件> の本体の set +e も効く" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -3267,7 +3305,7 @@ jobs:
             bash ${SUITE_PATH}
           fi"
 
-assert_not_wired "走らないループの中の 1 行 case も外側を巻き戻さない" "name: ci
+assert_swallowed "走らないループの中の 1 行 case も外側を巻き戻さない" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -3305,7 +3343,7 @@ jobs:
 
 # 締めすぎない側: `case` のアーム模様の `|` はパイプではないので、この印を付けない
 # （付けるとアームの中の set +e が丸ごと落ちて握り潰しを見逃す）
-assert_not_wired "丸括弧付きの選択肢アームの set +e は数える" "name: ci
+assert_swallowed "丸括弧付きの選択肢アームの set +e は数える" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -3525,7 +3563,7 @@ jobs:
 
 # 締めすぎない側: `||` / `&&` / `;` はフォークしないので、握り潰しはそのまま親へ漏れる
 # （実 bash で確認済み。巻き戻す対象を広げると、本物の握り潰しを見逃す fail-open になる）
-assert_not_wired "|| で閉じたブレースグループの set +e は親へ漏れる" "name: ci
+assert_swallowed "|| で閉じたブレースグループの set +e は親へ漏れる" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -3535,7 +3573,7 @@ jobs:
           { set +e; } || true
           bash ${SUITE_PATH}"
 
-assert_not_wired "; で閉じたブレースグループの set +e は親へ漏れる" "name: ci
+assert_swallowed "; で閉じたブレースグループの set +e は親へ漏れる" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -3850,7 +3888,7 @@ for arm_scan_case in \
     "主語にコマンド置換:case ${DOLLAR}(echo linux) in (linux) set +e ;; esac" \
     "入れ子のコマンド置換と複数アーム:case ${DOLLAR}(basename ${DOLLAR}(pwd)) in (a) : ;; (linux) set +e ;; esac"
 do
-    assert_not_wired "アームの走査が終わる（${arm_scan_case%%:*}）" "name: ci
+    assert_swallowed "アームの走査が終わる（${arm_scan_case%%:*}）" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -3874,7 +3912,6 @@ for folded_uncertain_case in \
     "0 回まわるループ:for i in ${DOLLAR}NEVERSET; do bash ${SUITE_PATH}; done" \
     "until true:until true; do bash ${SUITE_PATH}; done" \
     "真と分かる条件の else:if true; then :; else bash ${SUITE_PATH}; fi" \
-    "握り潰した本体:if true; then set +e; bash ${SUITE_PATH}; fi" \
     "連鎖に守られた if true:if true && [ -z \"${DOLLAR}SKIP\" ]; then bash ${SUITE_PATH}; fi"
 do
     assert_not_wired "1 行の${folded_uncertain_case%%:*}の本体は実行の証拠にしない" "name: ci
@@ -3886,6 +3923,19 @@ jobs:
         run: |
           ${folded_uncertain_case#*:}"
 done
+
+# **握り潰した本体は上のループから出してある。** スイートが最後の行だと握り潰しても
+# 失敗がステップの終了状態になるので、このピンは後ろに 1 行足す形（`assert_swallowed`）で
+# 測る。上のループの解説が言う「実 bash では本体が走り失敗はちゃんと中断させる」は
+# 行を足すと成り立たなくなるため、同じループに置けない
+assert_swallowed "1 行の握り潰した本体の本体は実行の証拠にしない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          if true; then set +e; bash ${SUITE_PATH}; fi"
 
 # 上の受け皿が外れると一斉に穴になる形（**件数は書かない**——足すたびにこの数字だけが
 # 古くなる。実際 4 と書いたまま 5 件目が足されていた）。**開き側が読めない語で始まる断片**の
@@ -3986,7 +4036,7 @@ jobs:
 # ここは「閉じた後ろに置いた `set +e` が効く（＝親のオプションを変えられる）」を問うので、
 # 漏れていれば `set +e` が「子シェルの中」として無視されて `wired` に化ける。
 # 3 形とも**レビューの実測で壊れていた**（いずれも fail-open）
-assert_not_wired "部分シェルの case を閉じた後ろの set +e は効く" "name: ci
+assert_swallowed "部分シェルの case を閉じた後ろの set +e は効く" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -4003,7 +4053,7 @@ jobs:
 # 先頭の `(` を越えて `case` を見つけられないと `case_scope` が偽になり、
 # **アーム模様の `(` を部分シェルとして数える補正が働かない**（釣り合いが 1 つ膨らんで
 # 階層が閉じ切らず、以降の `set +e` がすべて無視される）
-assert_not_wired "部分シェルの中の選択肢アームでも釣り合いが戻る" "name: ci
+assert_swallowed "部分シェルの中の選択肢アームでも釣り合いが戻る" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -4633,7 +4683,7 @@ jobs:
 # 「ゲートしている」と読まれる**（実測で、門番を外した版は `wired`。実 bash は NOGATE）。
 # **`f() { ( case $X in (a) … ) }` のような形では固定できない**——あちらは門番の有無に
 # かかわらず `not-wired` なので、置いても何も見張らない（実測）
-assert_not_wired "POSIX の綴りのアーム見出しの後ろの set +e は最上位のまま" "name: ci
+assert_swallowed "POSIX の綴りのアーム見出しの後ろの set +e は最上位のまま" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -4699,7 +4749,7 @@ jobs:
 
 # (4) 1 行の `case x in (a|b) …` が幻の部分シェルを開き、その断片の `set +e` が
 # すべて「子シェルの中」として捨てられていた（fail-open）
-assert_not_wired "1 行の丸括弧付き選択肢アームの set +e は数える" "name: ci
+assert_swallowed "1 行の丸括弧付き選択肢アームの set +e は数える" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -4709,7 +4759,7 @@ jobs:
           case x in (x|y) set +e ;; esac
           bash ${SUITE_PATH}"
 
-assert_not_wired "主語がコマンド置換でも選択肢アームの set +e は数える" "name: ci
+assert_swallowed "主語がコマンド置換でも選択肢アームの set +e は数える" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -4799,7 +4849,7 @@ jobs:
           esac"
 
 # 締めすぎない側: `;;` の**後ろ**は模様の位置なので、そこの丸括弧付き選択肢は今までどおり拾う
-assert_not_wired ";; の後ろの丸括弧付き選択肢アームの set +e は数える" "name: ci
+assert_swallowed ";; の後ろの丸括弧付き選択肢アームの set +e は数える" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -4843,7 +4893,7 @@ jobs:
           }"
 
 # 締めすぎない側: `;&`（フォールスルー）の後ろも模様の位置
-assert_not_wired ";& の後ろの丸括弧付き選択肢アームの set +e は数える" "name: ci
+assert_swallowed ";& の後ろの丸括弧付き選択肢アームの set +e は数える" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -4958,7 +5008,7 @@ jobs:
 # `case_scope` は「先頭が `case` か」ではなく「この断片が `case` を開くか」で見る。
 # 先頭一致だけだと `{ case zz in (zz` / `f() { case zz in (zz` でアーム模様の `(` が
 # 本物の部分シェルとして数えられ、そのアームの `set +e` が捨てられる
-assert_not_wired "ブレースの中の case の丸括弧付き選択肢アーム（同一断片）" "name: ci
+assert_swallowed "ブレースの中の case の丸括弧付き選択肢アーム（同一断片）" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -4968,7 +5018,7 @@ jobs:
           { case zz in (zz|yy) set +e ;; esac; }
           bash ${SUITE_PATH}"
 
-assert_not_wired "関数の中の case の丸括弧付き選択肢アーム（同一断片）" "name: ci
+assert_swallowed "関数の中の case の丸括弧付き選択肢アーム（同一断片）" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -5161,7 +5211,7 @@ jobs:
 
 # 模様を読み切ったかは**一番内側＝最後の** `case … in` で測る。1 行に入れ子で書くと
 # 外側が先に来るので、最初の 1 つで測ると内側のアームの位置が立たない
-assert_not_wired "1 行の入れ子 case でも内側のアームの set +e を数える" "name: ci
+assert_swallowed "1 行の入れ子 case でも内側のアームの set +e を数える" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -5174,7 +5224,7 @@ jobs:
 # 模様の**途中**に来た `esac` は模様であって閉じ語ではない（先頭に来たものだけが
 # 空の `case` の終わり）。深さの走査と `case_depth` の走査の**両方**を揃えないと、
 # 片方だけが数えて `case_scope` が偽になり、本物のアームの `set` が見つからなくなる
-assert_not_wired "模様の途中の esac は閉じ語ではない" "name: ci
+assert_swallowed "模様の途中の esac は閉じ語ではない" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -5186,7 +5236,7 @@ jobs:
           esac
           bash ${SUITE_PATH}"
 
-assert_not_wired "ブレースの中で開いた case の選択肢アームの set +e は数える" "name: ci
+assert_swallowed "ブレースの中で開いた case の選択肢アームの set +e は数える" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -5199,7 +5249,7 @@ jobs:
 # **1 断片の中で入れ子に定義した関数は、外側の名前で台帳に載せる。**
 # `set` を探す側は最奥の本文まで一気に落とした結果を外側の定義の断片で読むので、
 # 内側の名前で控えると記録と参照の名前が食い違い、呼んでも反映されない
-assert_not_wired "入れ子の 1 行定義の本文の set +e も、呼べば効く" "name: ci
+assert_swallowed "入れ子の 1 行定義の本文の set +e も、呼べば効く" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -5276,7 +5326,7 @@ jobs:
 # 台帳の名前は「`set` を探す側がどの名前に帰属させるか」に合わせる。断片の先頭が
 # 定義でないとき（`{ f() { …`）まで外側の名前へ寄せると名無しになり、
 # 記録そのものが落ちて握り潰しが見えなくなる
-assert_not_wired "ブレースの中で開いた定義の本文の set +e も、呼べば効く" "name: ci
+assert_swallowed "ブレースの中で開いた定義の本文の set +e も、呼べば効く" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -5398,7 +5448,7 @@ jobs:
 # 締めすぎない側の裏返し（fail-open の防止）: 本文の中でも**走るとは限らない**階層の
 # `set -e` は打ち消しにならない。台帳の階層を関数の階層まで一気に畳むと、
 # `if [ -n "$X" ]; then set -e; fi` の 4 行で握り潰された関数が「戻している」に化ける
-assert_not_wired "条件の中の set -e は関数の握り潰しを打ち消さない" "name: ci
+assert_swallowed "条件の中の set -e は関数の握り潰しを打ち消さない" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -5416,7 +5466,7 @@ jobs:
           bash ${SUITE_PATH}"
 
 # 最上位で定義した関数の台帳は、無関係な複合コマンドがフォークして閉じても消えない
-assert_not_wired "最上位の定義の台帳はフォークで消えない" "name: ci
+assert_swallowed "最上位の定義の台帳はフォークで消えない" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -5448,7 +5498,7 @@ jobs:
 # 複合コマンドが深さ 0 でフォークして閉じただけで台帳から消え、握り潰されたスイートが
 # 「ゲートしている」と読まれる（レビューで実測）。階層の数値だけでは「この複合の中で
 # 控えたか」を区別できないので、区別できる印を持たせるまでは締めすぎ側で固定する
-assert_not_wired "子シェルの中の set +e も関数の台帳には残る（既知の締めすぎ）" "name: ci
+assert_swallowed "子シェルの中の set +e も関数の台帳には残る（既知の締めすぎ）" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -5465,7 +5515,7 @@ jobs:
 # 1 つも数えられず、後の `esac` が外側の `case` の階層を閉じてしまう。
 # 「模様を消費したか」を `set_arm_here` で代用すると、外側のアームの中で内側の `case` を
 # 開く綴りで真になり、内側の模様（`(p|q)`）を読めずアームの `set +e` が捨てられる
-assert_not_wired "外側のアームの中で開いた case の選択肢アームも読む" "name: ci
+assert_swallowed "外側のアームの中で開いた case の選択肢アームも読む" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -5497,7 +5547,7 @@ jobs:
 # **模様の位置では閉じ語も模様。** `done|other)` の `done` は模様であって
 # `do … done` の閉じではない。閉じ扱いすると `case` の階層をそこで畳み、
 # 直前のアームで見た `set +e` まで巻き戻される
-assert_not_wired "模様の位置の done は閉じ語ではない" "name: ci
+assert_swallowed "模様の位置の done は閉じ語ではない" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -5543,7 +5593,7 @@ jobs:
 # アーム模様の位置も「この断片で `case` の入れ子が増えたか」で見る。
 # `^case` で見ると `{ case x in` の次の行の `(x|y)` を模様と読めず、
 # 幻の部分シェルが開いてアームの `set +e` が捨てられる
-assert_not_wired "ブレースの中で開いた case の次行の選択肢アームも読む" "name: ci
+assert_swallowed "ブレースの中で開いた case の次行の選択肢アームも読む" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -5630,7 +5680,7 @@ jobs:
             bash ${SUITE_PATH}
           )"
 
-assert_not_wired "通る分岐の set +e は握り潰しとして効く" "name: ci
+assert_swallowed "通る分岐の set +e は握り潰しとして効く" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -6005,14 +6055,15 @@ done
 # 実 `bash -e` では伝わる（実測で GATES）。`false` に加えて `exit` / `return` の
 # 失敗で終わる綴りがここに入る（レビュー指摘。除く条件を `false` だけにしていた頃は
 # `|| exit 1` を未配線と報告していた＝正しい配線を赤にする fail-closed）。
-# `exit $rc` のように**読めない引数**も失敗側へ倒す（`||` の枝の `exit` は
-# 失敗を伝えるために書くのがほぼすべて）
+# **引数の終了状態が読めない脱出（`exit $rc`）だけは握り潰し側へ倒す**（下の節。
+# issue #174 で置いた「読めない引数も失敗側へ倒す」を実測で入れ替えた）。
+# **数値リテラルは 256 で割った余りが終了状態**なので `exit 256` は成功して終わる
 for and_pipeline_case in \
     "パイプラインで終わる並びが最後:bash ${SUITE_PATH} && echo ok | cat" \
     "偽と分かる右辺の ||:bash ${SUITE_PATH} && echo ok || false" \
     "失敗で終わる exit が後ろ:bash ${SUITE_PATH} && echo ok || exit 1" \
     "引数の無い exit が後ろ:bash ${SUITE_PATH} && echo ok || exit" \
-    "読めない引数の exit が後ろ:bash ${SUITE_PATH} && echo ok || exit \$rc" \
+    "$? を持ち出す exit が後ろ:bash ${SUITE_PATH} && echo ok || exit \$?" \
     "失敗で終わる return が後ろ:bash ${SUITE_PATH} && echo ok || return 1" \
     "0 の算術コマンドが後ろ:bash ${SUITE_PATH} && echo ok || (( 0 ))" \
     "0 が並ぶ算術コマンドが後ろ:bash ${SUITE_PATH} && echo ok || (( 00 ))" \
@@ -6026,6 +6077,446 @@ jobs:
       - name: subject
         run: |
           ${and_pipeline_case#*:}"
+done
+
+# **引数の終了状態が読めない脱出は「必ず失敗する」と言えないので握り潰し側へ倒す**
+# （レビュー 5 巡目。issue #174 が置いた「読めない引数も失敗側へ倒す」の逆）。
+# `bash <スイート> && echo ok || exit $rc` の真値は**変数の値で変わる**——実測で
+# `rc=0` なら NOGATE・`rc=7` なら GATES。「失敗を伝えるために書くのがほぼすべて」
+# という見立ては書き手の意図としては正しいが、**意図が外れた配備（`$rc` が 0）で
+# 必須スイートが黙ってゲートしなくなる**のはこの照会がいちばん避けたい向きなので、
+# 証明できないものは未配線へ倒す（§9 の「不明なら拒否」）。**よく書く綴りは読めるので
+# 巻き込まれない**: 引数なしの `exit` と `exit $?` は `||` の右辺が走る条件
+# （左辺が落ちた）から必ず非 0 で、数値リテラルも読める。
+# **`exit 256` は成功して終わる**（待機状態は 8 ビットで剰余が 0）ので握り潰し側
+for unreadable_escape_case in \
+    "読めない変数の exit:bash ${SUITE_PATH} && echo ok || exit \$rc" \
+    "波括弧つきの変数の exit:bash ${SUITE_PATH} && echo ok || exit \${code}" \
+    "剰余が 0 になるリテラル:bash ${SUITE_PATH} && echo ok || exit 256" \
+    "剰余が 0 になる大きなリテラル:bash ${SUITE_PATH} && echo ok || exit 512" \
+    "0 を明示した exit:bash ${SUITE_PATH} && echo ok || exit 0"
+do
+    assert_not_wired "読めない・成功して終わる脱出は握り潰し側（${unreadable_escape_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${unreadable_escape_case#*:}"
+done
+
+# **`exit` は errexit の有無も並びの位置も問わずその場でシェルを終える**（レビュー 5 巡目）。
+# 位置と errexit を見ていたため、`set +e` の下や後ろに行がある綴りで**正しくゲートして
+# いるワークフローを赤く**していた（真値はすべて GATES。`main` も未配線＝この PR で
+# 直す側）。**剰余が 0 のリテラルは上の節のとおり除く**
+for exit_ends_shell_case in \
+    "set +e の下の exit 1:set +e
+          bash ${SUITE_PATH} || exit 1
+          echo done" \
+    "set +e の下の引数なし exit:set +e
+          bash ${SUITE_PATH} || exit
+          echo done" \
+    "後ろに行がある exit 1:bash ${SUITE_PATH} || exit 1
+          echo done" \
+    "部分シェルの中の exit 1:( bash ${SUITE_PATH} || exit 1 )
+          echo done"
+do
+    assert_wired "exit は位置と errexit を問わず終わらせる（${exit_ends_shell_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${exit_ends_shell_case#*:}"
+done
+
+# 締めすぎない側: **部分シェルの `exit` が終えるのはその部分シェルだけ**なので、
+# 外で握り潰されれば失敗は伝わらない（実測で NOGATE。`aborts` の印を階層の外へ
+# 持ち越すと「ゲートしている」と読む fail-open になる）
+assert_not_wired "部分シェルの exit を外で握り潰す形は伝わらない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ( bash ${SUITE_PATH} || exit 1 ) || true
+          echo done"
+
+# **`!` で反転した右辺は errexit を発動させない**（レビュー 4 巡目。この PR が入れた fail-open）。
+# 並びはいつでも失敗するが**その場では落ちない**ので、後ろに行があればその行の状態で
+# ステップが終わる（実測で NOGATE。反転を見ないと「1 件も走らないスイートがゲートして
+# いる」と読む）。後ろに行が無ければ並びの状態がそのままステップの状態になる＝GATES
+for inverted_rhs_case in \
+    "反転した true:bash ${SUITE_PATH} || ! true" \
+    "反転した ::bash ${SUITE_PATH} || ! :" \
+    "反転した非 0 の算術:bash ${SUITE_PATH} || ! (( 1 ))" \
+    "ブレースの中で反転:bash ${SUITE_PATH} || { ! true ; }"
+do
+    assert_swallowed "反転した || の右辺は errexit を発動させない（${inverted_rhs_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${inverted_rhs_case#*:}"
+done
+
+assert_wired "反転した || の右辺が最後ならステップの状態になる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || ! true"
+
+# **`||` の右辺が複合なら、中で errexit がその場で落とす記録も見る**（レビュー 5 巡目）。
+# 右辺は並びの**最後の要素**なので中の errexit が生きており、`|| ( false; true )` は
+# `false` で死ぬ＝並びはいつでも失敗する（真値 GATES）。最後のコマンドだけを見ていたため
+# 「成功しうる」と読んで未配線＝正しくゲートしている綴りを赤くしていた（`main` も同じ）
+for compound_fatal_case in \
+    "部分シェルの中の false:bash ${SUITE_PATH} || ( false; true )" \
+    "ブレースの中の false:bash ${SUITE_PATH} || { false; true ; }" \
+    "false のあとに表示:bash ${SUITE_PATH} || ( false; echo hi )" \
+    "最後が false:bash ${SUITE_PATH} || ( echo a; false )" \
+    "部分シェルに false だけ:bash ${SUITE_PATH} || ( false )"
+do
+    assert_wired "複合の右辺は中の errexit でも落ちる（${compound_fatal_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${compound_fatal_case#*:}
+          echo done"
+done
+
+# 締めすぎない側。中の errexit を当てにできない 2 形（どちらも真値 NOGATE）:
+# **複合が並びの最後の要素でなければ**中の errexit は抑制され、複合の状態は最後の
+# コマンドのものになる。**中で `set +e` していれば**そもそも落ちない
+for compound_fatal_control_case in \
+    "後ろに && が続く:bash ${SUITE_PATH} || ( false; true ) && echo z" \
+    "中で set +e:bash ${SUITE_PATH} || ( set +e; false; true )" \
+    "手前で成功して抜ける:bash ${SUITE_PATH} || ( exit 0; false )"
+do
+    assert_not_wired "中の errexit を当てにできない複合の右辺（${compound_fatal_control_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${compound_fatal_control_case#*:}
+          echo done"
+done
+
+# **1 断片で部分シェルを開く綴りの `exit` は、その部分シェルだけを終える**
+# （レビュー 5 巡目の実装中に実測で見つけた穴）。`{ ( exit 1 ) ; }` の `exit` が終えるのは
+# 内側の部分シェルなので、`set +e` の下では失敗が伝わらない（真値 NOGATE）。
+# **階層の識別子では判定できない**——命令の手前で開いた数は括弧の開きを数えない経路があり、
+# 記録の階層が部分シェルではなく外のグループになる（実測）ので、綴りの手前の `(` で見る
+assert_not_wired "1 断片で開いた部分シェルの exit は外へ伝わらない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          set +e
+          bash ${SUITE_PATH} || { ( exit 1 ) ; }
+          echo done"
+
+# 対照（締めすぎない側）: 同じ綴りでも**素のグループなら同じシェル**なので終わらせる。
+# 反転した複合は errexit を発動させない。パイプの左側は `pipefail` が無ければ捨てられる
+for escape_compound_case in \
+    "ブレースの中の exit は同じシェル:wired:bash ${SUITE_PATH} || { exit 1 ; } && echo z" \
+    "部分シェルの中の最後が false:wired:bash ${SUITE_PATH} || ( : ; false )" \
+    "並びを ; で閉じた複合:wired:bash ${SUITE_PATH} || { false ; } ; echo z" \
+    "pipefail つきのパイプの左側:wired:set -o pipefail
+          bash ${SUITE_PATH} || { false ; } | cat" \
+    "反転した複合:not-wired:bash ${SUITE_PATH} || ! { false ; }" \
+    "pipefail 無しのパイプの左側:not-wired:bash ${SUITE_PATH} || { false ; } | cat"
+do
+    escape_compound_label="${escape_compound_case%%:*}"
+    escape_compound_rest="${escape_compound_case#*:}"
+    escape_compound_want="${escape_compound_rest%%:*}"
+    escape_compound_body="${escape_compound_rest#*:}"
+    "assert_${escape_compound_want/-/_}" "複合の右辺の脱出と抑制（${escape_compound_label}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${escape_compound_body}
+          echo done"
+done
+
+# **中で errexit が落とす記録として数えるのは「その記録自身の失敗で落ちる」ものだけ**
+# （レビュー 5 巡目の実装中に実測で見つけた穴）。直後が `&&` / `||` なら並びの最後の要素では
+# ないので errexit は抑制され、`|` ならパイプの左側、`&` なら背後の実行で、どちらも
+# その失敗は複合の状態にならない——数えると**1 件も走らないスイートが「ゲートしている」**と
+# 読まれる（真値はすべて NOGATE）
+for fatal_suppressed_case in \
+    "false のあとに && が続く:bash ${SUITE_PATH} || { false && echo z ; echo ok ; }" \
+    "false のあとに || が続く:bash ${SUITE_PATH} || { false || echo z ; echo ok ; }" \
+    "false をパイプの左側に置く:bash ${SUITE_PATH} || { false | cat ; echo ok ; }" \
+    "false を背後へ回す:bash ${SUITE_PATH} || { false & echo ok ; }" \
+    "通らないアームの中の false:bash ${SUITE_PATH} || ( if false; then false; fi; echo ok )"
+do
+    assert_not_wired "抑制された記録は複合を落とさない（${fatal_suppressed_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${fatal_suppressed_case#*:}
+          echo done"
+done
+
+# 締めすぎない側: **並びを単独で終える記録なら複合を落とす**（真値 GATES）。
+# 入れ子の部分シェルが失敗する形も、外側の階層では「失敗した 1 つのコマンド」なので落とす
+# （中で `set +e` していても部分シェルの終了状態は非 0 になる）
+for fatal_effective_case in \
+    "単独の false:bash ${SUITE_PATH} || { false ; echo ok ; }" \
+    "入れ子の部分シェルの false:bash ${SUITE_PATH} || { echo a; ( false ); echo ok ; }" \
+    "入れ子の部分シェルの中の set +e:bash ${SUITE_PATH} || { echo a; ( set +e; false ); echo ok ; }"
+do
+    assert_wired "並びを単独で終える記録は複合を落とす（${fatal_effective_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${fatal_effective_case#*:}
+          echo done"
+done
+
+# **内側の階層の失敗が外へ届かないなら、その複合は落ちない**（レビュー 6 巡目。実測で
+# 見つけた fail-open）。中の `false` で内側の部分シェル・ブレースは死ぬが、その閉じの
+# 後ろが `||` / `&&` なら受け手がいて、`|` ならパイプの左側、`&` なら背後の実行なので
+# 外側の階層の終了状態にならない——数えると**1 件も走らないスイートが「ゲートしている」**
+# と読まれる（真値はすべて NOGATE）
+for inner_sep_case in \
+    "部分シェルのあとに ||:(:):|| true" \
+    "部分シェルのあとに &&:(:):&& echo z" \
+    "部分シェルをパイプの左側へ:(:):| cat" \
+    "部分シェルを背後へ:(:):& wait" \
+    "ブレースのあとに ||:{:}:|| true" \
+    "ブレースをパイプの左側へ:{:}:| cat"
+do
+    inner_open="$(printf '%s' "${inner_sep_case}" | cut -d: -f2)"
+    inner_close="$(printf '%s' "${inner_sep_case}" | cut -d: -f3)"
+    inner_sep="$(printf '%s' "${inner_sep_case}" | cut -d: -f4)"
+    assert_not_wired "外へ届かない内側の失敗は複合を落とさない（${inner_sep_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || ${inner_open}
+          ${inner_open}
+          false
+          ${inner_close} ${inner_sep}
+          true
+          ${inner_close}"
+done
+
+# 締めすぎない側: **内側の失敗が外へ届くなら落とす**（真値 GATES）
+for inner_sep_ok_case in \
+    "区切り無し:(:):" \
+    "区切りが ;:(:):;" \
+    "ブレースで区切り無し:{:}:"
+do
+    inner_open="$(printf '%s' "${inner_sep_ok_case}" | cut -d: -f2)"
+    inner_close="$(printf '%s' "${inner_sep_ok_case}" | cut -d: -f3)"
+    inner_sep="$(printf '%s' "${inner_sep_ok_case}" | cut -d: -f4)"
+    assert_wired "外へ届く内側の失敗は複合を落とす（${inner_sep_ok_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || ${inner_open}
+          ${inner_open}
+          false
+          ${inner_close} ${inner_sep}
+          true
+          ${inner_close}
+          echo done"
+done
+
+# **走ると証明できない記録は複合を落とさない**（レビュー 6 巡目。実測で見つけた fail-open）。
+# 呼ばれない関数の本体・空になりうる `for` の本体・一致しない `case` のアームはどれも
+# 走るとは限らないので、その中の失敗を当てにできない。**`||` の受け皿に補助関数を書く**
+# のはごく普通の綴りなので、これは偶然成立する（真値はすべて NOGATE）
+for unproven_body_case in \
+    "呼ばない関数の false:g() {
+          false
+          }
+          echo ignored" \
+    "呼ばない関数の exit 1:g() {
+          exit 1
+          }
+          echo ignored" \
+    "呼ばない関数の return 1:g() {
+          return 1
+          }
+          echo ignored" \
+    "空になりうる for の本体:for f in \$FILES; do
+          false
+          done
+          echo ignored" \
+    "until の本体:until true; do
+          false
+          done
+          echo ignored" \
+    "一致しない case のアーム:case y in
+          x)
+          false
+          ;;
+          esac
+          echo ignored"
+do
+    assert_not_wired "走ると証明できない記録は複合を落とさない（${unproven_body_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || (
+          ${unproven_body_case#*:}
+          )"
+done
+
+# **複合が並びの最後の要素でなければ、中の errexit は抑制される**（レビュー 5 巡目の機構に
+# 6 巡目で付けたピン。それまで**どの変異でも落ちなかった**）。`) && echo z` の複合は
+# AND-OR 並びの左辺なので中の `false` では死なず、`true` まで進んで成功する（真値 NOGATE）。
+# **後ろに行を置くと位置の判定が先に未配線へ倒すので、この条件だけを見るには行を置かない**
+assert_not_wired "最後の要素でない複合は中の errexit で落ちない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || (
+          false
+          true
+          ) && echo z"
+
+# **複合の中の反転した記録も errexit を落とさない**（同じく 6 巡目で付けたピン）。
+# `! true` はいつでも失敗するが反転した失敗では errexit が落ちないので、`echo ok` まで
+# 進んで複合は成功する（真値 NOGATE）。**1 断片に畳んだ `|| { ! true ; }` は複合ではなく
+# 連鎖として読まれる経路なので、この条件を通らない**——複数行で書く必要がある
+assert_not_wired "複合の中の反転した記録は errexit を落とさない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || {
+          ! true
+          echo ok
+          }
+          echo done"
+
+# **閉じ括弧が空白で隔てられていても右辺を読む**（レビュー 6 巡目の指摘。`main` も持つ
+# fail-closed）。以前は末尾の閉じを落とす走査が空白を跨げなかったため、`false ) )` が
+# 読めず未配線に倒れ、**空白を 1 つ詰めただけの同じプログラム（`))`）とは答えが食い違って**
+# いた（真値はどちらも GATES）
+for spaced_closer_case in \
+    "部分シェル 2 段の false:( ( bash ${SUITE_PATH} || false ) )" \
+    "部分シェル 2 段の exit 1:( ( bash ${SUITE_PATH} || exit 1 ) )" \
+    "部分シェル 3 段:( ( ( bash ${SUITE_PATH} || false ) ) )" \
+    "空白を詰めた形（対照）:( ( bash ${SUITE_PATH} || false ))"
+do
+    assert_wired "空白を挟んだ閉じでも右辺を読む（${spaced_closer_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${spaced_closer_case#*:}"
+done
+
+# **`$?` を持ち出す脱出は引用・波括弧の 4 綴りすべて読める**（レビュー 6 巡目の指摘。
+# `main` も持つ fail-closed）。`||` の右辺が走るのは左辺が落ちたときだけなので、
+# どの綴りも必ず非 0 で終わる。**`exit "$?"` は shellcheck が勧める書き方**なのに
+# 「読めない引数」に落ちて正しくゲートしている綴りを赤くしていた——綴りの判定が
+# 5 か所に写してあり 1 か所だけ広げ忘れていたのが原因で、同じ巡で `escape_probe()` /
+# `escape_arg_carries_status()` へ一元化した
+for status_escape_case in \
+    "素の \$?:exit \$?" \
+    "引用した \$?:exit \"\$?\"" \
+    "波括弧:exit \${?}" \
+    "引用した波括弧:exit \"\${?}\""
+do
+    assert_wired "\$? を持ち出す脱出は読める（${status_escape_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || ${status_escape_case#*:}
+          echo done"
+done
+
+# **`exit` は同じシェルなら複合の中からでもその場で終える**（レビュー 5 巡目）。
+# 素のグループ・制御構造の本体は同じシェルなので、`set +e` の下でも後ろに行があっても
+# ステップの終了状態はその `exit` のものになる（真値 GATES）
+for exit_in_group_case in \
+    "set +e の下のブレースの中:set +e
+          bash ${SUITE_PATH} || { echo x; exit 1 ; }" \
+    "ブレースで囲んだ連鎖:{ bash ${SUITE_PATH} || exit 1 ; }" \
+    "set +e の下でブレースで囲んだ連鎖:set +e
+          { bash ${SUITE_PATH} || exit 1 ; }" \
+    "後ろに || が続く:bash ${SUITE_PATH} || exit 1 || echo z" \
+    "後ろに && が続く:bash ${SUITE_PATH} || exit 1 && echo z"
+do
+    assert_wired "同じシェルの exit は複合の中でも終わらせる（${exit_in_group_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${exit_in_group_case#*:}
+          echo done"
+done
+
+# 締めすぎない側。**子シェルで走る `exit` は呼び出し元のシェルを終えない**（真値 NOGATE）。
+# 部分シェル・パイプの要素・背後の実行がそれぞれ別のシェルで、印を持ち越すと
+# 「1 件も走らないスイートがゲートしている」と読む fail-open になる
+for exit_in_subshell_case in \
+    "set +e の下の部分シェルの中:set +e
+          bash ${SUITE_PATH} || ( echo x; exit 1 )" \
+    "パイプの要素としての exit:bash ${SUITE_PATH} || exit 1 | cat" \
+    "パイプの要素としてのブレース:bash ${SUITE_PATH} || { exit 1 ; } | cat" \
+    "背後へ回した exit:bash ${SUITE_PATH} || exit 1 &"
+do
+    assert_not_wired "子シェルの exit は呼び出し元を終えない（${exit_in_subshell_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${exit_in_subshell_case#*:}
+          echo done"
 done
 
 # **`&&` を伝えるとき、中の記録が既に持つ強い抑制を上書きしない**（レビュー指摘、実測）。
@@ -6878,7 +7369,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: subject
-        run: bash '"${SUITE_PATH}"
+        run: |
+          bash '"${SUITE_PATH}"'
+          echo done'
 
 assert_not_wired "ワークフロー既定の shell: は鍵が引用符付きでも効く" 'name: ci
 defaults:
@@ -6889,7 +7382,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: subject
-        run: bash '"${SUITE_PATH}"
+        run: |
+          bash '"${SUITE_PATH}"'
+          echo done'
 
 # grouping を開いた断片そのものに呼び出しが載る形（`(` と呼び出しが同じ断片）
 assert_not_wired "grouping を開いた断片の呼び出しにも閉じ側の区切りが掛かる" "name: ci
@@ -6901,7 +7396,7 @@ jobs:
         run: ( bash ${SUITE_PATH}; ) || true"
 
 # 部分シェルの中の set は外へ漏れない（ブレースグループは漏れる）
-assert_not_wired "部分シェルの中の set -e は外の set +e を打ち消さない" "name: ci
+assert_swallowed "部分シェルの中の set -e は外の set +e を打ち消さない" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -6928,7 +7423,7 @@ jobs:
           bash ${SUITE_PATH}"
 
 # POSIX の長い綴り
-assert_not_wired "set +o errexit も握り潰しとして効く" "name: ci
+assert_swallowed "set +o errexit も握り潰しとして効く" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -6983,6 +7478,915 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7'
+
+# --- 失敗が `run:` の終了状態へ届くか（issue #191 / #168 / #175 / #178 / #189 の残り）---
+#
+# `run:` の終了状態は**最後に走ったコマンドの状態**で、errexit はその手前で落とす仕組み。
+# したがって失敗がジョブへ届く道は 2 つしかない: **(a) その場で落ちる**、
+# **(b) 囲っている階層の最後の状態として外へ出続ける**。位置（階層の最後かどうか）が
+# 効くのは (b) のときだけで、(a) は位置を問わず届く。
+#
+# 実 `bash -e` で測った要点（どれも推測ではなく実測）:
+#   * 複合コマンドを AND-OR の左辺に置くと、その**中まで** errexit が免除される
+#     （`( false; echo z ) && echo ok` は `z` を印字して 0 で終わる）。
+#   * 免除は**同じシェルの中では外へ出ても続く**（`{ bash <スイート> && echo ok ; }` ＋
+#     `echo done` は NOGATE）が、**部分シェルを出ると消える**（`( … )` ＋ `echo done` は
+#     GATES。終了状態として親に渡り、そこで errexit が改めて落とす）。
+#   * `||` の右辺が成功しえない（`false` / `exit 1` / 中が `exit 1` で終わる複合）なら
+#     並びはいつでも失敗し、その右辺は並びの**最後の要素**なので位置を問わず届く。
+#   * `&&` の左辺が落ちると右のパイプラインは**走らない**ので、`pipefail` は関係ない。
+
+assert_wired "|| の右辺が exit なら並びはいつでも失敗する" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || exit 1"
+
+assert_wired "|| の右辺が複合でも中が exit で終われば失敗する" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || { echo fail; exit 1; }"
+
+assert_wired "|| の右辺が false なら並びはいつでも失敗する" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || false"
+
+assert_not_wired "|| の右辺が成功しうるなら握り潰される" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || echo oops"
+
+assert_wired "成功しえない並びは最後でなくても届く（|| false のあとに行がある）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} && echo ok || false
+          echo tail"
+
+assert_wired "成功しえない並びは最後でなくても届く（|| exit 1 のあとに行がある）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} && echo ok || exit 1
+          echo tail"
+
+assert_not_wired "ブレースの最後のコマンドでなければ && の外へ出ない（複数行）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          {
+          bash ${SUITE_PATH}
+          echo inner
+          } && echo ok"
+
+assert_not_wired "部分シェルの最後のコマンドでなければ外へ出ない（複数行）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          (
+          bash ${SUITE_PATH} && echo ok
+          echo inner
+          )"
+
+assert_not_wired "後置の && は部分シェルの最後のコマンドで測る" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ( bash ${SUITE_PATH}; echo z ) && echo ok"
+
+assert_not_wired "後置の && はブレースの最後のコマンドで測る" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          { bash ${SUITE_PATH}; echo z; } && echo ok"
+
+assert_not_wired "部分シェルの中の && 連鎖は部分シェルの最後で測る" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ( bash ${SUITE_PATH} && echo ok; echo z )"
+
+assert_wired "部分シェルの最後の && 連鎖なら外へ出る" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ( bash ${SUITE_PATH} && echo ok )"
+
+assert_wired "ブレースの最後の && 連鎖なら外へ出る" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          { bash ${SUITE_PATH} && echo ok; }"
+
+assert_wired "set +e の下でもステップ最後なら終了状態になる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          set +e
+          bash ${SUITE_PATH}"
+
+assert_not_wired "免除は同じシェルの中では外へ出ても続く（ブレース）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          { bash ${SUITE_PATH} && echo ok ; }
+          echo done"
+
+assert_not_wired "免除は同じシェルの中では外へ出ても続く（if の本体）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          if true; then bash ${SUITE_PATH} && echo ok ; fi
+          echo done"
+
+assert_wired "免除は部分シェルを出ると消える（終了状態として親が見る）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ( bash ${SUITE_PATH} && echo ok )
+          echo done"
+
+assert_wired "部分シェルの中の set +e は親の errexit を弱めない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ( set +e; bash ${SUITE_PATH} )
+          echo done"
+
+assert_wired "部分シェルの中で errexit がその場で落とすなら位置は問わない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ( bash ${SUITE_PATH}; echo z )"
+
+assert_not_wired "pipefail が無ければ部分シェルの失敗はパイプで捨てられる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ( bash ${SUITE_PATH}; echo z ) | cat"
+
+assert_wired "&& の右辺のパイプラインは走らないので pipefail は関係ない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} && echo ok | cat"
+
+assert_not_wired "&& の右辺がパイプラインでも後ろに行があれば届かない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} && echo ok | cat
+          echo tail"
+
+assert_not_wired "入れ子の部分シェルは親から見れば 1 つのコマンド" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          (
+          set +e
+          bash ${SUITE_PATH}
+          (
+          echo x )
+          )"
+
+assert_wired "同じ深さに並ぶ兄弟の部分シェルは別の階層として数える" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ( bash ${SUITE_PATH} )
+          ( echo z )"
+
+# **1 断片に収めたブレースは「閉じていない階層」に見える**（閉じ語の走査は `depth > 0` で
+# 回るので、開いたのと同じ断片の `}` には届かない）。本当に閉じていない綴り
+# （`{ {` ＝ bash の構文エラーでスイートが 1 件も走らない）と区別できないので、
+# **errexit がその場で落とす道だけ認める**。下の 2 件がその両側で、どちらも `main` と同じ答え
+assert_wired "1 断片で閉じたブレースの中の呼び出し（errexit が落とす）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          { ( bash ${SUITE_PATH} ) }"
+
+assert_wired "閉じない階層でも errexit を戻してあれば届く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          { { ( set +e
+          set -e
+          bash ${SUITE_PATH}
+          echo done ) } }"
+
+# 下の 5 件は**機構ごとに 1 つずつ**対応する（変異で潰すと必ずどれかが落ちる）。
+# 深さではなく階層ごとの連番で数えること／部分シェルを出たら外の errexit を見ること／
+# 免除は親からも継ぐこと／`&&` の右辺の複合は閉じた位置まで飛ぶこと、の 4 つ
+assert_wired "兄弟の部分シェルは深さが同じでも別の階層（複数行）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          (
+          bash ${SUITE_PATH}
+          )
+          (
+          echo z
+          )"
+
+assert_wired "兄弟の部分シェルは && 連鎖の位置でも混ざらない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          (
+          bash ${SUITE_PATH} && echo ok
+          )
+          (
+          echo z
+          )"
+
+assert_wired "&& の右辺の複合は外側の階層が閉じる位置で測る" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} && ( {
+          echo x
+          }
+          echo y
+          )"
+
+assert_wired "部分シェルを出たら外の errexit で判定する" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ( set +e
+          echo z
+          bash ${SUITE_PATH}
+          )
+          echo done"
+
+assert_not_wired "免除は親の階層からも継ぐ（入れ子のブレース）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          { { bash ${SUITE_PATH}; echo z; } ; } && echo ok"
+
+assert_not_wired "&& の右辺が複合なら閉じた位置で位置を測る（後ろに行がある）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} && ( {
+          echo x
+          } )
+          echo tail"
+
+assert_wired "&& の右辺が複合でもそれがステップ最後なら届く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} && ( {
+          echo x
+          } )"
+
+# **ここから下はレビュー指摘で見つけた 3 つの穴**（どれも実 `bash -e` と突き合わせて実測）。
+# (1) 走らない記録を「最後に走ったコマンド」に数えると、`||` の右辺の到達不能な `exit 1` を
+#     「成功しえない右辺」と読んで握り潰しを配線と答える（fail-open）。
+# (2) 1 断片で入れ子をまとめて閉じたとき、内側の階層にも断片の区切りを付けると、歩きが
+#     内側を出た時点で `&&` を拾って「吸われた」と判断し、まだ部分シェルを出ていないのに
+#     位置の判定を省く（fail-closed）。
+# (3) `||` の右辺が複合のとき「最後のコマンドが成功しえない」だけでは足りない——手前に
+#     成功して抜ける脱出（`exit 0`）があれば並びは成功する（fail-open）。
+
+assert_swallowed "|| の右辺の通らない exit は最後のコマンドではない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || (
+          if false; then
+          exit 1
+          fi
+          )"
+
+assert_swallowed "|| の右辺の通らない exit（グループ）も数えない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || {
+          if false; then
+          exit 1
+          fi
+          }"
+
+assert_swallowed "|| の右辺が通らない exit で終わるなら握り潰し" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || (
+          echo x
+          if false; then
+          exit 1
+          fi
+          )"
+
+assert_wired "|| の右辺の通る exit は成功しえないので届く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || (
+          if true; then
+          exit 1
+          fi
+          )"
+
+assert_swallowed "|| の右辺は手前の exit 0 で成功しうる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || (
+          exit 0
+          exit 1
+          )"
+
+assert_swallowed "|| の右辺の exit 0 は 1 行書きでも成功しうる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || ( exit 0; exit 1 )"
+
+assert_swallowed "|| の右辺のグループの exit 0 も部分シェルを抜ける" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || {
+          exit 0
+          exit 1
+          }"
+
+assert_swallowed "|| の右辺の中のグループの exit 0 も外側を抜ける" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || (
+          { exit 0; }
+          exit 1
+          )"
+
+assert_swallowed "|| の右辺のアームの通る exit 0 でも成功しうる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || (
+          if true; then
+          exit 0
+          fi
+          exit 1
+          )"
+
+assert_wired "|| の右辺の引数なしの exit は成功しうるが最後なら届く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || (
+          exit
+          exit 1
+          )"
+
+assert_wired "|| の右辺の手前の exit が非 0 なら並びは失敗する" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || (
+          exit 2
+          exit 1
+          )"
+
+assert_wired "|| の右辺の手前が普通のコマンドなら最後の exit で失敗する" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || (
+          echo x
+          exit 1
+          )"
+
+assert_wired "|| の右辺の定義しただけの本文の exit 0 は抜けない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || (
+          f() { exit 0; }
+          exit 1
+          )"
+
+assert_wired "入れ子をまとめて閉じた部分シェルは && の左辺でも届く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ( { bash ${SUITE_PATH} ; } ) && echo ok"
+
+assert_wired "入れ子をまとめて閉じたアームも && の左辺で届く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ( if true; then bash ${SUITE_PATH}; fi ) && echo ok"
+
+assert_wired "部分シェルを二重に閉じた断片も && の左辺で届く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ( ( bash ${SUITE_PATH} ; ) ) && echo ok"
+
+assert_wired "部分シェルとグループを混ぜて閉じた断片も届く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ( ( { bash ${SUITE_PATH} ; } ) ) && echo ok"
+
+assert_wired "入れ子をまとめて閉じた部分シェルは pipefail のパイプでも届く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          set -o pipefail
+          ( { bash ${SUITE_PATH} ; } ) | cat"
+
+assert_swallowed "入れ子をまとめて閉じても後ろにコマンドがあれば握り潰し" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ( { bash ${SUITE_PATH} ; } ) && echo ok"
+
+# **引数が読めない脱出（素の `exit` / `exit $rc`）は手前のコマンド次第**（レビュー指摘）。
+# `||` の右辺が走るのは左辺が落ちたときだけなので、手前に何も走っていなければ
+# 直前の状態＝左辺の失敗を引き継いで必ず非 0 で抜ける（＝並びはいつでも失敗する）。
+# 手前に走ったコマンドがあればその状態は読めないので握り潰し側へ倒す
+assert_swallowed "|| の右辺の手前にコマンドがあると素の exit は成功しうる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || (
+          echo cleanup
+          exit
+          )"
+
+assert_swallowed "|| の右辺のグループでも手前のコマンド次第" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || {
+          echo cleanup
+          exit
+          }"
+
+assert_swallowed "|| の右辺の手前にコマンドがある 1 行書きも同じ" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || ( echo cleanup; exit )"
+
+assert_swallowed "|| の右辺の読めない引数の exit も手前次第" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || (
+          echo x
+          exit \$u
+          )"
+
+assert_swallowed "|| の右辺の入れ子の部分シェルも手前のコマンドに数える" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || (
+          (
+          echo x
+          )
+          exit
+          )"
+
+assert_wired "|| の右辺の先頭の素の exit は左辺の失敗を引き継ぐ" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || (
+          exit
+          exit 1
+          )"
+
+assert_wired "|| の右辺の先頭の読めない引数の exit も同じ" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || (
+          exit \$u
+          exit 1
+          )"
+
+assert_wired "開くだけの断片は手前のコマンドに数えない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || (
+          {
+          exit
+          }
+          )"
+
+assert_wired "|| の右辺の入れ子の部分シェルの exit 0 は外側を抜けない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || (
+          (
+          exit 0
+          )
+          exit 1
+          )
+          echo done"
+
+assert_wired "|| の右辺の通らないアームの exit 0 は印を付けない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || (
+          if false; then
+          exit 0
+          fi
+          exit 1
+          )
+          echo done"
+
+# **閉じていない複合の右辺は読めないので握り潰し側へ倒す。** 閉じ語の無い綴り
+# （bash の構文エラーでスイートは 1 行も走らない）で連鎖の歩きを進めると、閉じた位置が
+# 読めないまま外へ出て「失敗が伝わる」と答える（真値 NOGATE なのに wired ＝fail-open。実測）
+assert_not_wired "閉じていないグループを && の右辺に置いた形は配線と読まない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} && {
+          echo x"
+
+assert_not_wired "閉じていない部分シェルを || の右辺に置いた形も配線と読まない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || (
+          exit 1"
+
+# **連鎖の右辺はステップをまたがない。** `run:` はステップごとに別のシェルで走るので、
+# 末尾に区切りだけが残った綴り（bash の構文エラーでスイートは 1 行も走らない）の
+# 右辺を次のステップの先頭から拾ってはいけない（真値 NOGATE。拾うと「成功しえない右辺」と
+# 読んで wired ＝fail-open になる。実測で `main` も not-wired）
+assert_not_wired "連鎖の右辺を次のステップから拾わない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} &&
+      - name: next
+        run: |
+          exit 1"
+
+# **残る境界（fail-closed・`main` と同じ答え）**: `||` の右辺の中で**部分シェルに包んだ**
+# `exit 0` を 1 行で書く綴り（`( ( exit 0 ); exit 1 )`）は、包んだ部分シェルが同じ断片で
+# 開いて閉じるため記録が**外側の階層**に載り、「外側を抜ける脱出」と読んで握り潰し側へ倒れる
+# （真値 GATES・`main` も not-wired）。包みを見分けるには断片の中の括弧の対応を
+# 読む必要があり、綴りを数える近似を増やすより安全側に倒すほうを採った
+assert_swallowed "包んだ exit 0 は安全側に倒す（残る境界）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || (
+          ( exit 0 )
+          exit 1
+          )"
+
+
+# --- 複合コマンドがパイプの左側になる形（issue #191 のレビュー指摘）-------------------
+#
+# **閉じた後ろが `|` なら、その複合はパイプの左側＝子シェルで走る。** 2 点が効く:
+# (a) 中の `&&` が与えた errexit の免除は子シェルを出た時点で消える、(b) パイプラインの
+# 状態を決めるのは**親の** `pipefail` なので、複合の中で `set -o pipefail` しても届かない。
+# どちらが欠けても「スイートの失敗が伝わる」と答える fail-open になる（真値 NOGATE なのに
+# wired。実測で `main` はすべて未配線）。**必須スイートが黙ってゲートしなくなる向き**なので、
+# ここは綴りの数だけピンを置く
+
+assert_not_wired "グループをパイプの左側に置くと失敗は捨てられる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          { bash ${SUITE_PATH} && echo ok ; } | tee log"
+
+assert_not_wired "リダイレクトを挟んだパイプでも同じ" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          { bash ${SUITE_PATH} && echo ok ; } 2>&1 | tee log"
+
+assert_not_wired "|& で繋いだパイプでも同じ" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          { bash ${SUITE_PATH} && echo ok ; } |& cat"
+
+assert_not_wired "制御構造の本体をパイプの左側に置いた形も同じ" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          if true; then bash ${SUITE_PATH} && echo ok; fi | cat"
+
+assert_not_wired "入れ子のグループを経てパイプの左側に出る形も同じ" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          { { bash ${SUITE_PATH} && echo ok ; } && echo o2 ; } | cat"
+
+assert_not_wired "パイプラインの後ろに && が続く形も同じ" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          { bash ${SUITE_PATH} && echo ok ; } | cat && echo z"
+
+# **`set -o pipefail` を複合の中で書いても親のパイプラインには効かない。** 素のグループは
+# 同じシェルで走るので中の `set` は親へ残るが、**パイプの左側になったときだけは子シェルで
+# 走る**ので残らない（実 `bash -e` で NOGATE）。**いまこの答えを支えているのは
+# 「複合の中の `set -o pipefail` を記録へ反映しない」という別の未修正（issue #203）**で、
+# それを直したときは閉じた断片の巻き戻し（区切りが `|` / `&` なら階層の入口の値へ戻す）が
+# この形を守る——どちらも消すとこのピンが落ちる（実測で巻き戻しだけを外しても落ちない）
+assert_not_wired "複合の中の set -o pipefail は親のパイプに効かない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          { set -o pipefail; bash ${SUITE_PATH} && echo ok ; } | cat"
+
+# 対照（締めすぎない側）: `pipefail` が**複合の外**で立っていれば失敗は伝わる
+assert_wired "複合の手前の set -o pipefail はパイプに効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          set -o pipefail
+          { bash ${SUITE_PATH} && echo ok ; } | cat"
+
+# 対照: 部分シェル・素の呼び出しだけのグループも同じく捨てられる（向きの確認）
+assert_not_wired "部分シェルをパイプの左側に置いた形" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ( bash ${SUITE_PATH} && echo ok ) | cat"
+
+assert_not_wired "呼び出しだけのグループをパイプの左側に置いた形" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          { bash ${SUITE_PATH} ; } | cat"
+
+# **閉じ括弧に付いた区切りは「複合全体」のもので、中の並びのものではない**（同じ指摘）。
+# 1 断片で「階層の最後のコマンド」と「その階層を閉じる」が重なる綴りで、後ろの `&&` を
+# 中の並びの区切りとして読むと「右辺は外側の複合」に見えて読めず、未配線へ倒れていた
+# （真値 GATES・`main` も wired ＝**正しくゲートしている綴りを赤くする**向き。実測）
+assert_wired "部分シェルの中の && 連鎖が最後で、後ろに && が続く形" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ( bash ${SUITE_PATH} && echo ok ) && echo ok"
+
+assert_wired "部分シェルの中の set +e の下でスイートが最後で、後ろに && が続く形" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ( set +e; bash ${SUITE_PATH} ) && echo ok"
+
 
 # --- ヒアドキュメントの終端判定（bash と同じ厳しさで読む / issue #108）------------------
 #
