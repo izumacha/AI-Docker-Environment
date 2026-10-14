@@ -6432,6 +6432,227 @@ jobs:
           }
           echo done"
 
+# **`&&` の右辺が制御構造なら、連鎖の終わりは閉じ語**（issue #198）。`if true; then` /
+# `for f in a; do` / `case x in` の見出しは**条件や一覧を外側の階層で走らせる**ので記録は
+# 外側に載るが、並びの要素としては `fi` / `done` / `esac` までが 1 つのコマンド。見出しで
+# 連鎖が終わると本体が「後ろに続くコマンド」に見え、位置の判定が gate を 0 にする
+# （真値 GATES なので fail-closed。`( … )` / `{ … ; }` は開き記号が命令の手前に来るので
+# 記録自身が内側に載り、以前から正しく読めていた——**改行の位置ではなく綴りの違い**）
+for ctrl_rhs_case in \
+    "if true の本体:if true; then
+          echo x
+          fi" \
+    "リテラルの一覧を回る for:for f in a; do
+          echo x
+          done" \
+    "変数の一覧を回る for:for f in \$LIST; do
+          echo x
+          done" \
+    "case の見出し:case x in
+          x) echo hi ;;
+          esac"
+do
+    assert_wired "&& の右辺の制御構造は閉じ語まで 1 つの要素（${ctrl_rhs_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} && ${ctrl_rhs_case#*:}"
+done
+
+# 締めすぎない側: **後ろに行があれば握り潰される**（真値 NOGATE）。連鎖の状態は閉じ語で
+# 確定するが、その後ろに行があればステップの状態はその行のものになる
+for ctrl_rhs_tail_case in \
+    "if true の本体:if true; then
+          echo x
+          fi" \
+    "リテラルの一覧を回る for:for f in a; do
+          echo x
+          done" \
+    "case の見出し:case x in
+          x) echo hi ;;
+          esac"
+do
+    assert_not_wired "制御構造の後ろに行があれば握り潰される（${ctrl_rhs_tail_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} && ${ctrl_rhs_tail_case#*:}
+          echo tail"
+done
+
+# 締めすぎない側: **`||` の右辺の制御構造は握り潰す**（真値 NOGATE）。本体が走れば複合は
+# 成功しうるので、失敗はそこで受け止められる
+for ctrl_or_case in \
+    "if true の本体:if true; then
+          echo x
+          fi" \
+    "case の見出し:case x in
+          x) echo hi ;;
+          esac"
+do
+    assert_not_wired "|| の右辺の制御構造は握り潰す（${ctrl_or_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || ${ctrl_or_case#*:}"
+done
+
+# **`||` の右辺の制御構造は「本体がいつでも失敗する」と読めない**（レビュー指摘。この差分が
+# 入れた fail-open）。複合の状態は「中で最後に走ったコマンド」のものだが、制御構造の本体は
+# 条件や一覧が空なら**1 度も走らない**ので、`false` や `exit 1` で終わる本体でも複合は
+# 成功して抜けうる（真値 NOGATE）。上の `ctrl_or_case` は本体が必ず成功する綴りだけだったため、
+# 門番（`rec_unc`）を外しても**966 ピンすべてが緑のまま通っていた**（実測）
+for ctrl_or_fail_case in \
+    "条件が読めない if の本体が失敗する:if [ -n \$DEBUG ]; then
+          false
+          fi" \
+    "変数の一覧を回る for の本体が失敗する:for f in \$LIST; do
+          false
+          done" \
+    "条件が読めない if の本体が脱出する:if [ -n \$DEBUG ]; then
+          exit 1
+          fi" \
+    "読み込みの while の本体が失敗する:while read -r l; do
+          false
+          done < /dev/null"
+do
+    assert_not_wired "|| の右辺の制御構造は本体が失敗しても握り潰す（${ctrl_or_fail_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || ${ctrl_or_fail_case#*:}
+          echo tail"
+done
+
+# **門番は「読めない」で打ち切らず下の枝へ落とす**: 本体が読めなくても、手前に「走ると
+# 証明できる」致命的な記録があれば複合はそこで死ぬので並びはいつでも失敗する（真値 GATES。
+# 打ち切る形に変えるとこの 1 形だけが未配線へ倒れる＝fail-closed）
+assert_wired "|| の右辺の複合は手前の致命的な記録で死ぬ（後ろが読めなくても）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || ( false
+          if [ -n \$D ]; then
+          true
+          fi )
+          echo tail"
+
+# **呼ばれていない関数の本体は `main` が持つ fail-open のまま**（真値 NOGATE なのに配線済み）。
+# ここにピンは置かない——閉じるには「その階層が走るか」を**階層ごと**に答える機構が要り、
+# 包んだ制御構造（`|| ( if true; then false; fi )` ＝真値 GATES で `main` も配線済み）を
+# 巻き添えにせずに分ける必要がある。別 issue で扱う（この差分の範囲は #198）
+
+# **包んだ制御構造は `main` の経路なので答えを変えない**（レビュー 9 巡目の指摘。上の門番を
+# 一律に掛けると `( … )` / `{ … ; }` で包んだ形まで握り潰し側へ倒れ、**`main` が正しく
+# 配線済みと答えていた 20 形が退行**していた＝正しくゲートしているワークフローを赤くする向き。
+# 門番は見出しの複合を受け入れる新しい経路（`rec_opened`）だけに掛ける）
+for wrapped_ctrl_case in \
+    "部分シェルで包む:( if true; then
+          false
+          fi )" \
+    "グループで包む:{ if true; then
+          false
+          fi ; }" \
+    "部分シェルで包んだ for:( for f in a b; do
+          false
+          done )"
+do
+    assert_wired "包んだ制御構造は答えを変えない（${wrapped_ctrl_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || ${wrapped_ctrl_case#*:}"
+done
+
+# **連鎖の右辺が無い複合は読めない**（レビュー 9 巡目。この差分が入れた fail-open）。
+# `bash -n` が通らない＝スイートが 1 件も走らないので真値 NOGATE・`main` も未配線だが、
+# 見出しの複合を受け入れるようにした結果「複合の位置」だけで配線済みと答えていた
+for dangling_chain_case in \
+    "閉じ語の直前:if true; then
+          echo a &&
+          fi" \
+    "継続語の直前:if true; then
+          echo a &&
+          else
+          echo b
+          fi" \
+    "ループの閉じ語の直前:for f in a; do
+          echo a &&
+          done" \
+    "case の閉じ語の直前:case x in
+          x) echo a && ;;
+          esac"
+do
+    assert_not_wired "連鎖の右辺が無い複合は未配線（${dangling_chain_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} && ${dangling_chain_case#*:}"
+done
+
+# 締めすぎない側: **右辺のある連鎖は読める**（真値 GATES）。上の門番が「区切りが `&&` なら
+# 落とす」へ広がっていないことを固定する
+for inner_chain_case in \
+    "改行をまたぐ連鎖:if true; then
+          echo a &&
+          echo b
+          fi" \
+    "1 行の連鎖:if true; then
+          echo a && echo b
+          fi"
+do
+    assert_wired "右辺のある連鎖は読める（${inner_chain_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} && ${inner_chain_case#*:}"
+done
+
+# **残る境界（記録。真値 GATES なので fail-closed・`main` と同じ答え）**: 本体が必ず走る
+# 制御構造でも、走ると証明する手段が無いので握り潰し側へ倒れる。上の fail-open を閉じる
+# 代償で、6 巡目が同じ理由で受け入れた 4 形と同種（直すときはこのピンを意図して反転させる）
+for ctrl_or_boundary_case in \
+    "リテラルの一覧を回る for の本体が失敗する:for f in a b; do
+          false
+          done" \
+    "リテラルで真の if の本体が失敗する:if true; then
+          false
+          fi"
+do
+    assert_not_wired "残る境界: 本体が必ず走る制御構造も握り潰し側（${ctrl_or_boundary_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || ${ctrl_or_boundary_case#*:}"
+done
+
 # **閉じ括弧が空白で隔てられていても右辺を読む**（レビュー 6 巡目の指摘。`main` も持つ
 # fail-closed）。以前は末尾の閉じを落とす走査が空白を跨げなかったため、`false ) )` が
 # 読めず未配線に倒れ、**空白を 1 つ詰めただけの同じプログラム（`))`）とは答えが食い違って**

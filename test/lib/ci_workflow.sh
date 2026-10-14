@@ -2543,7 +2543,7 @@ ci_workflow_extract() {
         # `absorbed` は「追っている失敗が並びに吸われて、その場では落ちない」状態で、
         # 階層を出るたびに消える（複合コマンドの失敗は親から見れば 1 つのコマンドの失敗で、
         # そこでは errexit がその場で落とす）
-        function record_gates(i,   cur, s, op, nx, ns, ce, ls, absorbed, guard, key, e_here, p_here, inv, aborts) {
+        function record_gates(i,   cur, s, op, nx, ns, ce, ls, absorbed, guard, key, e_here, p_here, inv, aborts, via_opened, dg, dgp, dgq) {
             # そもそも走らない記録（到達不能・死に体・`exit` の後ろ）は伝わらない
             if (rec_dead[i]) { return 0 }
             cur = i; s = rec_scope[i]; op = sep_of(i, s); absorbed = 0
@@ -2568,21 +2568,75 @@ ci_workflow_extract() {
                     # は左が落ちた時点で右のパイプラインごと飛ばされ、並びの状態は
                     # スイートの失敗になる。実 `bash -e` は GATES）
                     if (op == "|" && !absorbed && !p_here) { return 0 }
+                    # **右辺が複合（階層を開く）なら、その複合の終わりまで飛ぶ。**
+                    # 並びの要素は複合 1 つぶんなので、位置はその閉じた記録で測る。
+                    # 手掛かりは 2 通り: `( … )` / `{ … ; }` は開き記号が命令の手前に来るので
+                    # **記録自身が内側の階層に載る**。一方 `if true; then` / `for f in a; do` /
+                    # `case x in` の見出しは条件や一覧を外側で走らせるので記録は外側に載り、
+                    # **開いた階層の控え**（`rec_opened`）だけが手掛かりになる（issue #198。
+                    # 見ないと `bash <スイート> && if true; then` 改行 `echo x` 改行 `fi` の連鎖が
+                    # 見出しで終わり、本体の `echo x` が「後ろに続くコマンド」に見えて位置の
+                    # 判定が gate を 0 にする＝実 `bash -e` は GATES なので fail-closed）
                     if (rec_scope[nx] != s) {
-                        # **右辺が複合（階層を開く）なら、その複合の終わりまで飛ぶ。**
-                        # 並びの要素は複合 1 つぶんなので、位置はその閉じた記録で測る
                         ns = rec_scope[nx]
                         while (ns > 0 && scope_parent[ns] != s) { ns = scope_parent[ns] }
-                        ce = (ns > 0) ? (scope_close_at[ns] + 0) : 0
+                        via_opened = 0
+                    }
+                    # 控えは「コマンドの階層のすぐ内側」なので、その親は常にこの階層
+                    # （`scope_at[run_depth + 1]` の親は `scope_at[run_depth]`）。
+                    # **親を確かめ直す門番は置かない** —— 構造的に必ず真で、構成した 160 形
+                    # （制御構造 4 種 × `&&` / `||` × 包み 5 種 × 後ろの行 × 手前で階層を
+                    # 閉じる形）でも答えが 1 件も変わらなかった（何も変えない仕掛けは置かない）
+                    else if ((rec_opened[nx] + 0) > 0) {
+                        ns = rec_opened[nx] + 0
+                        via_opened = 1
+                    }
+                    else { ns = 0; via_opened = 0 }
+                    # **残る境界（レビュー 8 巡目の記録）**: 上のたどりが `s` を親に持つ先祖を
+                    # 見つけられないと `ns` は 0 のまま進み、**別の階層の記録をこの階層の帳簿で
+                    # 測る**ことになる。釣り合いの取れた入れ子では起こらない（全ピンと、構成した
+                    # 綴り——見出しをそのまま置く形と `( … )` / `{ … ; }` で包んだ形——で到達しない
+                    # ＝実測）が、構造として保証されているわけではない。未配線へ倒す門番を書いて
+                    # 測ったが**1 件も答えが変わらなかった**ので置いていない
+                    # （何も変えない仕掛けは「守られている」と誤解させる。§6）
+                    if (ns > 0) {
+                        ce = scope_close_at[ns] + 0
                         # 閉じていない（読めない）形は握り潰し側＝未配線へ倒す
                         if (ce == 0 || ce <= cur) { return 0 }
+                        # **連鎖の右辺が無い複合も読めない**（レビュー 9 巡目。この差分が入れた
+                        # fail-open）。見出しの複合を受け入れるようにした結果、
+                        # `bash <スイート> && if true; then` 改行 `echo a &&` 改行 `fi` のように
+                        # **構文エラーでスイートが 1 件も走らない**綴りまで配線済みと答えていた
+                        # （実 `bash -e` は NOGATE・`main` も未配線）。見るのは「中の記録の区切りが
+                        # `&&` / `||` なのに、その次が閉じ語か継続語（`else` / `elif`）」という、
+                        # **右辺が無いことがその場で分かる形だけ**——`bash` の構文は再実装しない
+                        # （綴りを 1 つずつ足す道は取らない。残る境界は `docs/requirements.md` に記録）
+                        if (via_opened) {
+                            for (dg = nx + 1; dg < ce; dg++) {
+                                if (!(dg in buf)) { continue }
+                                split(buf[dg], dgp, "\t")
+                                if (dgp[2] != "&&" && dgp[2] != "||") { continue }
+                                if (!((dg + 1) in buf)) { return 0 }
+                                split(buf[dg + 1], dgq, "\t")
+                                if (dg + 1 == ce || dgq[6] ~ /^(else|elif)([[:space:]]|;|$)/) { return 0 }
+                            }
+                        }
                         if (op == "||") {
                             # 複合の状態は「その中で最後に走ったコマンド」の状態。
                             # 成功しえないなら並びはいつでも失敗する（issue #198 の一部。
                             # 中が読めない形は握り潰し側へ倒す）
                             ls = last_scope_cmd[rec_stepid[nx] "\t" ns] + 0
                             if (ls == 0) { return 0 }
-                            if (chain_never_succeeds(rec_txt[ls])) {
+                            # **その「最後のコマンド」が走ると証明できないなら、いつでも失敗する
+                            # とは読めない**（レビュー指摘。この差分が入れた fail-open）。制御構造の
+                            # 本体は条件や一覧が空なら 1 度も走らないので、`|| if [ -n "$DEBUG" ]; then`
+                            # 改行 `false` 改行 `fi` の複合は**成功して抜けうる**——実 `bash -e` は
+                            # NOGATE なのに「並びはいつでも失敗する」と読んで配線済みを返していた
+                            # （6 形で実測）。門番は兄弟の `scope_fatal` が持つものと同じ `rec_unc` で、
+                            # **`return 0` ではなく下の枝へ落とす**——本体が読めなくても手前に
+                            # 「走ると証明できる」致命的な記録があれば複合はそこで死ぬので
+                            # （実測: `|| ( false; if [ -n "$D" ]; then true; fi )` は GATES）
+                            if ((!via_opened || rec_unc[ls] == 0) && chain_never_succeeds(rec_txt[ls])) {
                                 # 反転の扱いは素の右辺と同じ（`|| { ! true ; }`。下の `||` の枝を参照）
                                 inv = CHAIN_PROBE_FLIP
                             }
@@ -4592,6 +4646,18 @@ ci_workflow_extract() {
                         if (rec_at > 0) {
                             run_depth = carries_command(text) ? (depth_in + cmd_opens) : depth_in
                             rec_scope[rec_at] = (run_depth > 0) ? scope_at[run_depth] : 0
+                            # **この断片がコマンドの階層より内側へ開いた階層**も控える（issue #198）。
+                            # `if true; then` / `for f in a; do` / `case x in` の見出しは**条件や一覧を
+                            # 外側の階層で走らせる**ので記録自身は外側に載るが、並びの要素としては
+                            # 閉じ語（`fi` / `done` / `esac`）までが 1 つのコマンドで、連鎖の歩きは
+                            # その閉じで位置を測る必要がある。`( … )` / `{ … ; }` は開き記号が命令の
+                            # 手前に来るので `cmd_opens` に数えられ、記録自身が内側へ載る＝ここは 0 で
+                            # よい（歩きは `rec_scope` の違いでそれを複合と見分ける）。
+                            # **材料も場所も `rec_scope` と同じ**にしてあるのが要点で、開き側の各枝で
+                            # 控えると (a) 枝ごとに書き写すことになり、(b) 1 断片が 2 つ開いた形で
+                            # 内側へ上書きしないための門番が要り、(c) **控えない記録が残る**ので
+                            # 前のジョブの値が読まれうる（記録の番号はジョブごとに振り直すため）
+                            rec_opened[rec_at] = (depth > run_depth) ? scope_at[run_depth + 1] : 0
                         }
                         # **この断片が開いた階層すべてに、断片に入る前のオプションを控える**
                         # （下の「フォークした複合の巻き戻し」で使う）。`errexit_before` /
@@ -4811,7 +4877,7 @@ ci_workflow_extract() {
             for (i = 1; i <= nenv; i++) { delete envbuf[i] }
             nenv = 0
             for (i = 1; i <= nbuf; i++) {
-                delete buf[i]; delete rec_scope[i]; delete rec_dead[i]; delete rec_unc[i]
+                delete buf[i]; delete rec_scope[i]; delete rec_dead[i]; delete rec_unc[i]; delete rec_opened[i]
                 delete rec_stepid[i]; delete rec_txt[i]; delete rec_opx[i]; delete rec_e[i]; delete rec_p[i]
             }
             for (i in last_scope_cmd) { delete last_scope_cmd[i] }
