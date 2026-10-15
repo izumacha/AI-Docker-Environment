@@ -1979,6 +1979,23 @@ ci_workflow_extract() {
             return "^case([[:space:]]|$)"
         }
 
+        # **ループを開く語の綴りの唯一の源**（`case_word_re()` と同じ役目）。
+        # `break` / `continue` が「何に効くか」を決めるのはこの語だけで、`if` は入れない
+        # ——bash の `break` は `for` / `while` / `until` / `select` の中でしか意味を持たず、
+        # それ以外では診断（only meaningful in a for/while/until loop）を
+        # 出して**実行を続ける**（実測: bash 5.2。**この説明に素の引用符を書かないこと**
+        # ——awk のプログラムはシェルのシングルクォートの中にあるので閉じてしまう）。
+        # **`open_form()` の語の一覧（階層を開く語の上位集合）とは役目が違う**ので別に持つ
+        # ——あちらは「階層を開くか」、こちらは「その階層がループか」を答える
+        function loop_word_re() {
+            return "^(while|until|for|select)([[:space:]]|$)"
+        }
+
+        # その断片がループを開く語で始まるか（飾りを剥がしてから見るのは `opens_case_word()` と同じ）
+        function opens_loop_word(t) {
+            return (strip_struct_wrappers(t) ~ loop_word_re())
+        }
+
         # **この綴りが `case` を開くかを返す唯一の判定。** `open_form()` が分類に使うのと
         # **同じ剥がし方**（`strip_struct_wrappers()`）を通すのが要点——生の綴りへ当てると
         # `time case $X in …` / `! case $X in …` は分類では形 2（`case`）なのにこちらでは
@@ -2874,7 +2891,7 @@ ci_workflow_extract() {
             scope_op[scope_serial] = ""
             scope_close_at[scope_serial] = 0
         }
-        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, fndef, fndef_at, struct_text, set_probe, set_open_n, set_crossed_sub, set_sub, sub_res_at, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_lead_n, set_lead_ok, set_arm_here, set_rest, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fnexit, fnret, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, closed_subshell, closed_uncertain, chain_in, inverted, arm_masked, arm_at, arm_expected, case_scope, opens_case, opens_case_here, case_opens_at, close_probe, close_rest, close_first, open_head, esac_probe, esac_rest, esac_first, dead_probe, dead_lead, close_n, exit_seen, chain_at, chain_depth, closed_sub_seen, closed_sub_e, closed_sub_p, sub_id, open_stripped, head_inverted, inverted_at, closed_inverted, sub_serial, depth_in, cmd_rest, cmd_sub, cmd_fndef, cmd_fnname, cmd_fnat, fn_name_here, esc_probe, esc_is_exit, esc_sub, sub_lead_in, fn_lead, call_sub, call_weak_at, call_weak_sub, exit_here, exit_sub,
+        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, fndef, fndef_at, struct_text, set_probe, set_open_n, set_crossed_sub, set_sub, sub_res_at, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_lead_n, set_lead_ok, set_arm_here, set_rest, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fnexit, fnret, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, closed_subshell, closed_uncertain, chain_in, inverted, arm_masked, arm_at, arm_expected, case_scope, opens_case, opens_case_here, case_opens_at, close_probe, close_rest, close_first, open_head, esac_probe, esac_rest, esac_first, dead_probe, dead_lead, close_n, exit_seen, chain_at, chain_depth, loop_at, esc_is_return, esc_ends_shell, esc_loop_at, esc_ends_loop, esc_return_local, closed_sub_seen, closed_sub_e, closed_sub_p, sub_id, open_stripped, head_inverted, inverted_at, closed_inverted, sub_serial, depth_in, cmd_rest, cmd_sub, cmd_fndef, cmd_fnname, cmd_fnat, fn_name_here, esc_probe, esc_is_exit, esc_sub, sub_lead_in, fn_lead, call_sub, call_weak_at, call_weak_sub, exit_here, exit_sub,
                               cmd_opens, run_depth, rec_at, nclosed_scope, closed_scope, ci) {
             # **シェルのオプションはステップごとにリセットする。** ステップは 1 つずつ
             # 別のシェルで走るので、前のステップの `set +e` / `pipefail` は引き継がれない。
@@ -4099,6 +4116,7 @@ ci_workflow_extract() {
                             if (uncertain_at[depth]) { uncertain--; uncertain_at[depth] = 0; closed_uncertain = 1 }
                             if (fndef_at[depth]) { fndef--; fndef_at[depth] = 0 }
                             true_at[depth] = 0
+                            loop_at[depth] = 0
                             # **部分シェルの入口は別に控える**（issue #152）。下の巻き戻しで
                             # 使うのは「閉じた一番外側の**部分シェル**の入口」で、`closed_entry_*`
                             # （閉じた一番外側の階層）とは別物——`{ set +e; ( : ) }` のように
@@ -4480,14 +4498,83 @@ ci_workflow_extract() {
                         # 片方だけが古くなる——`escape_probe()` の注記が、まさにそれで
                         # `exit "$?"` が正しくゲートしている綴りを赤くしていたことを記録している
                         esc_is_exit = (esc_probe ~ /^exit([[:space:]]|$)/)
+                        esc_is_return = (esc_probe ~ /^return([[:space:]]|$)/)
+                        # **脱出語が「どこまで届くか」は語ではなく bash の射程で決まる**（issue #204）。
+                        # **(1) 関数の本文の外の `return` はシェルを終わらせる。** bash は
+                        # can only return from a function or sourced script を出して**非ゼロで返る**
+                        # ので、`errexit` が立っていればその時点でシェルが終わる——部分シェルの中なら
+                        # その部分シェルが落ち、失敗は親へ伝わる。だから `exit` と同じ扱いにする
+                        # （以前は「いちばん内側の階層だけ」を終わらせていたので、閉じ括弧で印が
+                        #  解除されて後ろのスイートが「走る」と記録されていた＝実測で `{` 改行
+                        #  `return 0` 改行 `}` 改行 `bash <スイート>` が真値 NOGATE なのに wired
+                        #  ＝**必須スイートが黙ってゲートから外れる fail-open**）。
+                        # **`errexit` が落ちていれば何も起きない**——診断を出して実行が続くので、
+                        # `set +e` の下では区間を終わらせない（実測で真値 GATES。ここを見ないと
+                        # 正しくゲートする綴りを赤くする）。**関数の本文の中の `return` は従来どおり**
+                        # その階層だけを終わらせる。
+                        # **(2) ループの外の `break` / `continue` は何もしない。** bash は
+                        # only meaningful in a for/while/until loop を出して**実行を続ける**ので、
+                        # 囲っているループが無ければ区間を終わらせてはいけない（実測で
+                        # `{` 改行 `break` 改行 `bash <スイート>` 改行 `}` ほか真値 GATES の綴りが
+                        # not-wired ＝**正しくゲートしているスイートを赤くする fail-closed**）。
+                        # ループを探すのは**同じシェルの中だけ**で、**部分シェルと関数定義の本文で
+                        # 止める**——どちらの境界も bash は越えない（実測: bash 5.2 で
+                        # `f() { break; }` を `for … do f; done` から呼んでも診断が出て実行が続き、
+                        # 部分シェルの中の `break` も同じ）。印の比較は既存の
+                        # `innermost_marked_depth()` を使い、「いちばん内側のループが、いちばん
+                        # 内側の部分シェル・関数本文より内側か」を見る（新しい歩きは作らない）。
+                        # **関数の本文の中の `break` / `continue` は見送る**——呼び出し側が
+                        # ループの中かどうかはここからは分からないが、上の実測のとおり bash は
+                        # 呼び出し側のループを見ないので「ループは無い」側が正しい。
+                        # **連鎖の緩和（下の `!chain_in`）を `break` / `continue` へ広げない。**
+                        # issue #202 は「ループの中かを見ていないのが根なので issue #204 が持つ」と
+                        # 書いているが、**ループの印を入れたうえで広げても答えが 1 つも変わらない**
+                        # （実測: 連鎖 385 形で差分 0。ループの本体は `uncertain` が立つので、
+                        #  連鎖をどう読んでも記録は「走ると証明できない」側に入る）。
+                        # 何も変えない仕掛けは「守られている」と誤解させるので置かない
+                        # ——広げたくなったら、まず**ループの本体の「必ず走るか」**（issue #209）が
+                        # 動いているかを確かめること
+                        esc_loop_at = innermost_marked_depth(depth, loop_at)
+                        # **関数本文の境界は `!in_fndef_here` と `cmd_fndef == 0` が表している**ので、
+                        # ループの深さと比べ直さない——`in_fndef_here` は `fndef > 0` を含み、
+                        # それは「`fndef_at[]` が立っている階層が 1 つでもある」と同値なので、
+                        # `esc_loop_at > innermost_marked_depth(depth, fndef_at)` は恒真になる
+                        # （実際に足した版を測ると、ピンの答えが 1 件も変わらなかった＝§6 の
+                        #  「何も変えない仕掛けは置かない」）。
+                        # **2 つのうちピンが押さえているのは `cmd_fndef == 0` の側だけ**で、
+                        # `( f() { break; }` のように**部分シェルを越えた 1 行の定義**がそれを
+                        # 単独で分ける（`in_fndef_here` はこの綴りでは立たない＝実測）。
+                        # **`!in_fndef_here` を単独で外しても 1 件も落ちない**——立つのは
+                        # 複数行の定義の本文（`fndef > 0`）で、そこは `uncertain` を背負うので
+                        # 本文の中の記録がどう読んでも「走ると証明できない」側に入る。
+                        # それでも残すのは、ループの本体・関数の本文の「必ず走るか」を直す側
+                        # （issue #209）が入った瞬間に**静かな fail-open**（呼ばれるまで走らない
+                        # 本文の `break` が、囲っているループを終わらせたことにされる）へ
+                        # 変わるため。枝 2 の印と `esc_return_local` が同じ事情
+                        esc_ends_loop = ((esc_probe ~ /^(break|continue)([[:space:]]|$)/) \
+                                         && !in_fndef_here && cmd_fndef == 0 \
+                                         && esc_loop_at > 0 \
+                                         && esc_loop_at > innermost_marked_depth(depth, subshell_at))
+                        # **関数の本文の中の `return` にはピンが無い**（外しても 1 件も落ちない＝実測）。
+                        # 2 つの使い道のどちらも、いまは別の仕掛けに覆われている:
+                        # (a) `esc_ends_shell` から外しても、`exit` の枝は「走ると証明できない位置」を
+                        #     見送るので関数の本文（`uncertain` を背負う）では何もしない、
+                        # (b) 下の区間の付け方から外しても、本文の中の記録はどう読んでも
+                        #     「走ると証明できない」側に入る。
+                        # それでも区別を残すのは、**外すと関数の本文の `return` が「シェルを
+                        # 終わらせる」側に入る**ことになり、関数の本文の「必ず走るか」を直す側が
+                        # 入った瞬間に fail-closed（呼んだ関数の後ろを全部死に体にする）へ変わるため
+                        esc_return_local = (esc_is_return && (in_fndef_here || cmd_fndef >= 1))
+                        esc_ends_shell = (esc_is_exit \
+                                          || (esc_is_return && !esc_return_local && errexit))
                         if (!set_forked && !unreachable && !opens_case_here && dead_depth < 0 \
-                            && ((prev_op != "&&" && prev_op != "||") || (!chain_in && esc_is_exit)) \
+                            && ((prev_op != "&&" && prev_op != "||") || (!chain_in && esc_ends_shell)) \
                             && esc_probe ~ /^(exit|break|continue|return)([[:space:]]+[^[:space:]]+)?[[:space:]]*$/) {
                             # `exit` はシェルごと終わるので、以降のすべての断片が到達不能。
                             # **部分シェルの中と定義の本文は除く**——`( exit 0 )` は親を終わらせず、
                             # 定義しただけの本文は呼ばれるまで走らない（除かないと、呼ばれない
                             # 関数に `exit` を書くだけでステップ全体が死に体になる＝fail-closed）
-                            if (esc_is_exit) {
+                            if (esc_ends_shell) {
                                 # **走るかどうか分からない位置の `exit` は数えない**（`uncertain == 0`）。
                                 # `if [ -n "$X" ]; then exit 0; fi` や `case` のアームの中の `exit` は
                                 # 条件次第で走らないので、後ろを死に体にすると**実際にはゲートしている
@@ -4576,11 +4663,17 @@ ci_workflow_extract() {
                                         && fn_name_here != "") { fnexit[fn_name_here] = 1 }
                                 }
                             }
-                            # `break` / `continue` / `return` はいちばん内側の階層を抜けるので、
+                            # 関数の本文の中の `return` と、囲っているループの中の
+                            # `break` / `continue` はいちばん内側の階層を抜けるので、
                             # **その階層が閉じるまで**が到達不能（偽と分かる条件と同じ区間の形）。
                             # **`break 2` 以上は 1 階層ぶんしか見ない**——足りない側は `main` と
-                            # 同じ（新しい穴は作らない）ので、残る境界として記録する
-                            else if (depth > 0) { dead_depth = depth - 1 }
+                            # 同じ（新しい穴は作らない）ので、残る境界として記録する。
+                            # **どちらでもない綴り**（ループの外の `break` / `continue`、
+                            # `errexit` が落ちている下の関数外の `return`）は bash が何もしないので、
+                            # ここも何もしない（issue #204。上の説明）
+                            else if ((esc_return_local || esc_ends_loop) && depth > 0) {
+                                dead_depth = depth - 1
+                            }
                         }
                         # **脱出の適用はここだけ**（issue #189）。素の `exit` と、無条件に `exit` する
                         # 関数の呼び出しの 2 経路が同じ旗を立て、区間の付け方をここで 1 度だけ決める
@@ -4762,6 +4855,10 @@ ci_workflow_extract() {
                             if (open_kind == 1 && !chain_in && !inverted && ops[j] != "&&" && ops[j] != "||") {
                                 depth++; true_at[depth] = 1
                                 open_scope(depth)
+                                # **`while true` はループで、`if true` は違う**（issue #204）。
+                                # `break` / `continue` はループの中でしか意味を持たないので、この印を
+                                # 脱出のアームが読んで「区間を終わらせるか」を決める
+                                if (opens_loop_word(open_probe)) { loop_at[depth] = 1 }
                                 # **必ず走る入れ子なので grouping と同じ扱い。** 開始位置を控えないと、
                                 # 閉じた `fi` / `done` に付いた `|| true` が中身へ伝わらず、
                                 # 握り潰された実行が「ゲートしている」と読まれる
@@ -4773,6 +4870,17 @@ ci_workflow_extract() {
                                 # **`case` の入れ子はここで数える。** 断片の先頭とは限らない
                                 # （`f() { case x in` のように本体の中で開くことがある）
                                 if (opens_case_word(open_probe)) { case_depth++ }
+                                # **この階層がループかを控える**（issue #204。枝 1 と同じ理由）。
+                                # **こちらの印にピンは無い**（外しても 1 件も落ちない＝実測）——
+                                # この枝で開くループ（`for` / `until` / `while <条件>` / `select`）は
+                                # 同時に `uncertain` も背負うので、本体の中の記録はどう読んでも
+                                # 「走ると証明できない」側に入り、`break` が区間を終わらせても
+                                # 答えが変わらない。それでも印を付けるのは、**付けないと
+                                # `esc_ends_loop` が「ループは無い」と答える**ことになり、
+                                # ループの本体の「必ず走るか」を直す側（issue #209）が入った瞬間に
+                                # 静かな fail-open（ループを抜けた後ろを実行の証拠に数える）へ
+                                # 変わるため。観測できるのは枝 1（`while true`）だけ
+                                if (opens_loop_word(open_probe)) { loop_at[depth] = 1 }
                                 # **閉じた `fi` / `done` に付いた区切りは中身すべてに掛かる。**
                                 # grouping と同じで、控えないと `fi || true` が本体へ伝わらず、
                                 # 握り潰された実行が「ゲートしている」と読まれる（実測）

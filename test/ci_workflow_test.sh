@@ -2847,6 +2847,190 @@ jobs:
           ${unreachable_after_case#*:}"
 done
 
+# --- 脱出語が bash で届く範囲（issue #204） --------------------------------------
+#
+# **`break` / `continue` はループの中でしか意味を持たない。** ループの外では bash が
+# 診断（only meaningful in a for/while/until loop）を出して**実行を続ける**ので、
+# 区間を終わらせてはいけない。以前は囲いの種類を見ずに終わらせていたため、下の 4 形は
+# 真値 GATES なのに未配線＝**正しくゲートしているスイートを赤くする fail-closed**
+# だった。ループを探すのは**同じシェルの中だけ**で、部分シェルと関数定義の本文で止まる
+# （実測: bash 5.2 は `f() { break; }` を `for … do f; done` から呼んでも診断を出す）
+
+for escape_reach_case in \
+    "ブレースの中の break:{
+          break
+          bash ${SUITE_PATH}
+          }" \
+    "ブレースの中の continue:{
+          continue
+          bash ${SUITE_PATH}
+          }" \
+    "必ず走る条件の中の break:if true; then
+          break
+          bash ${SUITE_PATH}
+          fi" \
+    "部分シェルの中の break:(
+          break
+          bash ${SUITE_PATH}
+          )" \
+    "ループの中の部分シェルの break:while true; do
+          (
+          break
+          bash ${SUITE_PATH}
+          )
+          break
+          done" \
+    "ループを閉じたら印も落ちる:for i in 1; do
+          :
+          done
+          {
+          break
+          bash ${SUITE_PATH}
+          }"
+do
+    assert_wired "ループの外の脱出語（${escape_reach_case%%:*}）は何もしない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${escape_reach_case#*:}"
+done
+
+# **関数の本文の外の `return` はシェルを終わらせる。** bash は
+# can only return from a function or sourced script を出して**非ゼロで返る**ので、
+# `errexit`（GitHub Actions は `bash -e`）が立っていればその時点でシェルが終わる。
+# 以前はいちばん内側の階層だけを終わらせていたため、閉じ括弧で印が解除されて
+# 後ろのスイートが「走る」と記録されていた＝**必須スイートが黙ってゲートから外れる
+# fail-open**（真値はいずれも NOGATE）
+
+for return_ends_shell_case in \
+    "ブレースの中（複数行）:{
+          return 0
+          }
+          bash ${SUITE_PATH}" \
+    "ブレースの中（1 行）:{ return 0; }
+          bash ${SUITE_PATH}" \
+    "結論の分かる連鎖の右辺:true && return 0
+          bash ${SUITE_PATH}" \
+    "必ず走る条件の中:if true; then
+          return 0
+          fi
+          bash ${SUITE_PATH}" \
+    "部分シェルの中のブレース:(
+          {
+          return 0
+          }
+          bash ${SUITE_PATH}
+          )"
+do
+    assert_not_wired "関数の外の return（${return_ends_shell_case%%:*}）より後ろは実行の証拠にしない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${return_ends_shell_case#*:}"
+done
+
+# 締めすぎない側の控え。**どれも実 bash では失敗が job へ伝わる**（真値 GATES）ので、
+# 上の 2 つの緩和・強化がここまで広がっていないことを 1 形ずつ固定する
+
+for escape_reach_control in \
+    "errexit が落ちていれば return は何もしない:set +e
+          {
+          return 0
+          }
+          bash ${SUITE_PATH}" \
+    "errexit が落ちていれば最上位の return も何もしない:set +e
+          return 0
+          bash ${SUITE_PATH}" \
+    "関数の本文の return はその関数だけを抜ける:f() {
+          return 0
+          }
+          f
+          bash ${SUITE_PATH}" \
+    "閉じ括弧に付いた || true は部分シェルの return を吸う:(
+          return 0
+          ) || true
+          bash ${SUITE_PATH}" \
+    "ループを抜けた後ろは走る:{
+          for i in 1; do
+          break
+          done
+          bash ${SUITE_PATH}
+          }" \
+    "1 行に畳んだブレースの break:{ break; bash ${SUITE_PATH}; }" \
+    "1 行に畳んだ部分シェルの break:( break
+          bash ${SUITE_PATH} )" \
+    "1 行に畳んだ定義の中の break はループを終わらせない:while true; do
+          f() { break; }
+          bash ${SUITE_PATH}
+          break
+          done" \
+    "部分シェルを越えた 1 行の定義の中の break も同じ:while true; do
+          ( f() { break; }
+          bash ${SUITE_PATH}
+          )
+          break
+          done"
+do
+    assert_wired "脱出語の射程の控え（${escape_reach_control%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${escape_reach_control#*:}"
+done
+
+# ループの中の `break` / `continue` は**従来どおり**区間を終わらせる（真値 NOGATE）。
+# **`while true` もループ**で、`if true` と同じ枝で階層が開くので印の付け忘れが起きやすい
+# ——付け忘れるとこの 1 形だけが wired へ倒れる（実測）
+
+for escape_in_loop_case in \
+    "while true の中の break:while true; do
+          break
+          bash ${SUITE_PATH}
+          done" \
+    "for の中の break:for i in 1; do
+          break
+          bash ${SUITE_PATH}
+          done" \
+    "ループの中の case のアームの break:for i in 1; do
+          case x in
+          x)
+          break
+          bash ${SUITE_PATH}
+          ;;
+          esac
+          done" \
+    "ループの中のブレースの break:while true; do
+          {
+          break
+          bash ${SUITE_PATH}
+          }
+          break
+          done" \
+    "関数の本文の return の後ろ（階層だけを抜ける）:f() {
+          return 0
+          bash ${SUITE_PATH}
+          }
+          f"
+do
+    assert_not_wired "ループの中の脱出語（${escape_in_loop_case%%:*}）の後ろは実行の証拠にしない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${escape_in_loop_case#*:}"
+done
+
 # **締めすぎない側＝走るかどうか分からない位置の脱出は数えない。**
 # 条件次第で走らない `exit` の後ろを死に体にすると、**実際にはゲートしているスイートを
 # 「未配線」と報告**する（CI では通過する早期ガードを持つワークフローが軒並み赤くなる）。
