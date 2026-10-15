@@ -2889,8 +2889,11 @@ done
 #   後ろのスイートは実行される（数えると、正しくゲートしているワークフローを赤くする）。
 # - 読めない左辺（`test -n "$X" && exit 0`）は条件次第。**環境を決めれば真値は決まるが
 #   綴りからは決まらない**ので、「走ると証明できない」側＝見送る（issue #189 で何度も踏んだ向き）。
-#   実測の境界: `X` が空の環境では脱出が走るので真値 NOGATE で、ここは `wired` と答える
-#   （＝残っている fail-open。綴りから閉じる方法が無いので記録として残す）。
+#   **実測の境界は極性で分かれる**（レビューで訂正）: `X` が空なら `test -n` は偽なので脱出は
+#   走らず、真値は **GATES**＝`wired` は正しい答え（ここは fail-open ではない）。
+#   残っている fail-open は**逆の極性**（`test -z "$X" && exit 0` ・ `test -n "$X" || exit 0`）で、
+#   `X` が空のとき脱出が走って真値 NOGATE なのに `wired` と答える。綴りから閉じる方法が
+#   無いので、その 2 形も**境界の記録として**この一覧へ置く（答えが変わったら気付けるように）。
 # - `break` / `continue` には広げない。実測で、ループの外の `break` を連鎖の右辺で数えると
 #   `( true && break` 改行 スイート `)` ほか**真値 GATES の 36 形が未配線へ倒れた**
 #   （ループの中かどうかを見ていないのが根＝issue #204）
@@ -2910,6 +2913,27 @@ for chain_exit_control_case in \
     "部分シェルを閉じた後ろのスイート:( true && exit 0 )
           bash ${SUITE_PATH}" \
     "連鎖の右辺が脱出でない形:true && true
+          bash ${SUITE_PATH}" \
+    "読めない左辺の呼び出し:f() { exit 0; }
+          test -n \"\$X\" && f
+          bash ${SUITE_PATH}" \
+    "読めない左辺の呼び出し（|| 側）:f() { exit 0; }
+          test -z \"\$X\" || f
+          bash ${SUITE_PATH}" \
+    "複数行の部分シェルの連鎖:( true && exit 0
+          echo x )
+          bash ${SUITE_PATH}" \
+    "連鎖の右辺で定義を開く断片の呼び出し:f() { exit 0; }
+          true && ( h() { f ; }
+          bash ${SUITE_PATH}
+          )" \
+    "連鎖の右辺でブレースの定義を開く断片の呼び出し:f() { exit 0; }
+          true && { h() { f ; }
+          bash ${SUITE_PATH}
+          }" \
+    "残っている fail-open の境界（&& 側）:test -z \"\$X\" && exit 0
+          bash ${SUITE_PATH}" \
+    "残っている fail-open の境界（|| 側）:test -n \"\$X\" || exit 0
           bash ${SUITE_PATH}"
 do
     assert_wired "結論の分かる連鎖の右辺でも数えない形（${chain_exit_control_case%%:*}）" "name: ci

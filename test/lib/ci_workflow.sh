@@ -2864,7 +2864,7 @@ ci_workflow_extract() {
             scope_op[scope_serial] = ""
             scope_close_at[scope_serial] = 0
         }
-        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, fndef, fndef_at, struct_text, set_probe, set_open_n, set_crossed_sub, set_sub, sub_res_at, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fnexit, fnret, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, closed_subshell, closed_uncertain, chain_in, inverted, arm_masked, arm_at, arm_expected, case_scope, opens_case, opens_case_here, case_opens_at, close_probe, close_rest, close_first, open_head, esac_probe, esac_rest, esac_first, dead_probe, dead_lead, close_n, exit_seen, chain_at, chain_depth, closed_sub_seen, closed_sub_e, closed_sub_p, sub_id, open_stripped, head_inverted, inverted_at, closed_inverted, sub_serial, depth_in, cmd_rest, cmd_sub, cmd_fndef, cmd_fnname, cmd_fnat, fn_name_here, esc_probe, esc_sub, sub_lead_in, fn_lead, call_sub, call_weak_at, call_weak_sub, exit_here, exit_sub,
+        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, fndef, fndef_at, struct_text, set_probe, set_open_n, set_crossed_sub, set_sub, sub_res_at, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fnexit, fnret, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, closed_subshell, closed_uncertain, chain_in, inverted, arm_masked, arm_at, arm_expected, case_scope, opens_case, opens_case_here, case_opens_at, close_probe, close_rest, close_first, open_head, esac_probe, esac_rest, esac_first, dead_probe, dead_lead, close_n, exit_seen, chain_at, chain_depth, closed_sub_seen, closed_sub_e, closed_sub_p, sub_id, open_stripped, head_inverted, inverted_at, closed_inverted, sub_serial, depth_in, cmd_rest, cmd_sub, cmd_fndef, cmd_fnname, cmd_fnat, fn_name_here, esc_probe, esc_is_exit, esc_sub, sub_lead_in, fn_lead, call_sub, call_weak_at, call_weak_sub, exit_here, exit_sub,
                               cmd_opens, run_depth, rec_at, nclosed_scope, closed_scope, ci) {
             # **シェルのオプションはステップごとにリセットする。** ステップは 1 つずつ
             # 別のシェルで走るので、前のステップの `set +e` / `pipefail` は引き継がれない。
@@ -3723,8 +3723,19 @@ ci_workflow_extract() {
                                 # （issue #189 で何度も踏んだ向き）。判定は既にある `chain_in`
                                 # （「この断片が走ると証明できない連鎖の中か」）をそのまま読む
                                 # ——新しい勘定は作らない（§6）。連鎖に入っていない断片では
-                                # `chain_in` は 0 なので、従来の門番の意味はそのまま含まれる
-                                if (!in_fndef_here && fnexit[fncall] && !opens_case_here \
+                                # `chain_in` は 0 なので、従来の門番の意味はそのまま含まれる。
+                                # **`cmd_fndef == 0` を足すのは門番を緩めた代償**（レビューで実測）。
+                                # `in_fndef_here` は `^` 錨の `function_form()` 由来なので
+                                # `true && ( h() { f ; }` のように**開き括弧の後ろで定義を開く**断片を
+                                # 「定義の中」と読めず、呼び出しの綴り（`call_probe`）は
+                                # その本文から引き直される。以前は `prev_op` の門番が先に見送って
+                                # いたので表に出なかったが、`!chain_in` にした瞬間に
+                                # **定義しただけで呼ばれていない本文の `f` を「呼んだ」と読み**、
+                                # その部分シェルの残りを死に体にしていた（真値 GATES が
+                                # `wired` → `not-wired`＝正しくゲートしているワークフローを赤くする
+                                # 向き。部分シェル・ブレースの両方で実測）。素の `exit` の枝が
+                                # 同じ理由で `cmd_fndef == 0` を持っているので、そこへそろえる
+                                if (!in_fndef_here && cmd_fndef == 0 && fnexit[fncall] && !opens_case_here \
                                     && uncertain == 0 && chain_depth == 0 \
                                     && !chain_in) {
                                     # 旗だけ立てて、下の 1 か所（解除のあと）で適用する
@@ -4363,15 +4374,19 @@ ci_workflow_extract() {
                         # 未配線へ倒れた**。ループの中かどうかを見ていないのが根（issue #204）で、
                         # そこを直すまでは連鎖の手前の `prev_op` で見送る側に留める。
                         # `return` も同じ扱い（関数の外の `return` の読み方は issue #204 が持つ）
+                        # **`exit` かどうかの綴りはこの 1 か所で持つ**（§6。レビュー指摘）。
+                        # 門番と下の振り分けで同じ正規表現を 2 つ持つと、綴りを広げたときに
+                        # 片方だけが古くなる——`escape_probe()` の注記が、まさにそれで
+                        # `exit "$?"` が正しくゲートしている綴りを赤くしていたことを記録している
+                        esc_is_exit = (esc_probe ~ /^exit([[:space:]]|$)/)
                         if (!set_forked && !unreachable && !opens_case_here && dead_depth < 0 \
-                            && ((prev_op != "&&" && prev_op != "||") \
-                                || (!chain_in && esc_probe ~ /^exit([[:space:]]|$)/)) \
+                            && ((prev_op != "&&" && prev_op != "||") || (!chain_in && esc_is_exit)) \
                             && esc_probe ~ /^(exit|break|continue|return)([[:space:]]+[^[:space:]]+)?[[:space:]]*$/) {
                             # `exit` はシェルごと終わるので、以降のすべての断片が到達不能。
                             # **部分シェルの中と定義の本文は除く**——`( exit 0 )` は親を終わらせず、
                             # 定義しただけの本文は呼ばれるまで走らない（除かないと、呼ばれない
                             # 関数に `exit` を書くだけでステップ全体が死に体になる＝fail-closed）
-                            if (esc_probe ~ /^exit([[:space:]]|$)/) {
+                            if (esc_is_exit) {
                                 # **走るかどうか分からない位置の `exit` は数えない**（`uncertain == 0`）。
                                 # `if [ -n "$X" ]; then exit 0; fi` や `case` のアームの中の `exit` は
                                 # 条件次第で走らないので、後ろを死に体にすると**実際にはゲートしている
