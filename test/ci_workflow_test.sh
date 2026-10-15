@@ -2421,8 +2421,9 @@ jobs:
           echo done"
 
 # 括りの記録は errexit のものなので、pipefail の判断には使わない。
-# 巻き込むと、無関係な set +e が同じ階層で開いているだけで
-# 走らないループの中の set -o pipefail が credit される
+# **いまこの形を止めているのは `uncertain == 0`**（issue #203 で門番を
+# 「確実に走るか」へ置き換えたので、errexit の括り記録は読まなくなった）。
+# ループの本文は走ると証明できないので、その中の set -o pipefail は credit しない
 assert_not_wired "errexit の括り記録は pipefail に流用しない" "name: ci
 jobs:
   type-check:
@@ -2437,6 +2438,125 @@ jobs:
           done
           set -e
           bash ${SUITE_PATH} | cat"
+
+# --- 部分シェル・ブレースの中の set -o pipefail（issue #203） ------------------
+#
+# `pipefail` は `bash -e` の既定で**立っていない**ので、強める向きの門番を
+# errexit と共有すると「同じ階層に `set +e` の記録があるときだけ credit する」
+# という無関係な条件になり、隣に `set +e` を書かない限り部分シェル・ブレースの
+# 中では**一度も credit できない**。実 bash（番兵なし）では下の 10 形すべてで
+# スイートの失敗が job へ伝わる（真値 GATES）のに、`main` は not-wired と答えて
+# いた＝**正しくゲートしているスイートを赤くする fail-closed**。
+# 門番は「その `set` が確実に走るか」（命令の位置で見つけた綴り・定義の本文でない・
+# 走ると証明できない階層の中でない・連鎖の右辺なら左辺のリテラルが走ると言う）
+
+for pipefail_scope_case in \
+    "部分シェルの中（複数行）:(
+          set -euo pipefail
+          bash ${SUITE_PATH} | cat
+          )" \
+    "ブレースの中（開きと同じ行）:{ set -o pipefail
+          bash ${SUITE_PATH} | cat
+          }" \
+    "部分シェルを 1 行に畳んだ形:( set -o pipefail; bash ${SUITE_PATH} | cat )" \
+    "ブレースを 1 行に畳んだ形:{ set -o pipefail; bash ${SUITE_PATH} | cat; }" \
+    "飾りの後ろの部分シェル:time (
+          set -o pipefail
+          bash ${SUITE_PATH} | cat
+          )" \
+    "入れ子の部分シェル:(
+          (
+          set -o pipefail
+          bash ${SUITE_PATH} | cat
+          )
+          )" \
+    "部分シェルの中のブレースは閉じても残る:(
+          {
+          set -o pipefail
+          }
+          bash ${SUITE_PATH} | cat
+          )" \
+    "while の条件の位置:while set -o pipefail; do break; done
+          bash ${SUITE_PATH} | cat" \
+    "結論の分かる連鎖の右辺:true && set -o pipefail
+          bash ${SUITE_PATH} | cat" \
+    "部分シェルの中で定義だけ越える:( f() { :; }
+          set -o pipefail
+          bash ${SUITE_PATH} | cat
+          )"
+do
+    assert_wired "部分シェル・ブレースの中の set -o pipefail（${pipefail_scope_case%%:*}）はパイプの失敗を伝える" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${pipefail_scope_case#*:}"
+done
+
+# 締めすぎない側の控え。**どれも実 bash では伝わらない**（真値 NOGATE）ので、
+# 上の緩和がここまで広がっていないことを 1 形ずつ固定する。
+# 門番のどれを外しても、ここのどれかが赤くなる
+
+for pipefail_scope_control in \
+    "部分シェルを閉じたら入口へ戻る:(
+          set -o pipefail
+          )
+          bash ${SUITE_PATH} | cat" \
+    "内側の部分シェルを閉じたら戻る:(
+          (
+          set -o pipefail
+          )
+          bash ${SUITE_PATH} | cat
+          )" \
+    "ブレースの中の部分シェルも戻る:{
+          (
+          set -o pipefail
+          )
+          bash ${SUITE_PATH} | cat
+          }" \
+    "一致しないアームの set は走らない:case x in a) set -o pipefail ;; esac
+          bash ${SUITE_PATH} | cat" \
+    "越えた定義の本文の set は呼ぶまで走らない:( f() { set -o pipefail; }
+          bash ${SUITE_PATH} | cat
+          )" \
+    "定義の本文の set（複数行）:f() {
+          set -o pipefail
+          }
+          bash ${SUITE_PATH} | cat" \
+    "定義の本文の set（1 行）:f() { set -o pipefail; }
+          bash ${SUITE_PATH} | cat" \
+    "結論が偽の連鎖の右辺:( false && set -o pipefail
+          bash ${SUITE_PATH} | cat
+          )" \
+    "読めない左辺の連鎖の右辺:( test -z \"${DOLLAR}HOME\" && set -o pipefail
+          bash ${SUITE_PATH} | cat
+          )" \
+    "フォークしたブレースの中:{ set -o pipefail; } | cat
+          bash ${SUITE_PATH} | cat" \
+    "set 自身がパイプの左側:set -o pipefail | cat
+          bash ${SUITE_PATH} | cat" \
+    "走ると証明できない条件の中:( if false; then set -o pipefail; fi
+          bash ${SUITE_PATH} | cat
+          )" \
+    "手前の条件が真なら評価されない elif:if true; then :; elif set -o pipefail; then :; fi
+          bash ${SUITE_PATH} | cat" \
+    "到達しない位置の set:(
+          exit 0
+          set -o pipefail
+          bash ${SUITE_PATH} | cat
+          )"
+do
+    assert_not_wired "部分シェル・ブレースの緩和が届かない形（${pipefail_scope_control%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${pipefail_scope_control#*:}"
+done
 
 # --- 排他なアームは打ち消し合わない（同じ深さでも別の枝） ---------------------------
 #

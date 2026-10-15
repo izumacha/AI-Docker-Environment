@@ -3435,13 +3435,60 @@ ci_workflow_extract() {
                                                && (subshell == 0 \
                                                    || (weak_depth >= 0 && weak_sub != 0 \
                                                        && weak_sub == sub_id[enclosing_subshell_depth(depth, subshell_at)])))
-                            # **括りの記録は errexit のものなので、errexit の判断にしか使わない**
-                            # （`apply_errexit()` の中で測る）。pipefail まで巻き込むと、無関係な
-                            # `set +e` が同じ階層で開いているだけで走らないループの中の
-                            # `set -o pipefail` が credit され、パイプ越しの失敗が伝わらない
-                            # ステップを「伝わる」と読む（fail-open。実測）。
-                            # pipefail には自前の括り記録が無いので、確実に走ると分かるときだけ
-                            strengthen_pipe_ok = (strengthen_base && uncertain == 0)
+                            # **pipefail を強める向きは errexit と門番を共有できない。**
+                            # `errexit` は `bash -e` の既定で**最初から立っている**ので、
+                            # `set -e` を credit する意味があるのは「同じ部分シェルの中で
+                            # 自分が落としたものを戻すとき」だけ（上の `weak_*` の条件。親の
+                            # 握り潰しの下での `( set -e; … )` を素直に credit すると、部分
+                            # シェルの中でしか止まらないものを「親で止まる」と読む fail-open。
+                            # issue #152）。**pipefail は既定が立っていない**ので、同じ門番を
+                            # 通すと「同じ階層に `set +e` の記録があるときだけ
+                            # `set -o pipefail` を credit する」という無関係な条件になり、
+                            # 隣に `set +e` を書かない限り**部分シェル・ブレースの中では
+                            # 一度も credit できない**（実測で `( set -o pipefail` ＋
+                            # `bash <スイート> | cat` ＋ `)` ・
+                            # `{ set -o pipefail; bash <スイート> | cat; }` ほか 126 形が
+                            # 真値 GATES なのに not-wired ＝**正しくゲートしているスイートを
+                            # 赤くする fail-closed**。issue #203）。
+                            # **中で credit した値が後ろの記録へ漏れないことは別の仕掛けが
+                            # 保証している**——部分シェルを閉じる断片が `pipefail` を入口の値へ
+                            # 巻き戻し（上の `closed_sub_seen`）、`|` / `&` でフォークした複合も
+                            # 同じく巻き戻す。ブレースは現在のシェルで走るので漏れるのが正しい
+                            # （実 bash と差分照合して実測: `{ set -o pipefail; }` の後ろの
+                            #  パイプには効き、`( set -o pipefail )` の後ろには効かない）。
+                            # つまり errexit の門番が守っているのは「漏れ」ではなく
+                            # 「部分シェルの中の停止を親の停止と読むこと」で、pipefail には
+                            # その読み替えが起こらない（`| cat` の失敗はその階層で起きる）。
+                            # したがって pipefail は「**その `set` が確実に走るか**」だけで決める:
+                            #   - **命令の位置で見つけた綴りであること**（`set_placed`）。
+                            #     アーム走査で見つけた `set` は走ると証明できない——
+                            #     `case x in a) set -o pipefail ;; esac` はアームが一致しなければ
+                            #     1 度も走らないのに、`case` を開く断片では `uncertain` がまだ 0 で
+                            #     他の条件では止まらない（実測で真値 NOGATE なのに credit した）
+                            #   - **関数定義の本文でないこと。** `in_fndef_here` は `^` 錨なので、
+                            #     歩きが越えた定義（`( f() { set -o pipefail; }`）は `cmd_fndef` で
+                            #     見る（見ないと、呼んでいない定義の `set` を credit して、パイプ
+                            #     越しの失敗が伝わらないステップを「伝わる」と読む fail-open）
+                            #   - **走ると証明できない階層の中でないこと**（`uncertain == 0`）。
+                            #     `if false; then` の本文・ループの本文・`elif` の条件
+                            #     （手前の条件が真なら評価されない）がここで止まる
+                            #   - **連鎖の右辺なら、左辺のリテラルが「右辺は走る」と言っていること**
+                            #     （`!chain_in`。issue #202 が `exit` で使ったのと同じ材料で、
+                            #      `true && set -o pipefail` は credit し、`false && …` と
+                            #      読めない左辺は見送る）
+                            # **errexit 側（`strengthen_base`）の門番は緩めないこと**——
+                            # あちらを同じ条件にすると issue #152 の fail-open に戻る。
+                            # **残る境界 2 つ**（どちらも実測）: 呼んだ関数の `set -o pipefail` は
+                            # **強める向きの台帳が無い**ので反映しない（`fnweak_pipe` は弱める向き
+                            # だけ。fail-closed 12 形。issue #221）。閉じ括弧の無い綴り
+                            # （`( set -o pipefail` ＋ `bash <スイート> | cat` で step が終わる）は
+                            # credit するが、それは `bash -n` が構文エラーにするスクリプトで、
+                            # **step は毎回必ず落ちる**ので必須スイートが黙ってゲートから外れる側へは
+                            # 倒れない（`main` は釣り合わない `(` / `{` / `if true; then` のすべてを
+                            # 同じく wired と答える＝この差分で増えた綴りは 1 つだけ。
+                            # 「構文エラーになる綴りは手当てしない」は issue #187 で置いた先例と同じ）
+                            strengthen_pipe_ok = (set_placed && !in_fndef_here && cmd_fndef == 0 \
+                                                  && !chain_in && uncertain == 0)
                             # **`case` を開く断片に載ったアームの `set` は、本体の階層に属する。**
                             # 深さが増えるのはこの断片の**末尾**なので、素直に `depth` で記録すると
                             # 同じアームの後続（1 つ深い）の `set -e` が打ち消せず、
