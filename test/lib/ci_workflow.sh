@@ -2795,7 +2795,7 @@ ci_workflow_extract() {
             scope_op[scope_serial] = ""
             scope_close_at[scope_serial] = 0
         }
-        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, fndef, fndef_at, struct_text, set_probe, set_open_n, set_crossed_sub, set_sub, set_res_at, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fnexit, fnret, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, closed_subshell, closed_uncertain, chain_in, inverted, arm_masked, arm_at, arm_expected, case_scope, opens_case, opens_case_here, case_opens_at, close_probe, close_rest, close_first, open_head, esac_probe, esac_rest, esac_first, dead_probe, dead_lead, close_n, exit_seen, chain_at, chain_depth, closed_sub_seen, closed_sub_e, closed_sub_p, sub_id, open_stripped, head_inverted, inverted_at, closed_inverted, sub_serial, depth_in, cmd_rest, cmd_sub, cmd_fndef, cmd_fnname, cmd_fnat, fn_name_here, esc_probe, esc_sub, sub_lead_in, fn_lead, call_sub, exit_here, exit_sub,
+        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, fndef, fndef_at, struct_text, set_probe, set_open_n, set_crossed_sub, set_sub, sub_res_at, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fnexit, fnret, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, closed_subshell, closed_uncertain, chain_in, inverted, arm_masked, arm_at, arm_expected, case_scope, opens_case, opens_case_here, case_opens_at, close_probe, close_rest, close_first, open_head, esac_probe, esac_rest, esac_first, dead_probe, dead_lead, close_n, exit_seen, chain_at, chain_depth, closed_sub_seen, closed_sub_e, closed_sub_p, sub_id, open_stripped, head_inverted, inverted_at, closed_inverted, sub_serial, depth_in, cmd_rest, cmd_sub, cmd_fndef, cmd_fnname, cmd_fnat, fn_name_here, esc_probe, esc_sub, sub_lead_in, fn_lead, call_sub, call_weak_at, call_weak_sub, exit_here, exit_sub,
                               cmd_opens, run_depth, rec_at, nclosed_scope, closed_scope, ci) {
             # **シェルのオプションはステップごとにリセットする。** ステップは 1 つずつ
             # 別のシェルで走るので、前のステップの `set +e` / `pipefail` は引き継がれない。
@@ -3429,10 +3429,14 @@ ci_workflow_extract() {
                                 # **開き側が越えた数より少なく開く綴りは実在する**（issue #172 の
                                 # アーム模様の surgery は `(` を 1 文字落とすので `paren` が
                                 # 生の釣り合いより小さくなりうる。`case $X in` の直後の
-                                # `( set +e |` がその形）。**この印に当たるピンは無い**——
-                                # その綴りを作る検査をどのスイートも持っていないので、
-                                # 外しても緑のまま通る。規約とレビューで守る
-                                set_res_at = i ":" j
+                                # `( set +e |` がその形）。**余りが出るその綴りを作る検査は
+                                # どのスイートも持っていない**ので、余りの始末だけは規約と
+                                # レビューで守る。**印そのものはピンが掛かっている**
+                                # （issue #200 で実測: この行を消す変異と、開き側が印を見ず必ず
+                                #  振り直す変異のどちらでも落ちる。**件数は書かない**——ピンを
+                                #  足すたびに動く。「印に当たるピンは無い」と読めると、相乗りの
+                                #  経路ごと消してよいと誤解されるので分けて書く）
+                                sub_res_at = i ":" j
                             }
                             # **関数ごとの台帳で使う階層。** 本体を同じ断片で開く 1 行書き
                             # （`f() { set +e; }`）では深さが増えるのが断片の末尾なので、
@@ -3646,20 +3650,53 @@ ci_workflow_extract() {
                                     exit_here = 1
                                     exit_sub = call_sub
                                 }
-                                # **この断片で部分シェルを越えた呼び出しの弱めは反映しない**
-                                # （`call_sub == 0`）。弱めを記録する階層は `depth`＝部分シェルの
-                                # **外**なので、そのまま反映すると内側の `set -e` が打ち消せない
-                                # （`strengthen_base` は部分シェルの中では「その部分シェルの中で
-                                #   落とした記録か」を `weak_sub` で見るが、ここは `at_sub` を
-                                #   渡せない——その部分シェルの `sub_id` は開きを数えたあとに
-                                #   振られるので、この時点ではまだ存在しない）。
-                                # **門番の代償は fail-open で、外すだけでは直らない**（issue #200）:
-                                # 480 形の総当たりで、外すと `( quiet` 改行 `bash <スイート>` 改行
-                                # `echo x )` 等の **32 形が正しく not-wired になる一方、`( ( quiet`
-                                # 改行 `set -e` …の 16 形が fail-closed へ倒れた**（実測）。
-                                # 取り替えになるので、弱めを開きの後ろへ遅らせる形（旗を立てて
-                                # 1 か所で適用する `exit_here` と同じ）で閉じるまで据え置く
-                                if (!in_fndef_here && subshell == 0 && call_sub == 0) {
+                                # **この断片で部分シェルを越えた呼び出しの弱めも、その部分シェルへ
+                                # 帰属させて反映する**（issue #200）。かつては `call_sub == 0` を門番に
+                                # 加えて見送っていたが、それは `( quiet` 改行 `bash <スイート>` 改行
+                                # `echo x )`（`quiet() { set +e; }`）を wired と答える fail-open だった
+                                # ——実 bash では部分シェルの最後が `echo x` なので失敗は外へ出ない。
+                                # **門番を単に外すのは誤り**で、`apply_errexit()` が `depth`＝部分シェルの
+                                # **外**の階層で記録するため、内側の `set -e` が打ち消せなくなる
+                                # （`strengthen_base` は「その部分シェルの中で落とした記録か」を
+                                #   `weak_sub` で見る）。issue の実測では、外すだけだと 32 形が直る
+                                # 代わりに `( ( quiet` 改行 `set -e` …の形が fail-closed へ倒れていた。
+                                # **直し方は `set` 側と同じ「先に番号を振る」**（issue #180 / #187 で
+                                # 入れた仕掛けを再利用する。新しい機構は作らない＝§6）
+                                if (!in_fndef_here) {
+                                    # 弱めを記録する階層＝この断片で越えた分だけ内側（越えていなければ `depth`）
+                                    call_weak_at = depth + call_sub
+                                    # **いま囲っている部分シェルの番号**（前の断片で開いた `(` の中なら
+                                    # その番号、最上位なら 0）。`set` 側の `set_sub` とまったく同じ引き方で、
+                                    # これを渡さないと「部分シェルの中で落とした」と結び付かず、
+                                    # 閉じたときに入口の姿へ戻す経路も効かない
+                                    call_weak_sub = sub_id[enclosing_subshell_depth(depth, subshell_at)]
+                                    # この断片で部分シェルを越えて呼んだときだけ、越えた先の番号が要る
+                                    # **予約するのは弱める関数を呼ぶときだけ**（レビュー指摘）。
+                                    # ここは識別子で始まる断片すべてを通るので、条件を付けないと
+                                    # `( echo hi` でも連番を 1 つ消費して共有の印（`sub_res_at`）を
+                                    # 主張する。読み手は下の `fnweak_e[fncall]` の 1 か所だけなので
+                                    # 挙動は変わらないが、印の意味が「弱めが階層を予約した」から
+                                    # 「何かが予約した」へ広がり、`set` 側が「ピンが無い」と
+                                    # 記録している余りの危険をそのぶん広げる
+                                    if (call_sub > 0 && fnweak_e[fncall]) {
+                                        # **階層ごとの連番はこの断片の開き側（下の開きループ）で振られる**ので、
+                                        # ここで素直に読むと**親**の番号になり同じ部分シェルの中の `set -e` が
+                                        # 打ち消せない。`set` 側と同じく**先に振って**おき、開き側は空いて
+                                        # いなければそれを使う（`sub_res_at` が「この断片が予約した」の印）。
+                                        # 既に `set` 側が同じ断片・同じ階層へ予約していればそれに相乗りする
+                                        # ——振り直すと記録がどの階層とも結び付かなくなる
+                                        if (!(sub_id[call_weak_at] && sub_res_at == i ":" j)) { sub_serial++; sub_id[call_weak_at] = sub_serial; sub_res_at = i ":" j }
+                                        # 予約した（または相乗りした）番号を記録に添える
+                                        call_weak_sub = sub_id[call_weak_at]
+                                    }
+                                    # **`at` に使うのは「越えた一番内側の部分シェル」の増分**（`call_sub`）で、
+                                    # `set` 側が `at` に使う「開いた階層すべての数」ではない。ブレースを
+                                    # 一緒に越える綴り（`( { quiet; set -e; …`）では命令が走るのは 1 段深い
+                                    # ブレースの中だが、打ち消しの比較が「弱めた階層以上の深さで戻したか」
+                                    # なので**ブレースの中の `set -e` でも成立する**（混在 6 形で実測。
+                                    # 部分シェル側で戻す形・3 段の入れ子も含めて真値どおり）。
+                                    # **余った予約の始末は `set` 側の注記が正本**（開き側が越えた数より
+                                    # 少なく開く綴りでは予約が余る。印を共有しているので同じ境界が掛かる）
                                     # **呼び出しに着いた時点で畳み直す。** 定義の順序は自由なので、
                                     # 控えた時点では呼び先がまだ弱めると分かっていないことがある
                                     # errexit を落とした関数なら、`set +e` と同じ扱いで落とす
@@ -3668,11 +3705,21 @@ ci_workflow_extract() {
                                     # （issue #189 の 3 巡目のレビュー）。省くと awk の未初期化値が
                                     # `weak_sub` へ入り、いまは数値比較なので 0 と同じに振る舞うが、
                                     # 比較の書き方が変わった瞬間に「部分シェルの中で落とした」と
-                                    # 誤って帰属する。ここは `subshell == 0 && call_sub == 0` でしか
-                                    # 来ないので、意図の 0（部分シェルの外）を明示する
-                                    if (fnweak_e[fncall]) { errexit = apply_errexit(0, 0, uncertain, 1, errexit, depth, 0) }
-                                    # pipefail を落とした関数も同じ
-                                    if (fnweak_pipe[fncall]) { pipefail = set_flag(0, 0, 1, pipefail) }
+                                    # 誤って帰属する。部分シェルの外なら意図の 0 を明示する
+                                    if (fnweak_e[fncall]) { errexit = apply_errexit(0, 0, uncertain, 1, errexit, call_weak_at, call_weak_sub) }
+                                    # **pipefail は部分シェルの中では据え置く**（門番は `main` と同じ
+                                    # `subshell == 0 && call_sub == 0` のまま＝この変更で挙動を動かさない）。
+                                    # `set_flag()` は階層を持たないので、部分シェルの中で反映すると内側の
+                                    # `set -o pipefail` で打ち消せず**正しくゲートする綴りを赤くする**
+                                    # （errexit 側が `apply_errexit()` で階層を持つのと非対称）。
+                                    # **`call_sub == 0` だけに緩めるのでは足りない**——呼び出しを開き括弧の
+                                    # 次の行に書くと `call_sub` は 0 なので反映され、`set -o pipefail` /
+                                    # `( pq` / `set -o pipefail` / `bash <スイート> | cat )` が
+                                    # wired → not-wired へ倒れた（真値 GATES。この差分の作業中に実測し、
+                                    # `fncall_pipefail_scope` のピンで固定した）。
+                                    # 階層を持たせるのは issue #203（部分シェル・グループの中の
+                                    # `set -o pipefail` が反映されない）の仕事なので、そこで一緒に閉じる
+                                    if (fnweak_pipe[fncall] && subshell == 0 && call_sub == 0) { pipefail = set_flag(0, 0, 1, pipefail) }
                                 }
                             }
                         }
@@ -4130,10 +4177,21 @@ ci_workflow_extract() {
                         # 印が浅くなりすぎて `dead_depth >= 0` を満たさなくなる（fail-open）
                         if (dead_depth < 0) {
                             dead_probe = strip_dead_cond_prefixes(struct_text)
+                            # **語リストが空の `for` / `select` も本体が 1 度も走らない**
+                            # （issue #200 のレビュー。`main` 既存の fail-closed で、`for v in ; do set +e; done`
+                            #  ＋ スイート ＋ `echo x` は真値 GATES なのに未配線と答えていた）。
+                            # 直前の区切りの門番は要らない——語リストはコマンドではないので
+                            # `in` の直後に `&&` / `||` / `|` / `&` が来る綴りは bash の構文エラーで、
+                            # 「split された結果 `in` の後ろが空に見えるだけ」という形が作れない。
+                            # **`in` の後ろに 1 語でもあれば対象外**（`for v in "" ;` は空文字 1 語で
+                            # 本体が 1 度走る。`for v in $EMPTY;` は中身が読めないので**数えない**
+                            # ——空と決め打つと、実際は回る本体の `set +e` を捨てて
+                            # 握り潰されたスイートを「ゲートしている」と読む fail-open になる）
                             if ((ops[j] != "||" \
                                  && dead_probe ~ /^(if|while)[[:space:]]+false([[:space:]]|;|$)/) \
                                 || (ops[j] != "&&" \
-                                    && dead_probe ~ /^until[[:space:]]+true([[:space:]]|;|$)/)) {
+                                    && dead_probe ~ /^until[[:space:]]+true([[:space:]]|;|$)/) \
+                                || dead_probe ~ /^(for|select)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]+in[[:space:]]*(;|$)/) {
                                 dead_lead = last_deciding_open(open_head, fn_form, (open_head == struct_text), was_pending_fndef)
                                 if (dead_lead < 1) { dead_lead = 1 }
                                 dead_depth = depth + dead_lead - 1
@@ -4442,7 +4500,7 @@ ci_workflow_extract() {
                                 # 記録がどの階層とも結び付かず、同じ部分シェルの中の `set -e` で
                                 # 打ち消せない（正しくゲートする綴りを赤くする）
                                 subshell_at[depth] = 1; subshell++
-                                if (!(sub_id[depth] && set_res_at == i ":" j)) { sub_serial++; sub_id[depth] = sub_serial }
+                                if (!(sub_id[depth] && sub_res_at == i ":" j)) { sub_serial++; sub_id[depth] = sub_serial }
                                 # **`!` で反転された部分シェルの中は実行の証拠にしない**（issue #155）。
                                 # 走りはするので**リンタの照会（`top` を渡さない）では数えてよい**
                                 # ——`uncertain` を立てる形なら実行の照会だけに効く（issue が
