@@ -2947,17 +2947,15 @@ jobs:
           ${exit_not_unconditional_case#*:}"
 done
 
-# **弱める関数の反映は部分シェルの中では見送る**（issue #189 の配線）。呼び出しの名前を
-# 取り出す門番から `subshell == 0` を外した（無条件に `exit` する関数はその部分シェルを
-# 終わらせるので、部分シェルの中でも名前を引く必要がある）ぶん、**弱めを反映する側では
-# `subshell` と「この断片で越えた部分シェル」の両方を見る**必要がある。見落とすと
-# `set +e` を部分シェルの中へ持ち込んで、部分シェルの終了状態として伝わる失敗を
-# 「握り潰された」と読む（正しくゲートしているスイートを赤くする fail-closed）。
-# **この門番には逆向きの代償がある**（issue #200）: 部分シェルの中で弱めてから
-# スイートを呼び、後ろに別のコマンドを置く綴り（`( quiet` 改行 `bash <スイート>` 改行
-# `echo x )`）は握り潰されているのに wired と答える。480 形の総当たりで、門番を
-# 外すと 32 形が正しくなる代わりに 16 形が上の fail-closed へ倒れた＝取り替えなので、
-# 弱めを開きの後ろへ遅らせる形で閉じるまで据え置く（そちらの形はピンしていない）
+# **弱める関数の反映は、呼んだ階層へ帰属させる**（issue #189 の配線 ＋ issue #200）。
+# 呼び出しの名前を取り出す門番から `subshell == 0` を外した（無条件に `exit` する関数は
+# その部分シェルを終わらせるので、部分シェルの中でも名前を引く必要がある）ぶん、
+# **弱めを反映する側では階層を取り違えない**ことが要る。取り違えると 2 つの向きに壊れる:
+# 部分シェルの中の弱めを**外**の階層で記録すると内側の `set -e` が打ち消せず、
+# 部分シェルの終了状態として伝わる失敗を「握り潰された」と読む（fail-closed）。
+# 逆に反映を**見送る**と、握り潰されているのに wired と答える（fail-open）。
+# 下のループはその fail-closed 側（弱めが外へ漏れない＝中の失敗は伝わる）を押さえ、
+# すぐ下の `fncall_weaken_scope_case` が fail-open 側（issue #200 で閉じた形）を押さえる
 for subshell_weaken_case in \
     "部分シェルの中で呼ぶ:( quiet; bash ${SUITE_PATH} )" \
     "部分シェルの中で呼び、後ろに別のコマンド:( quiet; bash ${SUITE_PATH} )
@@ -2982,6 +2980,91 @@ jobs:
           quiet() { set +e; }
           ${subshell_weaken_case#*:}"
 done
+
+# **部分シェルの中で弱めてからスイートを呼び、後ろに別のコマンドを置く綴りは握り潰し**
+# （issue #200）。部分シェルの最後に走るのが `echo x` なので、実 `bash -e` ではスイートの
+# 失敗は外へ出ない。`main` は**全件 wired** と答えていた＝3 行でスイートを静かに外せる
+# fail-open（実測）。直し方は `set` 側と同じ「先に番号を振って呼んだ階層へ帰属させる」で、
+# **門番を単に外すのは誤り**（内側の `set -e` が打ち消せなくなり、上のループが落ちる）。
+# **呼び出しが `(` と同じ断片にある形と、`(` の次の行にある形は別の経路**
+# （前者は「この断片で越えた」側、後者は「もう部分シェルの中にいる」側）なので両方置く。
+# 混在（`{ ( quiet` / `( { quiet`）も、深さの数え方を取り違えると帰属がずれるので置く
+for fncall_weaken_scope_case in \
+    "開きと同じ断片・閉じは末尾行:( quiet
+          bash ${SUITE_PATH}
+          echo x )" \
+    "開きと同じ断片・閉じは独立行:( quiet
+          bash ${SUITE_PATH}
+          echo x
+          )" \
+    "1 行に畳む:( quiet; bash ${SUITE_PATH}; echo x )" \
+    "呼び出しは開きの次の行:(
+          quiet
+          bash ${SUITE_PATH}
+          echo x
+          )" \
+    "閉じにリダイレクト:(
+          quiet
+          bash ${SUITE_PATH}
+          echo x
+          ) >/dev/null" \
+    "ブレースの中の部分シェル:{ ( quiet
+          bash ${SUITE_PATH}
+          echo x ) }" \
+    "部分シェルの中のブレース:( { quiet; bash ${SUITE_PATH}; echo x; } )"
+do
+    assert_not_wired "部分シェルの中で弱めると後ろにコマンドがある限り失敗は外へ出ない（${fncall_weaken_scope_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          quiet() { set +e; }
+          ${fncall_weaken_scope_case#*:}"
+done
+
+# **帰属の対照**: 入れ子の部分シェルの中で呼び、**同じ階層**で `set -e` に戻す綴りは
+# 打ち消しが成立するので、スイートの失敗はその部分シェルを落として外へ伝わる（真値 GATES）。
+# 上のループと同じ「呼び出しが開きの次の行」経路で、**帰属先を間違えるとここが赤くなる**
+# （弱めを部分シェルの外の階層で記録すると、内側の `set -e` が打ち消せない）
+assert_wired "入れ子の部分シェルの中で弱めてから同じ階層で戻すと失敗は伝わる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          quiet() { set +e; }
+          (
+          (
+          quiet
+          set -e
+          bash ${SUITE_PATH}
+          echo x
+          )
+          )"
+
+# **pipefail の弱めは部分シェルの中では据え置く**（`main` と同じ門番＝この差分で挙動を動かさない）。
+# `set_flag()` は階層を持たないので、部分シェルの中で反映すると内側の `set -o pipefail` で
+# 打ち消せず、**正しくゲートする綴りを赤くする**。errexit 側（`apply_errexit()`）が階層を持つのとの
+# 非対称で、階層を持たせるのは issue #203 の仕事。**このピンは errexit 側の門番を外すときに
+# pipefail 側まで一緒に緩める退行を捕まえる**——実測で、門番を `call_sub == 0` だけに緩めると
+# （呼び出しが開き括弧の次の行にあると `call_sub` は 0 なので反映されてしまい）この形が
+# wired → not-wired へ倒れた。`main` では wired＝退行の検出であって性質の固定ではない
+assert_wired "部分シェルの中で pipefail を弱めても同じ階層で戻せばパイプの失敗は伝わる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          pq() { set +o pipefail; }
+          set -o pipefail
+          (
+          pq
+          set -o pipefail
+          bash ${SUITE_PATH} | cat )"
 
 # --- 先頭の飾り（同じシェルのまま `set` を呼ぶ書き方）------------------------------
 #
