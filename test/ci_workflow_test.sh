@@ -2975,7 +2975,37 @@ for escape_reach_control in \
           bash ${SUITE_PATH}
           )
           break
-          done"
+          done" \
+    "反転された関数外の return は何もしない:! return 0
+          bash ${SUITE_PATH}" \
+    "同（ブレースの中）:{
+          ! return 0
+          }
+          bash ${SUITE_PATH}" \
+    "同（必ず走る条件の中）:if true; then
+          ! return 0
+          fi
+          bash ${SUITE_PATH}" \
+    "関数の本文の反転された return は関数を抜ける:f() {
+          ! return 0
+          echo x
+          }
+          f
+          bash ${SUITE_PATH}" \
+    "ループの外の連鎖の break は従来どおり何もしない:( true && break
+          bash ${SUITE_PATH} )" \
+    "読めない左辺の連鎖の break は見送る:while true; do
+          test -n \"\$SKIP\" && break
+          bash ${SUITE_PATH}
+          break
+          done" \
+    "部分シェルを越えた反転も読む（開きと同じ行）:( ! return 0
+          bash ${SUITE_PATH}
+          )" \
+    "同（開きの次の行）:(
+          ! return 0
+          bash ${SUITE_PATH}
+          )"
 do
     assert_wired "脱出語の射程の控え（${escape_reach_control%%:*}）" "name: ci
 jobs:
@@ -3019,7 +3049,51 @@ for escape_in_loop_case in \
           return 0
           bash ${SUITE_PATH}
           }
-          f"
+          f" \
+    "結論の分かる連鎖の右辺の break:while true; do
+          true && break
+          bash ${SUITE_PATH}
+          break
+          done" \
+    "同（|| 側）:while true; do
+          false || break
+          bash ${SUITE_PATH}
+          break
+          done" \
+    "同（continue）:while true; do
+          true && continue
+          bash ${SUITE_PATH}
+          break
+          done" \
+    "ループと脱出のあいだのブレース:while true; do
+          {
+          break
+          }
+          bash ${SUITE_PATH}
+          break
+          done" \
+    "ループと脱出のあいだの if true:while true; do
+          if true; then
+          break
+          fi
+          bash ${SUITE_PATH}
+          break
+          done" \
+    "ループと脱出のあいだの二重のブレース:while true; do
+          {
+          {
+          break
+          }
+          }
+          bash ${SUITE_PATH}
+          break
+          done" \
+    "反転された exit はシェルを終える:! exit 0
+          bash ${SUITE_PATH}" \
+    "反転された break もループを抜ける:while true; do
+          ! break
+          bash ${SUITE_PATH}
+          done"
 do
     assert_not_wired "ループの中の脱出語（${escape_in_loop_case%%:*}）の後ろは実行の証拠にしない" "name: ci
 jobs:
