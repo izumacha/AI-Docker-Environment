@@ -2497,7 +2497,12 @@ done
 
 # 締めすぎない側の控え。**どれも実 bash では伝わらない**（真値 NOGATE）ので、
 # 上の緩和がここまで広がっていないことを 1 形ずつ固定する。
-# 門番のどれを外しても、ここのどれかが赤くなる
+# 門番のどれを外しても、ここのどれかが赤くなる。
+# **コマンド置換の 4 形と連鎖の右辺で開いた複合の 3 形はレビュー 1 巡目で足した**——
+# 前者は `strip_command_prefixes()` の代入の規則が `X=$(` までを前置きとして落とすため、
+# **子シェルで走る `set` を親の指定として credit していた**（この差分が入れた fail-open）。
+# 後者は `chain_in` が区切りの**直後の断片**にしか立たないため、連鎖の右辺で開いた
+# 複合の**中**の `set` を credit していた（`main` も同じ fail-open で、ここで一緒に閉じる）
 
 for pipefail_scope_control in \
     "部分シェルを閉じたら入口へ戻る:(
@@ -2526,6 +2531,26 @@ for pipefail_scope_control in \
           }
           bash ${SUITE_PATH} | cat" \
     "定義の本文の set（1 行）:f() { set -o pipefail; }
+          bash ${SUITE_PATH} | cat" \
+    "コマンド置換の中の set:X=${DOLLAR}( set -o pipefail )
+          bash ${SUITE_PATH} | cat" \
+    "引用付きのコマンド置換の中の set:X=\"${DOLLAR}( set -o pipefail )\"
+          bash ${SUITE_PATH} | cat" \
+    "代入を 2 つ並べたコマンド置換:A=1 X=${DOLLAR}( set -o pipefail )
+          bash ${SUITE_PATH} | cat" \
+    "コマンド置換の中で飾りを付けた set:X=${DOLLAR}( command set -o pipefail )
+          bash ${SUITE_PATH} | cat" \
+    "連鎖の右辺で開いた複合の中（読めない左辺）:test -n \"${DOLLAR}SKIP\" && {
+          set -o pipefail
+          }
+          bash ${SUITE_PATH} | cat" \
+    "連鎖の右辺で開いた複合の中（結論が偽）:false && {
+          set -o pipefail
+          }
+          bash ${SUITE_PATH} | cat" \
+    "連鎖の右辺で開いた複合の中（|| 側）:test -n \"${DOLLAR}HOME\" || {
+          set -o pipefail
+          }
           bash ${SUITE_PATH} | cat" \
     "結論が偽の連鎖の右辺:( false && set -o pipefail
           bash ${SUITE_PATH} | cat

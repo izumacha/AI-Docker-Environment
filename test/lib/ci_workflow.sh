@@ -97,6 +97,15 @@ CI_WORKFLOW_GROUP_OPENER='([(][[:space:]]*|[{][[:space:]]+)'
 # **残る境界**: `>| out` は `split_commands` が `|` をパイプの区切りとして切るのでここへ届かない
 # （issue #177 の境界。倒れる向きは「コマンドに数えない」側＝`main` と同じ扱い）
 CI_WORKFLOW_REDIRECT_LEAD='[0-9]*(<<<|&>>|<<|>>|&>|>&|<&|>[|]|[<>])[[:space:]]*[^[:space:]]+'
+
+# **コマンド置換・プロセス置換の開き**の綴り。`strip_command_prefixes()` が落とす
+# 代入の前置き（`VAR=値`）は値を空白までまとめて落とすため、`X=$( set -o pipefail )` の
+# `X=$(` までが前置きとして剥がれる。中の `set` は**子シェルで走る**ので親のオプションは
+# 変わらない（実 bash で `shopt -po pipefail` が `set +o pipefail` を返す）——強める向きを
+# credit する側だけがこれを見て、その族を除く（`strengthen_pipe_ok` の定義のそば）。
+# **バックスラッシュを使わず括りで書く**（`-v` の値は逃がし列として解釈され、`gawk` は
+# 警告を stderr へ出す。`awk へ渡す綴りにバックスラッシュを含めない` の検査が見張る）
+CI_WORKFLOW_CMDSUB_OPEN='[$][(]|`|[<][(]|[>][(]'
 CI_WORKFLOW_GROUP_OPENERS="${CI_WORKFLOW_GROUP_OPENER}*"
 
 # **コマンドの開始位置**を表す正規表現の断片（上の前置きを読み飛ばす）。
@@ -987,6 +996,7 @@ ci_workflow_run_with_structure() {
         -v prop_plain_re="${CI_WORKFLOW_NODE_PROPERTY}" \
         -v group_open_re="${CI_WORKFLOW_GROUP_OPENER}" \
         -v redirect_lead_re="${CI_WORKFLOW_REDIRECT_LEAD}" \
+        -v cmdsub_open_re="${CI_WORKFLOW_CMDSUB_OPEN}" \
         -f "${program_file}" "${workflow}"
     # awk の終了コードを控える（後始末で上書きされないように）
     local status=$?
@@ -2864,7 +2874,7 @@ ci_workflow_extract() {
             scope_op[scope_serial] = ""
             scope_close_at[scope_serial] = 0
         }
-        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, fndef, fndef_at, struct_text, set_probe, set_open_n, set_crossed_sub, set_sub, sub_res_at, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fnexit, fnret, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, closed_subshell, closed_uncertain, chain_in, inverted, arm_masked, arm_at, arm_expected, case_scope, opens_case, opens_case_here, case_opens_at, close_probe, close_rest, close_first, open_head, esac_probe, esac_rest, esac_first, dead_probe, dead_lead, close_n, exit_seen, chain_at, chain_depth, closed_sub_seen, closed_sub_e, closed_sub_p, sub_id, open_stripped, head_inverted, inverted_at, closed_inverted, sub_serial, depth_in, cmd_rest, cmd_sub, cmd_fndef, cmd_fnname, cmd_fnat, fn_name_here, esc_probe, esc_is_exit, esc_sub, sub_lead_in, fn_lead, call_sub, call_weak_at, call_weak_sub, exit_here, exit_sub,
+        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, fndef, fndef_at, struct_text, set_probe, set_open_n, set_crossed_sub, set_sub, sub_res_at, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_lead_n, set_lead_ok, set_arm_here, set_rest, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fnexit, fnret, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, closed_subshell, closed_uncertain, chain_in, inverted, arm_masked, arm_at, arm_expected, case_scope, opens_case, opens_case_here, case_opens_at, close_probe, close_rest, close_first, open_head, esac_probe, esac_rest, esac_first, dead_probe, dead_lead, close_n, exit_seen, chain_at, chain_depth, closed_sub_seen, closed_sub_e, closed_sub_p, sub_id, open_stripped, head_inverted, inverted_at, closed_inverted, sub_serial, depth_in, cmd_rest, cmd_sub, cmd_fndef, cmd_fnname, cmd_fnat, fn_name_here, esc_probe, esc_is_exit, esc_sub, sub_lead_in, fn_lead, call_sub, call_weak_at, call_weak_sub, exit_here, exit_sub,
                               cmd_opens, run_depth, rec_at, nclosed_scope, closed_scope, ci) {
             # **シェルのオプションはステップごとにリセットする。** ステップは 1 つずつ
             # 別のシェルで走るので、前のステップの `set +e` / `pipefail` は引き継がれない。
@@ -3233,14 +3243,20 @@ ci_workflow_extract() {
                                 cmd_sub = SET_OPEN_SUB
                             }
                         }
-                        # **命令の位置に置けたか**を控える。使うのは**下のアーム走査に入るかの
-                        # 門番 1 か所だけ**——素の綴りで見つかったならアームを探す必要が無い。
-                        # **「置けたなら向きの判断に `uncertain` を使える」と書かないこと**
-                        # （issue #123 の補足。実際には `strengthen_base` が `set_probe == text`
-                        #  だけで決まっており、`set_placed` はそこを一度も読んでいない。
-                        #  このファイルはコメントから推論して欠陥を見つける運用なので、
-                        #  存在しない制御経路の説明は保守上の罠になる）。
-                        # 強める向きを `set_probe == text` に限る理由はその定義の近くに書いてある
+                        # **命令の位置に置けたか**を控える。読み手は**2 か所**:
+                        # (1) 下のアーム走査に入るかの門番（素の綴りで見つかったならアームを
+                        # 探す必要が無い）、(2) **pipefail を強める向きの門番**
+                        # （`strengthen_pipe_ok`。issue #203 で読み手が増えた。アーム走査で
+                        #  見つけた `set` は走ると証明できないので、そこを区別する印として使う）。
+                        # **errexit 側（`strengthen_base`）はいまも `set_placed` を読んでいない**
+                        # ——あちらの門番は `set_probe == text` のままで、理由はその定義の近くに
+                        # 書いてある。**この一覧を「1 か所だけ」へ戻さないこと**（このファイルは
+                        # コメントから推論して欠陥を見つける運用なので、`set_placed` の影響範囲を
+                        # 調べる人が pipefail の credit を見落とす）。
+                        # **「置けたなら向きの判断に `uncertain` を使える」とは書かない**
+                        # （issue #123 の補足）——`uncertain` を見るかどうかは向きごとに別で、
+                        # pipefail は `set_placed` と `uncertain == 0` を**どちらも**要求し、
+                        # errexit は `uncertain` を `apply_errexit()` の打ち消しで扱う
                         # **同じ名前で定義し直したら、前の本文で控えた弱めは残らない。**
                         # `f() { set +e; }` のあとに `f() { :; }` と書けば、呼んでも弱めない。
                         # 消さないと古い記録が勝ち、正しくゲートしているステップを「未配線」と
@@ -3465,6 +3481,19 @@ ci_workflow_extract() {
                             #     `case x in a) set -o pipefail ;; esac` はアームが一致しなければ
                             #     1 度も走らないのに、`case` を開く断片では `uncertain` がまだ 0 で
                             #     他の条件では止まらない（実測で真値 NOGATE なのに credit した）
+                            #   - **剥がした前置きにコマンド置換の開きが無いこと**（`set_lead_ok`）。
+                            #     `strip_command_prefixes()` の代入の規則（`VAR=値`）は値を空白まで
+                            #     まとめて落とすので、`X=$( set -o pipefail )` ・
+                            #     `X="$( set -o pipefail )"` では `X=$(` までが前置きとして剥がれる。
+                            #     ところが**コマンド置換の中の `set` は子シェルで走る**ので親の
+                            #     `pipefail` は変わらない（実 bash で `shopt -po pipefail` が
+                            #     `set +o pipefail` を返す）。この族は以前 `set_probe == text` が
+                            #     副作用で止めていたので、置き換えるときに明示する
+                            #     （レビュー 1 巡目で実測: この 2 形が not-wired → wired ＝
+                            #      **必須スイートが黙ってゲートから外れる fail-open**）。
+                            #     **前置きを切り出せない綴り（`eval` が引用を外した形）も credit
+                            #     しない**——`main` も credit していないので据え置きで、倒れる向きは
+                            #     fail-closed
                             #   - **関数定義の本文でないこと。** `in_fndef_here` は `^` 錨なので、
                             #     歩きが越えた定義（`( f() { set -o pipefail; }`）は `cmd_fndef` で
                             #     見る（見ないと、呼んでいない定義の `set` を credit して、パイプ
@@ -3476,8 +3505,24 @@ ci_workflow_extract() {
                             #     （`!chain_in`。issue #202 が `exit` で使ったのと同じ材料で、
                             #      `true && set -o pipefail` は credit し、`false && …` と
                             #      読めない左辺は見送る）
+                            #   - **連鎖から入った階層の中でないこと**（`chain_depth == 0`）。
+                            #     `chain_in` は区切りの**直後の断片**にしか立たないので、
+                            #     `test -n "$SKIP" && {` 改行 `set -o pipefail` 改行 `}` のように
+                            #     連鎖の右辺で開いた複合の**中**に書いた `set` は捕まえられない
+                            #     （`$SKIP` 未設定ならブレースは 1 度も走らないのに credit する
+                            #      ＝fail-open。`main` も同じだが、ここは門番を書き直す場所なので
+                            #      一緒に閉じる。レビュー 1 巡目で実測）。**`chain_in` と
+                            #     `chain_depth` は別物で、両方要る**——前者は「この断片が連鎖の
+                            #     右辺か」、後者は「囲っている階層が連鎖の右辺で開かれたか」
                             # **errexit 側（`strengthen_base`）の門番は緩めないこと**——
                             # あちらを同じ条件にすると issue #152 の fail-open に戻る。
+                            # **この 4 つ（`!in_fndef_here` / `cmd_fndef == 0` / `uncertain == 0` /
+                            # `chain_depth == 0`）は脱出の門番 2 か所とまったく同じ核で、
+                            # いまこのファイルに 3 つの写しがある**（そろっていなかったことが
+                            # `chain_depth` の取り落としの原因＝レビュー 1 巡目で実測）。
+                            # **1 つの述語へ切り出すのは別の変更**（脱出側は issue #204 / #207 /
+                            # #209 が書き換える予定なので、同じ差分に混ぜない）。
+                            # **どれか 1 つを直すときは 3 つとも動かすこと。**
                             # **残る境界 2 つ**（どちらも実測）: 呼んだ関数の `set -o pipefail` は
                             # **強める向きの台帳が無い**ので反映しない（`fnweak_pipe` は弱める向き
                             # だけ。fail-closed 12 形。issue #221）。閉じ括弧の無い綴り
@@ -3487,8 +3532,17 @@ ci_workflow_extract() {
                             # 倒れない（`main` は釣り合わない `(` / `{` / `if true; then` のすべてを
                             # 同じく wired と答える＝この差分で増えた綴りは 1 つだけ。
                             # 「構文エラーになる綴りは手当てしない」は issue #187 で置いた先例と同じ）
-                            strengthen_pipe_ok = (set_placed && !in_fndef_here && cmd_fndef == 0 \
-                                                  && !chain_in && uncertain == 0)
+                            # 前置きを切り出せるのは、`set_probe` が `text` の末尾そのままのとき
+                            # だけ（`eval` は引用を外すので一致しない＝credit しない側へ倒れる）
+                            set_lead_n = length(text) - length(set_probe)
+                            set_lead_ok = (set_probe == text \
+                                           || (set_lead_n > 0 \
+                                               && substr(text, set_lead_n + 1) == set_probe \
+                                               && substr(text, 1, set_lead_n) !~ cmdsub_open_re))
+                            strengthen_pipe_ok = (set_placed && set_lead_ok \
+                                                  && !in_fndef_here && cmd_fndef == 0 \
+                                                  && !chain_in && chain_depth == 0 \
+                                                  && uncertain == 0)
                             # **`case` を開く断片に載ったアームの `set` は、本体の階層に属する。**
                             # 深さが増えるのはこの断片の**末尾**なので、素直に `depth` で記録すると
                             # 同じアームの後続（1 つ深い）の `set -e` が打ち消せず、
