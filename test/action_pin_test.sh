@@ -1172,20 +1172,78 @@ jobs:
 # `secrets: inherit` が捨てられ**、このワークフローが read-only と判定されて
 # **可変タグの検査（FR-9.6(b)）が丸ごと外れる**（`PyYAML` はこの綴りを正しく読む＝実測で
 # 鍵は `name` / `secrets` / `runs-on` の 3 つ）。
-# **短縮形のタグでも同じ隠し方ができてはならない**ので、`!!str` の形も並べて固定する
-for verbatim_tag_case in \
+# **短縮形のタグでも同じ隠し方ができてはならない**ので、`!!str` の形も並べて固定する。
+# **短縮形のタグ名に区切りを含む形は issue #201 で閉じた残り半分**（`main` では全件 plain＝
+# fail-open）。以前このループは `,` を含まない `!!str` だけを押さえていたため、
+# **件数は増えるのにその綴りは 1 つも通らなかった**。PyYAML で 1 文字ずつ測ると、短縮形の
+# タグ名は `,` `[` `]` を**含められる**（`!!str,x` は `tag:yaml.org,2002:str,x` として compose でき、
+# 同じ行の `secrets:` 鍵も残る）ので、伏せ処理はそれらで名前を切ってはいけない。
+# **波括弧の 2 形は PyYAML が拒む綴り**（`!x{y` は scanner が止まる）で真値が無い。それでも
+# ここに並べるのは、**この歩きでは「名前を短く切る」のが fail-open 側**だから——切ると
+# read-only＝ピン強制の外れる側へ落ち、切らなければ privileged＝FR-8.1 の
+# 「解釈できない書き方に出会った場合も特権に倒す」と同じ向きになる（実測で `main` は
+# この 2 形を plain と答える）。**止める文字を 1 つでも足す変異はここで落ちる**
+for node_property_case in \
     "逐語タグに区切りを含む:!<tag:x,2002:str>" \
     "逐語タグに閉じ括弧を含む:!<tag:x}2002:str>" \
     "逐語タグに単引用符を含む:!<tag:x'2002:str>" \
     "最初の閉じのあとに続きがある:!<a>b>" \
-    "短縮形のタグ:!!str"
+    "短縮形のタグ:!!str" \
+    "短縮形のタグに区切りを含む:!!str,x" \
+    "短縮形のタグ（handle 形）に区切りを含む:!x,y" \
+    "短縮形のタグに区切りが 2 つ:!!str,x,z" \
+    "短縮形のタグに角括弧を含む:!x[y" \
+    "短縮形のタグに閉じ角括弧を含む:!x]y" \
+    "短縮形のタグに単引用符を含む:!x'y" \
+    "短縮形のタグ（!! 形）に単引用符を含む:!!x'y" \
+    "短縮形のタグに開き波括弧を含む:!x{y" \
+    "短縮形のタグに閉じ波括弧を含む:!x}y"
 do
-    assert_privilege_classification privileged "secrets: inherit hidden behind a node property (${verbatim_tag_case%%:*})" \
+    assert_privilege_classification privileged "secrets: inherit hidden behind a node property (${node_property_case%%:*})" \
 "name: X
 permissions:
   contents: read
 jobs:
-  j: {name: ${verbatim_tag_case#*:} \"a #b\", secrets: inherit, runs-on: ubuntu-latest, steps: [{uses: actions/checkout@v7}]}"
+  j: {name: ${node_property_case#*:} \"a #b\", secrets: inherit, runs-on: ubuntu-latest, steps: [{uses: actions/checkout@v7}]}"
+done
+
+# **アンカー名の側は issue #201 では触っていない**（タグだけを広げた）。この綴りは PyYAML が
+# parse エラーにするので真値が無く、答えは `main` と同じ `plain`。
+# **この答えはこの歩きでは fail-open 側**（名前を短く切ると引用が開かず `#` が構造行に残り、
+# 消費側が行を切って後ろの `secrets:` を落とす＝read-only と誤分類）。アンカー側も広げると
+# 真値のある 106 形で退行 0・YAML 不正の 9 形が privileged へ動くことまで測ったので、
+# **繰延の理由は「いまの答えが正しいから」ではなく「1 コミット = 1 論理変更（§12）だから」**
+# ——狭める判断は issue #124 / #126 で値を取り出す側と対で入れてあり、ほどくには
+# 共有している定数（`CI_WORKFLOW_PROP_STOP_CHARS` から導く 2 つの読み手）も一緒に見る必要がある。
+# その作業は **issue #218** が持つ。
+# ここで固定するのは「**タグ側の扱いがアンカーへ黙って広がらないこと**」——歩きから
+# `ch != "!"` の条件を外す変異では、この綴りの答えが plain → privileged へ動く（実測）。
+# **#218 を実装するときはこのピンを差し替える**（答えが privileged へ変わるのが正しい）
+assert_privilege_classification plain 'the anchor side still ends a name at flow indicators (issue #218)' \
+"name: X
+permissions:
+  contents: read
+jobs:
+  j: {name: &a,b \"a #b\", secrets: inherit, runs-on: ubuntu-latest, steps: [{uses: actions/checkout@v7}]}"
+
+# **区切りを名前に許したぶん、引用スカラーを名前へ飲み込まない手当てが要る**
+# （issue #201 のレビューで実測）。`!t[` のあと**空白なしで**単引用符の値が続く形は、
+# 歩きが `[` を名前へ入れたうえで単引用符でも止まらないと、値ごと名前に飲み込んで
+# 値の中の `#` を構造行へ残し、消費側が行を切って**後ろの `secrets: inherit` を落とす**
+# （`main` は privileged・飲み込む版は plain＝FR-9.6(b) のピン強制がこのファイル全体で外れる）。
+# 3 形とも `main` と同じ答えなので退行の検出ではなく、
+# **「フロー形式の開き（`{` `[` `,`）の直後だけは単引用符で止まる」条件を固定するピン**
+for tight_quote_case in \
+    "開き角括弧の直後:!t['x #y']" \
+    "カンマの直後:!t,'a #b'" \
+    "区切り入りの !! 形と開き角括弧:!!str,x['x #y']"
+do
+    assert_privilege_classification privileged "a quoted scalar right after a flow opener in a tag name is not swallowed (${tight_quote_case%%:*})" \
+"name: X
+permissions:
+  contents: read
+jobs:
+  j: {name: ${tight_quote_case#*:}, secrets: inherit, runs-on: ubuntu-latest, steps: [{uses: actions/checkout@v7}]}"
 done
 
 # ジョブ単位でだけ書き込みを与える形（ワークフロー全体の宣言は読み取り専用）
