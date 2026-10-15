@@ -3005,7 +3005,44 @@ for escape_reach_control in \
     "同（開きの次の行）:(
           ! return 0
           bash ${SUITE_PATH}
-          )"
+          )" \
+    "条件付きの break はループの本体を殺さない:while true; do
+          if [ -n \"\$SKIP\" ]; then
+          break
+          fi
+          bash ${SUITE_PATH}
+          break
+          done" \
+    "同（1 行の if）:while true; do
+          if [ -n \"\$SKIP\" ]; then break; fi
+          bash ${SUITE_PATH}
+          break
+          done" \
+    "同（continue）:while true; do
+          if [ -n \"\$SKIP\" ]; then
+          continue
+          fi
+          bash ${SUITE_PATH}
+          break
+          done" \
+    "同（case のアーム）:while true; do
+          case \$SKIP in
+          y)
+          break
+          ;;
+          esac
+          bash ${SUITE_PATH}
+          break
+          done" \
+    "同（elif のアーム）:while true; do
+          if false; then
+          :
+          elif [ -n \"\$SKIP\" ]; then
+          break
+          fi
+          bash ${SUITE_PATH}
+          break
+          done"
 do
     assert_wired "脱出語の射程の控え（${escape_reach_control%%:*}）" "name: ci
 jobs:

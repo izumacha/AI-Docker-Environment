@@ -4721,7 +4721,27 @@ ci_workflow_extract() {
                             # それを使う（新しい歩きは作らない）。**`esc_ends_loop` は
                             # `esc_loop_at > 0` を含む**ので、ここで深さを再確認しない
                             else if (esc_ends_loop) {
-                                dead_depth = esc_loop_at - 1
+                                # **ループの深さまで殺すのは「本体の中で必ず走る」ときだけ**
+                                # （issue #204 のレビュー 2 巡目。この差分が入れた fail-closed）。
+                                # 条件付きの `break`（`while true; do` 改行
+                                # `if [ -n "$SKIP" ]; then break; fi` 改行 `bash <スイート>` …）は
+                                # 走らないことがあるので、ループの本体の残りを死に体にすると
+                                # **正しくゲートしているスイートを「未配線」と報告**する
+                                # （真値 GATES が not-wired。実測で `if` ・ 1 行の `if` ・
+                                #  `continue` ・ `case` のアーム ・ `elif` の 5 形）。
+                                # 判定は**ループより内側に「走ると証明できない」階層があるか**で、
+                                # 既にある `uncertain_at[]` をそのまま読む（`exit` の枝が
+                                # `uncertain == 0` を見ているのと同じ材料。ループ自身が
+                                # `uncertain` を背負う枝 2（`for` 等）はループの深さと等しくなるので
+                                # 通る）。**条件付きのときは `depth - 1`（`main` と同じ）へ落とす**
+                                # ——同じブロックの中の `break` より後ろは、走ったにしろ走らなかった
+                                # にしろ実行の証拠にならないので、そこまでは殺して正しい
+                                if (innermost_marked_depth(depth, uncertain_at) <= esc_loop_at) {
+                                    dead_depth = esc_loop_at - 1
+                                }
+                                else if (depth > 0) {
+                                    dead_depth = depth - 1
+                                }
                             }
                             # **関数の本文の中の `return` は従来どおりその階層だけ**——抜けるのは
                             # 関数で、囲っているループとは関係がない
