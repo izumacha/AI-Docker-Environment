@@ -8,7 +8,11 @@ compose.override.yml
 # 0 バイトで追跡されると、消したときに ci_coverage_test.sh が
 # 「追跡されているのに作業ツリーに無い」で fail-closed に倒れる。
 # **根に固定する**（`log` のままだと `test/log/` のような入れ物まで無視され、
-# そこへ置いたスクリプトが ci_coverage_test.sh の `git ls-files` の網から黙って外れる）
+# そこへ置いたスクリプトが ci_coverage_test.sh の `git ls-files` の網から黙って外れる）。
+# **残る境界**: gitignore に「ファイルだけ」を表す綴りは無いので、`/log` でも**根の
+# `log/` ディレクトリ**は無視される——そこへ置いたスクリプトは `git ls-files` に出ず、
+# ci_coverage_test.sh の網から外れたまま「全カバー」と報告される（実測）。
+# ログの入れ物が要るときは別の名前にすること
 /log
 .DS_Store
 # デモ録画の変換用一時ファイル（record-demo.sh が全検査を通ったときだけ .gif へ移す）
