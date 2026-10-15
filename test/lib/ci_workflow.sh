@@ -2623,7 +2623,12 @@ ci_workflow_extract() {
                         # （実 `bash -e` は NOGATE・`main` も未配線）。見るのは「中の記録の区切りが
                         # `&&` / `||` なのに、その次が閉じ語か継続語（`else` / `elif`）」という、
                         # **右辺が無いことがその場で分かる形だけ**——`bash` の構文は再実装しない
-                        # （綴りを 1 つずつ足す道は取らない。残る境界は `docs/requirements.md` に記録）
+                        # （綴りを 1 つずつ足す道は取らない。残る境界は `docs/requirements.md` に記録）。
+                        # **包みの形（`( … )` / `{ … ; }`）はこの枝を通らない**（開き記号が
+                        # コマンドの手前に来るので記録が内側に落ち、`rec_opened` が立たない）——
+                        # `bash <スイート> && { echo a &&` 改行 `}` も `( … )` 版と同じく配線済みと
+                        # 答える（真値 NOGATE＝fail-open。**`main` も同じ答え**で、ピンではなく
+                        # 境界として記録している。issue #211）
                         if (via_opened) {
                             for (dg = nx + 1; dg < ce; dg++) {
                                 if (!(dg in buf)) { continue }
