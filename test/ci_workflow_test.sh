@@ -4532,72 +4532,53 @@ done
 # 逆に **`set -e` を書かずに後続行だけ置く形は base でも正しく未配線**なので、
 # 引き金は `set -e` の側。制御構造の有無も条件ではなく、いちばん素直な
 # `(` / `set +e` / `bash <スイート>` / `set -e` / `)` も同じ。
-# 4,800 形の差分では**判定が変わるのは 26 形・すべて wired → not-wired**（逆向きは 0 件）。
-# **だから 4 本ピンする**: 素の形・`if` の中・`while` の中・**`set -e` の後ろに行が続く形**。
+# **向きは一方向**で、変わるのは必ず wired → not-wired（逆向きは 1 件も無い。
+# corpus ごとの実測値は `docs/requirements.md` の変更履歴が正本——件数を写さない）。
+# **だからピンは「素の形・`if` の中・`while` の中・`set -e` の後ろに行が続く形」をそろえる**。
 # 最後のものが無いと、「部分シェルの最後が `set -e` のときだけ」と狭めて引き上げを戻す変異が
 # **全ピン緑のまま**通り、実際のスクリプトがいちばん書く綴り（`set +e` → スイート →
 # `set -e` → 続きの処理）で fail-open が戻る（レビュー指摘。実測で base は wired）
-# **ループにしない（レビュー指摘）。** 3 形の本文は見出しと閉じが別の行なので、1 つの文字列へ
-# 詰めると `:` に加えて 2 つ目の区切りが要る。`|` を区切りにしたところ **`%%|*` / `##*|` が
-# 最初と最後の `|` の間を黙って捨てる**ので、本文にパイプを含む形（`fi ) | cat`）を足すと
-# 綴りが壊れたまま `assert_not_wired` が緑で通る＝**偽のピン**になる（実測）。
-# `ケースの一覧のラベルにコロンを含めない` が `:` について同じ事故を見張っているが、
-# あれはソースから一覧を導いてラベルだけを見るので `|` には効かない。
-# **区切りを足すより、3 件を素直に並べる方が安全**（§6 の「将来を見越した過度な抽象化を避ける」）
-assert_not_wired "部分シェルの最後が set -e ならスイートの失敗は外へ出ない（素の部分シェル）" "name: ci
-jobs:
-  type-check:
-    runs-on: ubuntu-latest
-    steps:
-      - name: subject
-        run: |
-          (
+# **区切りは `:` だけにする（9 巡目のレビューで実測）。** 1 度は 4 本を素直に並べたが、
+# その理由（「見出しと閉じが別の行なので 2 つ目の区切りが要る」）は**誤り**だった——
+# 本文は複数行のまま 1 つの文字列に入るので、近隣のループと同じ `"ラベル:本文"` で足りる。
+# 4 巡目に `|` を 2 つ目の区切りにしたのが**不要な 3 分割**で、`%%|*` / `##*|` が最初と最後の
+# `|` の間を黙って捨てるため本文にパイプを含む形で**偽のピン**になっていた（正本は
+# `docs/requirements.md`）。ループへ戻すと `ケースの一覧のラベルにコロンを含めない` の
+# 検出網（ソースから一覧を導く）にも入る
+for sub_tail_set_case in \
+    "素の部分シェル:(
           set +e
           bash ${SUITE_PATH}
           set -e
-          )"
-
-assert_not_wired "部分シェルの最後が set -e ならスイートの失敗は外へ出ない（if の中）" "name: ci
-jobs:
-  type-check:
-    runs-on: ubuntu-latest
-    steps:
-      - name: subject
-        run: |
-          (
+          )" \
+    "if の中:(
           if true; then
           set +e
           bash ${SUITE_PATH}
           set -e
-          fi )"
-
-assert_not_wired "部分シェルの最後が set -e ならスイートの失敗は外へ出ない（while の中）" "name: ci
-jobs:
-  type-check:
-    runs-on: ubuntu-latest
-    steps:
-      - name: subject
-        run: |
-          (
+          fi )" \
+    "while の中:(
           while true; do
           set +e
           bash ${SUITE_PATH}
           set -e
-          break; done )"
-
-assert_not_wired "部分シェルで set -e に戻したあと処理が続いてもスイートの失敗は外へ出ない" "name: ci
-jobs:
-  type-check:
-    runs-on: ubuntu-latest
-    steps:
-      - name: subject
-        run: |
-          (
+          break; done )" \
+    "set -e に戻したあと処理が続く:(
           set +e
           bash ${SUITE_PATH}
           set -e
           echo z
           )"
+do
+    assert_not_wired "部分シェルでスイートのあと set -e に戻すと失敗は外へ出ない（${sub_tail_set_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${sub_tail_set_case#*:}"
+done
 
 # **向きの対。** 末尾の `set -e` を外すと部分シェルの最後に走るのはスイート自身なので
 # 失敗は外へ出る（真値 GATES。`main` も head も wired）。この 1 本が無いと、上の 2 形を
@@ -4635,7 +4616,7 @@ jobs:
 # なら未配線へ倒す）。issue #199 は**部分シェルの引き上げ**の門番が見る区切りの集合を広げるよう
 # 提案していたが、広げても答えは 1 件も変わらず（実測。全ピン・36 形・corpus 7 本 3,530 形すべて
 # 同一）、**引き上げ自体は当時の計測の範囲でどの判定も決めていなかったので同じ PR で削除した**
-# （識別子はもう無い。**その見立ては後で覆り、削除は `main` の fail-open を 26 形直していた**
+# （識別子はもう無い。**その見立ては後で覆り、削除は `main` の fail-open を直していた**
 #  ——`test/lib/ci_workflow.sh` の削除跡のコメントが正本）。
 # **同じ本体のピンは既にあり**（`パイプで握り潰す`）、ここは閉じ括弧を同じ断片に置く形と
 # グループだけを足している
