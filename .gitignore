@@ -4,6 +4,21 @@
 compose.override.yaml
 compose.override.yml
 *.log
+# 素の `log`（`) >> log` のような fixture を手で動かすと作業ディレクトリに残る。
+# 0 バイトで追跡されると、消したときに ci_coverage_test.sh が
+# 「追跡されているのに作業ツリーに無い」で fail-closed に倒れる。
+# **根に固定する**（`log` のままだと `test/log/` のような入れ物まで無視され、
+# そこへ置いたスクリプトが ci_coverage_test.sh の `git ls-files` の網から黙って外れる）。
+# **ディレクトリは打ち消して戻す。** `/log` だけだと**根の `log/` ディレクトリ**も無視され、
+# そこへ置いたファイルが `git add -A` に拾われず**黙ってコミットされない**
+# （はじめは「ci_coverage_test.sh が『全カバー』と報告する」と書いたが**誤り**——
+#  無視された経路は追跡されないので CI にも乗らず、見るべき対象と `git ls-files` の
+#  母集合が同時に縮むだけ。`git add -f` すれば追跡され一覧にも出る。15 巡目のレビュー指摘）。
+# `!/log/`（末尾のスラッシュ＝ディレクトリだけ）を足すと、素の `log` ファイルは
+# 無視したままディレクトリは追跡できる
+# （実測: `log` は無視・`log/script.sh` は追跡可能・`test/log/s.sh` は対象外・`foo.log` は `*.log` で無視）
+/log
+!/log/
 .DS_Store
 # デモ録画の変換用一時ファイル（record-demo.sh が全検査を通ったときだけ .gif へ移す）
 docs/demo/aidock-demo.gif.tmp
