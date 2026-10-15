@@ -3042,7 +3042,59 @@ for escape_reach_control in \
           fi
           bash ${SUITE_PATH}
           break
-          done"
+          done" \
+    "同じ断片で越えた部分シェルの break はループを抜けない:while true; do
+          {
+          ( break
+          )
+          }
+          bash ${SUITE_PATH}
+          break
+          done" \
+    "同（囲い無し）:while true; do
+          ( break
+          )
+          bash ${SUITE_PATH}
+          break
+          done" \
+    "同（continue）:while true; do
+          ( continue
+          )
+          bash ${SUITE_PATH}
+          break
+          done" \
+    "errexit が免除される位置の return（|| の左辺）:return 0 || true
+          bash ${SUITE_PATH}" \
+    "同（&& の左辺）:return 0 && true
+          bash ${SUITE_PATH}" \
+    "同（囲いの閉じに付いた ||）:{ return 0; } || true
+          bash ${SUITE_PATH}" \
+    "同（二重の囲いの閉じに付いた ||）:{
+          { return 0; }
+          } || true
+          bash ${SUITE_PATH}" \
+    "同（if の条件）:if return 0; then
+          :
+          fi
+          bash ${SUITE_PATH}" \
+    "同（while の条件）:while return 0; do
+          break
+          done
+          bash ${SUITE_PATH}" \
+    "部分シェルの return は || で吸われたら何もしない:(
+          return 0
+          ) || true
+          bash ${SUITE_PATH}" \
+    "部分シェルの exit は親を終わらせない（対照）:(
+          exit 0
+          )
+          bash ${SUITE_PATH}" \
+    "無条件に exit する関数を部分シェルで呼ぶ（対照）:f() {
+          exit 0
+          }
+          ( f
+          )
+          bash ${SUITE_PATH}"
 do
     assert_wired "脱出語の射程の控え（${escape_reach_control%%:*}）" "name: ci
 jobs:
@@ -3130,6 +3182,37 @@ for escape_in_loop_case in \
     "反転された break もループを抜ける:while true; do
           ! break
           bash ${SUITE_PATH}
+          done" \
+    "取り消しは無関係な囲いの || では効かない:return 0
+          { echo a; } || true
+          bash ${SUITE_PATH}" \
+    "exit は囲いの閉じの || では取り消されない:{ exit 0; } || true
+          bash ${SUITE_PATH}" \
+    "部分シェルの関数外 return は親も終わらせる:(
+          return 0
+          )
+          bash ${SUITE_PATH}" \
+    "同（ブレースの中の部分シェル）:{
+          (
+          return 0
+          )
+          }
+          bash ${SUITE_PATH}" \
+    "同（1 行に畳んだ部分シェル）:( return 0
+          )
+          bash ${SUITE_PATH}" \
+    "同（ループの中の部分シェル）:while true; do
+          (
+          return 0
+          )
+          bash ${SUITE_PATH}
+          break
+          done" \
+    "同（ループの中の 1 行の部分シェル）:while true; do
+          ( return 0
+          )
+          bash ${SUITE_PATH}
+          break
           done"
 do
     assert_not_wired "ループの中の脱出語（${escape_in_loop_case%%:*}）の後ろは実行の証拠にしない" "name: ci
