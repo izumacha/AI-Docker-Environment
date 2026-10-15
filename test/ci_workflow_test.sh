@@ -693,7 +693,11 @@ jobs:
       - name: subject
         run: !<tag:yaml.org,2002:str> bash ${SUITE_PATH}"
 
-# 締めすぎない側。**短縮形のタグの名前には区切りを含めない**（YAML の `ns-tag-char`）。
+# 締めすぎない側。**シェル側のタグ名の集合は区切りを含めない**（`CI_WORKFLOW_TAG_NAME`）。
+# 根拠は YAML の定義ではない——**PyYAML は `!x,y` を名前 `!x,y` として compose する**（実測。
+# issue #201 で `ns-tag-char` という断定を撤回した）。狭めてあるのは**この読み手では
+# 広げると fail-open** だからで、伏せ処理の歩きは逆向き（広げないと fail-open）なので
+# そちらは区切りで切らない。
 # 名前が `!x,` まで伸びる綴りは**読まない**ので、値が取り出せず未配線に倒れる
 # （`PyYAML` は名前 `!x,` ＋ 値 `bash <スイート>` と読むが、**GitHub の解析器は PyYAML ではない**
 # ——確かめられない綴りで「ゲートしている」と言わない側へ倒す＝fail-closed。

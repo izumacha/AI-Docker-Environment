@@ -191,8 +191,10 @@ CI_WORKFLOW_COMMENT_START='(^|[[:space:]])#'
 
 # **YAML のノードプロパティ（アンカー `&name` / タグ `!tag` `!!str`）の綴り。**
 # 鍵と値のあいだに置ける飾りで、値そのものではない（`run: &suites |` の `&suites`）。
-# 名前を終わらせる文字はフロー形式の区切り 4 種だけで、**`#` は含めない**
+# 名前を終わらせる文字は**タグ側では**フロー形式の区切り 4 種だけで（アンカー側は実装に
+# 合わせて英数字と `-` `_` に限る。下の `CI_WORKFLOW_ANCHOR_NAME`）、**`#` は含めない**
 # （`#` がコメントを始めるのは空白の後ろだけなので、`&a#b` の `#` は名前の一部）。
+# **ここはシェル側（値を取り出す読み手）の話で、伏せ処理の歩きは別の規則**（issue #201）。
 # **綴りの源はこの 1 か所で、鍵の後ろの値を読むすべての場所が同じものを読む。**
 # 選び分けの規則は 2 つだけ:
 #   - **ブロックの印（`|` / `>`）の手前**を読むなら `prop_re`（＝`..._BLOCK`。名前の無い `!` も許す）
@@ -204,7 +206,15 @@ CI_WORKFLOW_COMMENT_START='(^|[[:space:]])#'
 # `env:` の折りたたみ・`shell:` / `if:` の値と 4 か所の取りこぼしが見つかっている。
 # いずれも「実行しているスイートが未配線になる」fail-closed だが、配線を証明できないのは同じ）
 CI_WORKFLOW_PROP_STOP_CHARS='][{},'
-CI_WORKFLOW_PROP_STOP="[${CI_WORKFLOW_PROP_STOP_CHARS}]"
+# **伏せ処理の歩きがアンカー名を終わらせる文字は別の定数で持つ**（issue #201 のレビュー）。
+# 綴りは上と同じだが**答える問いが違う**: 上は「素のスカラーから値を取り出すときに
+# タグ名へ含めない文字」で**広げると fail-open**（確かめられない綴りで「ゲートしている」と言う）、
+# こちらは「伏せ処理の歩きでアンカー名を終わらせる文字」で**狭めると fail-open**
+# （issue #124 の経路）。1 つの定数から両方へ供給していると、issue #218 でアンカー側を
+# 広げるつもりで `,` を外した瞬間に**タグの値抽出も黙って広がる**。
+# **綴りが一致しているのは偶然**なので、片方を動かすときにもう片方を一緒に動かさない
+CI_WORKFLOW_ANCHOR_STOP_CHARS='][{},'
+CI_WORKFLOW_ANCHOR_STOP="[${CI_WORKFLOW_ANCHOR_STOP_CHARS}]"
 # プロパティの後ろに空白を要求するのは YAML の規則（`&n|` は正しくない）で、伏せ処理側の条件と同じ。
 # **名前に使える文字はアンカーとタグで違う**（同じにすると必ずどちらかが壊れる。実測）。
 # アンカーは **PyYAML / libyaml の実装に合わせて英数字と `-` `_` だけ**にする——
@@ -298,17 +308,19 @@ emit_structural_lines() {
     # 囲まれており、その中に `'` を直接書けないため）。
     # `flow_re` は**構造としてしか意味を持たない文字**の集合（フロー形式の区切りと、コメントを始める `#`）、
     # `flow_mask` はそれを伏せる代役の文字
-    # `prop_stop_re` は**アンカー名（`&name`）を終わらせる文字**の集合。
+    # `anchor_stop_re` は**アンカー名（`&name`）を終わらせる文字**の集合。
     # フロー形式の区切り 4 種（`,` `[` `]` `{` `}`）は PyYAML / libyaml がアンカー名に許さないので
     # （`&a,b` / `&a}b` はどちらも parse エラー＝実測）、**フロー形式の中にいるかどうかに
     # 関わらず**名前の終わりとして扱う。**タグ名には使わない**——短縮形のタグ名はこれらを
     # 含められるので、切ると issue #201 の fail-open になる（理由は使う側の注記が持つ）。
+    # **シェル側の `CI_WORKFLOW_PROP_STOP_CHARS` とは別の定数から来る**（綴りは同じだが
+    # 問いが違い、安全な向きも逆。定数の注記が理由を持つ）。
     # `flow_re` とは別に持つのは意図的で、**`#` を含めない**のが違い（`#` がコメントを始めるのは
     # 空白の後ろだけなので、`&a#b` の `#` は名前の一部。ここで切ると名前を読み違える）。
     # 引用符 2 種も名前を終わらせる（`dq` / `sq` は awk 変数なので、この集合とは別に判定する）
     awk -v dq='"' -v sq="'" -v flow_re='[][{},#]' -v flow_mask='~' \
         -v comment_re="${CI_WORKFLOW_COMMENT_START}" \
-        -v prop_stop_re="${CI_WORKFLOW_PROP_STOP}" \
+        -v anchor_stop_re="${CI_WORKFLOW_ANCHOR_STOP}" \
         -v prop_re="${CI_WORKFLOW_NODE_PROPERTY_BLOCK}" \
         -v tight_openers='{[,' '
         # 引用スカラーの中で、位置 i の 1 文字から始まるのが「終端ではない脱出表記」かどうかを返す。
@@ -429,7 +441,7 @@ emit_structural_lines() {
         #
         # 引用符そのものは今までどおり落とす（`"permissions":` と `permissions:` を同じ形に
         # 揃える FR-8.1 の前提。脱出表記や入れ子で現れた引用符も同じく落とす）。
-        function mask_quoted_flow_punctuation(src,   out, raw, masked, quote, prev, gap, closed, keyq, seqzone, dashind, in_comment, flowdepth, i, ch, nxt, len, propend, vtend, vtprobe, propraw) {
+        function mask_quoted_flow_punctuation(src,   out, raw, masked, quote, prev, gap, closed, keyq, seqzone, dashind, in_comment, flowdepth, i, ch, nxt, len, propend, vtend, vtprobe, propraw, is_anchor) {
             # **引用符を 1 つも含まない行は、そのまま返す。** その場合この関数がやることは
             # 「1 文字ずつ読んで同じ文字を書き戻す」だけで、結果は入力と必ず一致する。
             # ワークフローの行の大半（`runs-on: ubuntu-latest` など）がこれに当たり、
@@ -511,8 +523,14 @@ emit_structural_lines() {
                     # ワークフローが read-only と判定され、**FR-9.6(b) の SHA ピン強制が丸ごと
                     # 外れる**（issue #124。`&n ` の 3 文字を足すだけで可変タグが素通りする **fail-open**）
                     if ((ch == "&" || ch == "!") && at_value_start(prev, gap, keyq, dashind, flowdepth)) {
-                        # プロパティの名前の終わりを探す。終わらせるのは空白・フロー形式の区切り
-                        # （`prop_stop_re`）・引用符の 3 種で、綴りの持ち主は awk 変数 1 か所。
+                        # **種別は肯定形で 1 回だけ決める。** 以前は `ch != "!"`（＝アンカー）を
+                        # 2 か所に書き写していたが、門番へ 3 つ目の印を足したときに
+                        # その印が**両方で黙ってタグ扱い**（＝名前を区切りで切らない緩い側）になる。
+                        # 肯定形にしておけば、知らない印は自動的にアンカー側＝切る側へ落ちる（fail-closed）
+                        is_anchor = (ch == "&")
+                        # プロパティの名前の終わりを探す。**終わらせる文字は種別で違う**
+                        # （下の歩きの注記が正本。アンカーはフロー形式の区切りでも終わり、
+                        # タグは空白・二重引用符・「開きの直後の単引用符」だけで終わる）。
                         # **逐語タグ（`!<…>`）だけは別の形**（issue #182。実測）——中身は URI 文字で
                         # **フロー形式の区切りを含んでよい**ので、`!<tag:yaml.org,2002:str>` は
                         # 上の 3 種では `,` で切れてしまい、プロパティとして読み飛ばせない。
@@ -579,7 +597,7 @@ emit_structural_lines() {
                             while (propend < len) {
                                 nxt = substr(src, propend + 1, 1)
                                 if (nxt ~ /[[:space:]]/) break
-                                if (ch != "!" && nxt ~ prop_stop_re) break
+                                if (is_anchor && nxt ~ anchor_stop_re) break
                                 # **二重引用符は両方で止まる**（PyYAML はタグ名にもアンカー名にも
                                 # 受け付けない＝実測）。**単引用符はタグだけ止まらない**
                                 # ——名前に単引用符を含む短縮形（`!x` ＋ 単引用符 ＋ `y`）は
@@ -591,7 +609,16 @@ emit_structural_lines() {
                                 # プログラムはシェルの単引用符で囲まれており、1 文字で引用が
                                 # 閉じてライブラリ全体が構文エラーになる（実測で `bash -n` が落ちた）
                                 if (nxt == dq) break
-                                if (ch != "!" && nxt == sq) break
+                                # **フロー形式の開き（`{` `[` `,`）の直後の単引用符は飲み込まない。**
+                                # そこから始まる引用スカラーを名前へ取り込むと、その中の `#` を
+                                # 伏せられないまま構造行へ残し、消費側が行を切って**後ろの本物の
+                                # `secrets:` を落とす**（この差分のレビューで実測。`{name: !t[` ＋
+                                # 単引用符の値は `main` が privileged・飲み込む版が plain。
+                                # 区切りを名前に許したぶん、こちらの手当てが要る）。
+                                # 名前の途中（直前が普通の文字）の単引用符はタグなら飲み込む
+                                # ——PyYAML が受け付ける綴りで、止めると issue #124 の
+                                # fail-open が綴り 1 文字で残る（実測）
+                                if (nxt == sq && (is_anchor || index(tight_openers, substr(src, propend, 1)) > 0)) break
                                 propend++
                             }
                         }
@@ -887,7 +914,10 @@ emit_structural_lines() {
             # （fail-closed。`run: |` に `&suites ` を足すだけで答えが変わる）。
             # 綴りは `prop_re`（シェル側の `CI_WORKFLOW_NODE_PROPERTY_BLOCK`。ブロックの印の
             # 手前なので名前の無い `!` も許す形）が唯一の源で、
-            # 伏せ処理が 1 文字ずつ歩くときの `prop_stop_re` と同じ集合から導いてある
+            # **伏せ処理の歩きとは終わらせる文字が違う**（issue #201。あちらはタグ名を
+            # 区切りで切らず、アンカー名だけ `anchor_stop_re` で切る）。こちらは
+            # `CI_WORKFLOW_PROP_STOP_CHARS` 由来のままで、広げると値を取り出す側が
+            # 確かめられない綴りを読む fail-open に倒れる（定数の注記が理由を持つ）
             if (!was_continuation && open_type == "" \
                 && probe ~ ("^[[:space:]]*(-[[:space:]]+)?[a-z_][a-z0-9_.-]*[[:space:]]*:[[:space:]]*" prop_re "[|>]([0-9]*[+-]?|[+-]?[0-9]*)[[:space:]]*$")) {
                 in_scalar = 1

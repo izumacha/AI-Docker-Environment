@@ -1183,7 +1183,7 @@ jobs:
 # read-only＝ピン強制の外れる側へ落ち、切らなければ privileged＝FR-8.1 の
 # 「解釈できない書き方に出会った場合も特権に倒す」と同じ向きになる（実測で `main` は
 # この 2 形を plain と答える）。**止める文字を 1 つでも足す変異はここで落ちる**
-for verbatim_tag_case in \
+for node_property_case in \
     "逐語タグに区切りを含む:!<tag:x,2002:str>" \
     "逐語タグに閉じ括弧を含む:!<tag:x}2002:str>" \
     "逐語タグに単引用符を含む:!<tag:x'2002:str>" \
@@ -1199,21 +1199,23 @@ for verbatim_tag_case in \
     "短縮形のタグに開き波括弧を含む:!x{y" \
     "短縮形のタグに閉じ波括弧を含む:!x}y"
 do
-    assert_privilege_classification privileged "secrets: inherit hidden behind a node property (${verbatim_tag_case%%:*})" \
+    assert_privilege_classification privileged "secrets: inherit hidden behind a node property (${node_property_case%%:*})" \
 "name: X
 permissions:
   contents: read
 jobs:
-  j: {name: ${verbatim_tag_case#*:} \"a #b\", secrets: inherit, runs-on: ubuntu-latest, steps: [{uses: actions/checkout@v7}]}"
+  j: {name: ${node_property_case#*:} \"a #b\", secrets: inherit, runs-on: ubuntu-latest, steps: [{uses: actions/checkout@v7}]}"
 done
 
 # **アンカー名の側は issue #201 では触っていない**（タグだけを広げた）。この綴りは PyYAML が
 # parse エラーにするので真値が無く、答えは `main` と同じ `plain`。
 # **この答えはこの歩きでは fail-open 側**（名前を短く切ると引用が開かず `#` が構造行に残り、
 # 消費側が行を切って後ろの `secrets:` を落とす＝read-only と誤分類）。アンカー側も広げると
-# 真値のある 106 形で退行 0・YAML 不正の 9 形が privileged へ動くことまで測ったが、
-# **狭める判断は issue #124 / #126 で値を取り出す側と対で入れたもの**なので、
-# 1 コミット = 1 論理変更（§12）に従い **issue #218** で別に扱う。
+# 真値のある 106 形で退行 0・YAML 不正の 9 形が privileged へ動くことまで測ったので、
+# **繰延の理由は「いまの答えが正しいから」ではなく「1 コミット = 1 論理変更（§12）だから」**
+# ——狭める判断は issue #124 / #126 で値を取り出す側と対で入れてあり、ほどくには
+# 共有している定数（`CI_WORKFLOW_PROP_STOP_CHARS` から導く 2 つの読み手）も一緒に見る必要がある。
+# その作業は **issue #218** が持つ。
 # ここで固定するのは「**タグ側の扱いがアンカーへ黙って広がらないこと**」——歩きから
 # `ch != "!"` の条件を外す変異では、この綴りの答えが plain → privileged へ動く（実測）。
 # **#218 を実装するときはこのピンを差し替える**（答えが privileged へ変わるのが正しい）
@@ -1223,6 +1225,26 @@ permissions:
   contents: read
 jobs:
   j: {name: &a,b \"a #b\", secrets: inherit, runs-on: ubuntu-latest, steps: [{uses: actions/checkout@v7}]}"
+
+# **区切りを名前に許したぶん、引用スカラーを名前へ飲み込まない手当てが要る**
+# （issue #201 のレビューで実測）。`!t[` のあと**空白なしで**単引用符の値が続く形は、
+# 歩きが `[` を名前へ入れたうえで単引用符でも止まらないと、値ごと名前に飲み込んで
+# 値の中の `#` を構造行へ残し、消費側が行を切って**後ろの `secrets: inherit` を落とす**
+# （`main` は privileged・飲み込む版は plain＝FR-9.6(b) のピン強制がこのファイル全体で外れる）。
+# 3 形とも `main` と同じ答えなので退行の検出ではなく、
+# **「フロー形式の開き（`{` `[` `,`）の直後だけは単引用符で止まる」条件を固定するピン**
+for tight_quote_case in \
+    "開き角括弧の直後:!t['x #y']" \
+    "カンマの直後:!t,'a #b'" \
+    "区切り入りの !! 形と開き角括弧:!!str,x['x #y']"
+do
+    assert_privilege_classification privileged "a quoted scalar right after a flow opener in a tag name is not swallowed (${tight_quote_case%%:*})" \
+"name: X
+permissions:
+  contents: read
+jobs:
+  j: {name: ${tight_quote_case#*:}, secrets: inherit, runs-on: ubuntu-latest, steps: [{uses: actions/checkout@v7}]}"
+done
 
 # ジョブ単位でだけ書き込みを与える形（ワークフロー全体の宣言は読み取り専用）
 assert_privilege_classification privileged 'job-level write under a read-only workflow default' \
