@@ -3213,7 +3213,28 @@ for escape_in_loop_case in \
           )
           bash ${SUITE_PATH}
           break
-          done"
+          done" \
+    "取り消しは階層を閉じた断片でだけ効く（ブレース）:{
+          return 0
+          }
+          false || echo rec
+          bash ${SUITE_PATH}" \
+    "同（部分シェル）:(
+          return 0
+          )
+          false || echo rec
+          bash ${SUITE_PATH}" \
+    "同（必ず走る条件）:if true; then
+          return 0
+          fi
+          false || echo rec
+          bash ${SUITE_PATH}" \
+    "無関係な exit が立てた印まで取り消さない:{
+          return 0
+          }
+          exit 0
+          false || echo rec
+          bash ${SUITE_PATH}"
 do
     assert_not_wired "ループの中の脱出語（${escape_in_loop_case%%:*}）の後ろは実行の証拠にしない" "name: ci
 jobs:

@@ -4208,8 +4208,19 @@ ci_workflow_extract() {
                         # `echo after` は `after` を出す）。`return` を見つけた断片では閉じの区切りが
                         # まだ分からないので、**閉じた時点で取り消す**（`ret_shell_at` は印を立てた
                         # ときの深さ。`exit` には掛けない——`exit` は状態と無関係に終わるので、
-                        # `{ exit 0; } || true` の後ろは実際に走らない＝実測）
+                        # `{ exit 0; } || true` の後ろは実際に走らない＝実測）。
+                        # **実際に階層を閉じた断片でだけ見る**（`close_n > 0`。レビュー 4 巡目で
+                        # 入れた門番。無条件だと、印を立てた階層より浅いところに**後から**現れた
+                        # `&&` / `||` で終わる断片——`{ return 0; }` 改行 `false || echo rec`——が
+                        # 印を吸ってしまい、(a) この巡で閉じたはずの fail-open が戻り、
+                        # (b) **無関係な素の `exit` が立てた到達不能の印まで消える**
+                        # （`{ return 0; }` 改行 `exit 0` 改行 `false || echo rec` 改行
+                        # `bash <スイート>` が真値 NOGATE なのに wired ＝`main` は not-wired
+                        # だったので**この差分が入れた退行**。実測）。隣の 2 つの巻き戻し
+                        # （`closed_sub_seen` / `closed_entry_seen`）が閉じのループの中でしか
+                        # 旗を立てないのと同じ条件を、こちらは数で表す
                         if (exit_seen && ret_shell_at > 0 && depth < ret_shell_at \
+                            && close_n > 0 \
                             && (ops[j] == "&&" || ops[j] == "||")) {
                             exit_seen = 0
                             ret_shell_at = 0
@@ -4780,7 +4791,15 @@ ci_workflow_extract() {
                                 # 走らないことがあるので、ループの本体の残りを死に体にすると
                                 # **正しくゲートしているスイートを「未配線」と報告**する
                                 # （真値 GATES が not-wired。実測で `if` ・ 1 行の `if` ・
-                                #  `continue` ・ `case` のアーム ・ `elif` の 5 形）。
+                                #  `continue` ・ `case` のアーム ・ `elif` の 5 形。**どれも
+                                #  見出しが読めない条件**＝`if [ -n "$SKIP" ]` ・
+                                #  `case $SKIP in y)` のような綴りで測った）。
+                                # **逆向きの境界**: 見出しが**リテラルで一致する** `case x in x)`
+                                # では走ることが分かるので、ここで `depth - 1` へ落とすのは
+                                # fail-open になる（実測で真値 NOGATE が wired。`main` も同じ
+                                # 答えなのでこの差分の退行ではない＝issue で追う）。
+                                # アームの見出しが読めるかどうかを判定に持ち込めるまでは、
+                                # **倒れる向きは fail-open 側**に揃えてある
                                 # 判定は**ループより内側に「走ると証明できない」階層があるか**で、
                                 # 既にある `uncertain_at[]` をそのまま読む（`exit` の枝が
                                 # `uncertain == 0` を見ているのと同じ材料。ループ自身が
