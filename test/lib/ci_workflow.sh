@@ -2787,7 +2787,7 @@ ci_workflow_extract() {
             scope_op[scope_serial] = ""
             scope_close_at[scope_serial] = 0
         }
-        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, k, fndef, fndef_at, struct_text, set_probe, set_open_n, set_crossed_sub, set_sub, set_res_at, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fnexit, fnret, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, closed_subshell, closed_uncertain, chain_in, inverted, arm_masked, arm_at, arm_expected, case_scope, opens_case, opens_case_here, case_opens_at, close_probe, close_rest, close_first, open_head, esac_probe, esac_rest, esac_first, dead_probe, dead_lead, close_n, exit_seen, chain_at, chain_depth, closed_sub_seen, closed_sub_e, closed_sub_p, sub_id, open_stripped, head_inverted, inverted_at, closed_inverted, sub_serial, depth_in, cmd_rest, cmd_sub, cmd_fndef, cmd_fnname, cmd_fnat, fn_name_here, esc_probe, esc_sub, sub_lead_in, fn_lead, call_sub, exit_here, exit_sub,
+        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, fndef, fndef_at, struct_text, set_probe, set_open_n, set_crossed_sub, set_sub, set_res_at, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_arm_here, set_rest, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fnexit, fnret, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, closed_subshell, closed_uncertain, chain_in, inverted, arm_masked, arm_at, arm_expected, case_scope, opens_case, opens_case_here, case_opens_at, close_probe, close_rest, close_first, open_head, esac_probe, esac_rest, esac_first, dead_probe, dead_lead, close_n, exit_seen, chain_at, chain_depth, closed_sub_seen, closed_sub_e, closed_sub_p, sub_id, open_stripped, head_inverted, inverted_at, closed_inverted, sub_serial, depth_in, cmd_rest, cmd_sub, cmd_fndef, cmd_fnname, cmd_fnat, fn_name_here, esc_probe, esc_sub, sub_lead_in, fn_lead, call_sub, exit_here, exit_sub,
                               cmd_opens, run_depth, rec_at, nclosed_scope, closed_scope, ci) {
             # **シェルのオプションはステップごとにリセットする。** ステップは 1 つずつ
             # 別のシェルで走るので、前のステップの `set +e` / `pipefail` は引き継がれない。
@@ -4048,16 +4048,21 @@ ci_workflow_extract() {
                         # ＋独立行の `)` でも落ちる＝実測）。この記録はコマンドを持たないので
                         # 照会 3 つ（いずれもコマンドの綴りで突き合わせる）からは観測できず、
                         # 答えは動かない。
-                        # (2) **`main` の fail-open を 2 形直した**（4 巡目のレビューが反例を
-                        # 出して実測）——部分シェルの中の制御構造で、**最後に走るのが `set -e`**
-                        # になる綴り（`( if true; then` / `set +e` / `bash <スイート>` /
-                        # `set -e` / `fi )` と `while` 版）は実 `bash -e` で NOGATE なのに、
-                        # 引き上げが入口の errexit を書き戻すため `main` は wired と答えていた。
-                        # 削除後は正しく未配線。**だから「どの判定も決めていなかった」は誤り**で、
-                        # 当時の計測（全ピン・36 形・corpus 7 本 3,530 形）にこの形が
-                        # 1 つも入っていなかっただけ。向きが fail-open なので
+                        # (2) **`main` の fail-open を直した**（4 巡目のレビューが反例を出して実測。
+                        # 範囲は 7 巡目に測り直した）——**部分シェルの最後に走るのが `set -e`**
+                        # になる綴りは実 `bash -e` で NOGATE（最後に走るのが `set -e` なので
+                        # スイートの失敗は外へ出ない）なのに、引き上げが入口の errexit を
+                        # 書き戻すため `main` は wired と答えていた。削除後は正しく未配線。
+                        # **制御構造は条件ではない**——いちばん素直な `( ` / `set +e` /
+                        # `bash <スイート>` / `set -e` / `)` も同じで、閉じる断片の
+                        # リダイレクト（`) >/dev/null` 等）でも同じ。4,800 形の差分では
+                        # **判定が変わるのは 26 形・すべて wired → not-wired**（逆向きは 0 件）。
+                        # **だから「どの判定も決めていなかった」は誤り**で、当時の計測
+                        # （全ピン・36 形・corpus 7 本 3,530 形）にこの形が 1 つも
+                        # 入っていなかっただけ。向きが fail-open なので
                         # `ci_workflow_test.sh` の「部分シェルの最後が set -e なら…」の
-                        # ピン 2 本で押さえた（`main` では落ちる＝実測）
+                        # ピン 3 本（素の部分シェル・`if`・`while`）で押さえた
+                        # （`main` では落ちる＝実測）
                         # 偽と分かる条件のブロックに入るところを覚える（この深さより深い間は無効）
                         # **連鎖が続くなら条件は 1 語だけではない。** `split_commands` は `&&` / `||` で
                         # 切るので、`if false || true; then` の断片は `if false` になる。素直に

@@ -6,8 +6,10 @@ compose.override.yml
 *.log
 # 素の `log`（`) >> log` のような fixture を手で動かすと作業ディレクトリに残る。
 # 0 バイトで追跡されると、消したときに ci_coverage_test.sh が
-# 「追跡されているのに作業ツリーに無い」で fail-closed に倒れる
-log
+# 「追跡されているのに作業ツリーに無い」で fail-closed に倒れる。
+# **根に固定する**（`log` のままだと `test/log/` のような入れ物まで無視され、
+# そこへ置いたスクリプトが ci_coverage_test.sh の `git ls-files` の網から黙って外れる）
+/log
 .DS_Store
 # デモ録画の変換用一時ファイル（record-demo.sh が全検査を通ったときだけ .gif へ移す）
 docs/demo/aidock-demo.gif.tmp
