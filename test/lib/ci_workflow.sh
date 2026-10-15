@@ -3712,9 +3712,21 @@ ci_workflow_extract() {
                                 # （issue #147）ので、数えると**実際にはゲートしているスイートを
                                 # 「未配線」と報告**する（実測で `case $M in a) f ;; esac` ＋
                                 # `bash <スイート>` が wired → not-wired ＝入れてはいけない向き）
+                                # **連鎖の右辺でも「必ず走る」と分かるなら数える**（issue #202）。
+                                # 以前は `prev_op` が `&&` / `||` なら一律に見送っていたため、
+                                # `true && f`（`f() { exit 0; }`）のあとのスイートが「必ず走る」と
+                                # 記録され、実 `bash -e` では 1 行も走らないのに `wired` だった
+                                # （**2 トークン足すだけで必須スイートをゲートから外せる fail-open**）。
+                                # **門番を単に外してはいけない**——読めない左辺（`[ -z "$X" ] && f`）の
+                                # 右辺まで数えると、条件次第で走らない脱出で後ろを死に体にして
+                                # **実際にはゲートしているスイートを「未配線」と報告**する
+                                # （issue #189 で何度も踏んだ向き）。判定は既にある `chain_in`
+                                # （「この断片が走ると証明できない連鎖の中か」）をそのまま読む
+                                # ——新しい勘定は作らない（§6）。連鎖に入っていない断片では
+                                # `chain_in` は 0 なので、従来の門番の意味はそのまま含まれる
                                 if (!in_fndef_here && fnexit[fncall] && !opens_case_here \
                                     && uncertain == 0 && chain_depth == 0 \
-                                    && prev_op != "&&" && prev_op != "||") {
+                                    && !chain_in) {
                                     # 旗だけ立てて、下の 1 か所（解除のあと）で適用する
                                     exit_here = 1
                                     exit_sub = call_sub
@@ -4338,8 +4350,22 @@ ci_workflow_extract() {
                             fn_name_here = in_fndef_here ? fndef_name_here : cmd_fnname
                             if (fn_name_here != "") { fnret[fn_name_here] = 1 }
                         }
+                        # **連鎖の右辺の脱出を数えるのは `exit` だけ**（issue #202）。
+                        # `true && exit 0` / `false || exit 0` は右辺が必ず走るので後ろは死に体で、
+                        # 以前は `prev_op` が `&&` / `||` なら一律に見送っていたため
+                        # **2 トークン足すだけで必須スイートをゲートから外せる fail-open** だった。
+                        # 読めない左辺（`test -n "$X" && exit 0`）は `chain_in` が立つので従来どおり
+                        # 見送る（数えると、条件次第で走らない脱出で後ろを死に体にして**実際には
+                        # ゲートしているスイートを「未配線」と報告**する＝issue #189 の向き）。
+                        # **`break` / `continue` には広げない**（実測）——`true && break` を
+                        # `( … )` / `{ … ; }` / `if true; then … fi` の中で数えると、ループの外の
+                        # `break` でその階層の残りを死に体にしてしまい、**真値 GATES の 36 形が
+                        # 未配線へ倒れた**。ループの中かどうかを見ていないのが根（issue #204）で、
+                        # そこを直すまでは連鎖の手前の `prev_op` で見送る側に留める。
+                        # `return` も同じ扱い（関数の外の `return` の読み方は issue #204 が持つ）
                         if (!set_forked && !unreachable && !opens_case_here && dead_depth < 0 \
-                            && prev_op != "&&" && prev_op != "||" \
+                            && ((prev_op != "&&" && prev_op != "||") \
+                                || (!chain_in && esc_probe ~ /^exit([[:space:]]|$)/)) \
                             && esc_probe ~ /^(exit|break|continue|return)([[:space:]]+[^[:space:]]+)?[[:space:]]*$/) {
                             # `exit` はシェルごと終わるので、以降のすべての断片が到達不能。
                             # **部分シェルの中と定義の本文は除く**——`( exit 0 )` は親を終わらせず、

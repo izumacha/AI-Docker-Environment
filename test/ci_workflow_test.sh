@@ -2838,6 +2838,90 @@ jobs:
           ${exit_inside_case#*:}"
 done
 
+# **連鎖の右辺の `exit` も、左辺の真偽が綴りから分かるなら後ろを死に体にする**
+# （issue #202。`main` 既存の fail-open）。脱出の門番は `prev_op` が `&&` / `||` なら
+# 一律に見送っていたため、**`true &&` の 2 トークンを足すだけで必須スイートを
+# ゲートから外せた**（実 `bash -e` ではスイートが 1 行も走らないのに `wired`）。
+# 判定は既にある `chain_in`（「走ると証明できない連鎖の中か」）を読むので、
+# 短絡で向きが決まる形（`false && echo mid || exit 0` の `||` の右・
+# `true || echo mid && exit 0` の `&&` の右）も同じ経路で閉じる
+for chain_exit_case in \
+    "true の右辺:true && exit 0
+          bash ${SUITE_PATH}" \
+    "コロンの右辺:: && exit 0
+          bash ${SUITE_PATH}" \
+    "false の || の右辺:false || exit 0
+          bash ${SUITE_PATH}" \
+    "true を 2 つ重ねた連鎖:true && true && exit 0
+          bash ${SUITE_PATH}" \
+    "短絡で || へ渡る形:false && echo mid || exit 0
+          bash ${SUITE_PATH}" \
+    "短絡で && へ渡る形:true || echo mid && exit 0
+          bash ${SUITE_PATH}" \
+    "1 行に畳んだ形:true && exit 0; bash ${SUITE_PATH}" \
+    "部分シェルの中の連鎖:( true && exit 0
+          bash ${SUITE_PATH} )" \
+    "ブレースの中の連鎖:{ true && exit 0
+          bash ${SUITE_PATH}; }" \
+    "真と分かる条件の中の連鎖:if true; then
+            true && exit 0
+            bash ${SUITE_PATH}
+          fi" \
+    "連鎖の右辺の呼び出し:f() { exit 0; }
+          true && f
+          bash ${SUITE_PATH}" \
+    "連鎖の右辺の呼び出し（|| 側）:f() { exit 0; }
+          false || f
+          bash ${SUITE_PATH}"
+do
+    assert_not_wired "結論の分かる連鎖の右辺の脱出（${chain_exit_case%%:*}）の後ろは実行の証拠にしない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${chain_exit_case#*:}"
+done
+
+# 締めすぎない側。**走らないと分かる右辺・読めない左辺・`break` / `continue` は数えない。**
+# - 走らないと分かる右辺（`false && exit 0` / `true || exit 0`）は脱出そのものが走らないので
+#   後ろのスイートは実行される（数えると、正しくゲートしているワークフローを赤くする）。
+# - 読めない左辺（`test -n "$X" && exit 0`）は条件次第。**環境を決めれば真値は決まるが
+#   綴りからは決まらない**ので、「走ると証明できない」側＝見送る（issue #189 で何度も踏んだ向き）。
+#   実測の境界: `X` が空の環境では脱出が走るので真値 NOGATE で、ここは `wired` と答える
+#   （＝残っている fail-open。綴りから閉じる方法が無いので記録として残す）。
+# - `break` / `continue` には広げない。実測で、ループの外の `break` を連鎖の右辺で数えると
+#   `( true && break` 改行 スイート `)` ほか**真値 GATES の 36 形が未配線へ倒れた**
+#   （ループの中かどうかを見ていないのが根＝issue #204）
+for chain_exit_control_case in \
+    "false の && の右辺:false && exit 0
+          bash ${SUITE_PATH}" \
+    "true の || の右辺:true || exit 0
+          bash ${SUITE_PATH}" \
+    "読めない左辺の && の右辺:test -n \"\$X\" && exit 0
+          bash ${SUITE_PATH}" \
+    "読めない左辺の || の右辺:test -z \"\$X\" || exit 0
+          bash ${SUITE_PATH}" \
+    "部分シェルの中の連鎖の break:( true && break
+          bash ${SUITE_PATH} )" \
+    "ブレースの中の連鎖の continue:{ true && continue
+          bash ${SUITE_PATH}; }" \
+    "部分シェルを閉じた後ろのスイート:( true && exit 0 )
+          bash ${SUITE_PATH}" \
+    "連鎖の右辺が脱出でない形:true && true
+          bash ${SUITE_PATH}"
+do
+    assert_wired "結論の分かる連鎖の右辺でも数えない形（${chain_exit_control_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${chain_exit_control_case#*:}"
+done
+
 # **締めすぎない側。** 部分シェルの外・呼ばれない関数・条件付きの脱出・本文の部分シェルの中は
 # どれも後ろが走るので、死に体にすると**正しくゲートしているスイートを「未配線」と報告**する。
 # **素の `( exit 0 )` と `f() { exit 0; }`（呼ばない）はここに置かない**——上の
