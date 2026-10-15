@@ -9,11 +9,14 @@ compose.override.yml
 # 「追跡されているのに作業ツリーに無い」で fail-closed に倒れる。
 # **根に固定する**（`log` のままだと `test/log/` のような入れ物まで無視され、
 # そこへ置いたスクリプトが ci_coverage_test.sh の `git ls-files` の網から黙って外れる）。
-# **残る境界**: gitignore に「ファイルだけ」を表す綴りは無いので、`/log` でも**根の
-# `log/` ディレクトリ**は無視される——そこへ置いたスクリプトは `git ls-files` に出ず、
-# ci_coverage_test.sh の網から外れたまま「全カバー」と報告される（実測）。
-# ログの入れ物が要るときは別の名前にすること
+# **ディレクトリは打ち消して戻す。** `/log` だけだと**根の `log/` ディレクトリ**も無視され、
+# そこへ置いたスクリプトが `git ls-files` に出ないまま ci_coverage_test.sh が「全カバー」と
+# 報告する（レビュー指摘で、はじめは「gitignore にファイルだけの綴りは無い」として
+# 残る境界に書いたが**誤り**だった）。`!/log/`（末尾のスラッシュ＝ディレクトリだけ）を
+# 足すと、素の `log` ファイルは無視したままディレクトリは追跡できる
+# （実測: `log` は無視・`log/script.sh` は追跡可能・`test/log/s.sh` は対象外・`foo.log` は `*.log` で無視）
 /log
+!/log/
 .DS_Store
 # デモ録画の変換用一時ファイル（record-demo.sh が全検査を通ったときだけ .gif へ移す）
 docs/demo/aidock-demo.gif.tmp
