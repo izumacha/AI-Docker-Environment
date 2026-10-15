@@ -3101,7 +3101,15 @@ for escape_reach_control in \
           ( break )
           bash ${SUITE_PATH}
           break
-          done"
+          done" \
+    "フォークした複合の中の関数外 return は親を終わらせない（パイプ）:{
+          return 0
+          } | cat
+          bash ${SUITE_PATH}" \
+    "同（バックグラウンド）:{
+          return 0
+          } &
+          bash ${SUITE_PATH}"
 do
     assert_wired "脱出語の射程の控え（${escape_reach_control%%:*}）" "name: ci
 jobs:
@@ -3263,6 +3271,10 @@ for escape_in_loop_case in \
     "同（引数なし）:( return )
           bash ${SUITE_PATH}" \
     "同（セミコロン付き）:( return 0; )
+          bash ${SUITE_PATH}" \
+    "同じ階層の素の exit の寄与は取り消しで消さない:{ return 0; exit 0; } || true
+          bash ${SUITE_PATH}" \
+    "同（並び順を入れ替えても）:{ exit 0; return 0; } || true
           bash ${SUITE_PATH}"
 do
     assert_not_wired "ループの中の脱出語（${escape_in_loop_case%%:*}）の後ろは実行の証拠にしない" "name: ci
