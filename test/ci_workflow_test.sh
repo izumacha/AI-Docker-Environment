@@ -3094,7 +3094,14 @@ for escape_reach_control in \
           }
           ( f
           )
-          bash ${SUITE_PATH}"
+          bash ${SUITE_PATH}" \
+    "1 行に畳んだ部分シェルの exit は親を終わらせない（対照）:( exit 0 )
+          bash ${SUITE_PATH}" \
+    "1 行に畳んだ部分シェルの break はループを抜けない（対照）:while true; do
+          ( break )
+          bash ${SUITE_PATH}
+          break
+          done"
 do
     assert_wired "脱出語の射程の控え（${escape_reach_control%%:*}）" "name: ci
 jobs:
@@ -3234,6 +3241,28 @@ for escape_in_loop_case in \
           }
           exit 0
           false || echo rec
+          bash ${SUITE_PATH}" \
+    "兄弟の複合が同じ深さで閉じても取り消さない:{
+          return 0
+          }
+          { :; } || true
+          bash ${SUITE_PATH}" \
+    "同（部分シェル）:(
+          return 0
+          )
+          { :; } || true
+          bash ${SUITE_PATH}" \
+    "同（無関係な exit の印も残す）:{
+          return 0
+          }
+          exit 0
+          { :; } || true
+          bash ${SUITE_PATH}" \
+    "1 行に畳んだ部分シェルの関数外 return も親を終わらせる:( return 0 )
+          bash ${SUITE_PATH}" \
+    "同（引数なし）:( return )
+          bash ${SUITE_PATH}" \
+    "同（セミコロン付き）:( return 0; )
           bash ${SUITE_PATH}"
 do
     assert_not_wired "ループの中の脱出語（${escape_in_loop_case%%:*}）の後ろは実行の証拠にしない" "name: ci
