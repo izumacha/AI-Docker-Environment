@@ -3671,7 +3671,14 @@ ci_workflow_extract() {
                                     # 閉じたときに入口の姿へ戻す経路も効かない
                                     call_weak_sub = sub_id[enclosing_subshell_depth(depth, subshell_at)]
                                     # この断片で部分シェルを越えて呼んだときだけ、越えた先の番号が要る
-                                    if (call_sub > 0) {
+                                    # **予約するのは弱める関数を呼ぶときだけ**（レビュー指摘）。
+                                    # ここは識別子で始まる断片すべてを通るので、条件を付けないと
+                                    # `( echo hi` でも連番を 1 つ消費して共有の印（`sub_res_at`）を
+                                    # 主張する。読み手は下の `fnweak_e[fncall]` の 1 か所だけなので
+                                    # 挙動は変わらないが、印の意味が「弱めが階層を予約した」から
+                                    # 「何かが予約した」へ広がり、`set` 側が「ピンが無い」と
+                                    # 記録している余りの危険をそのぶん広げる
+                                    if (call_sub > 0 && fnweak_e[fncall]) {
                                         # **階層ごとの連番はこの断片の開き側（下の開きループ）で振られる**ので、
                                         # ここで素直に読むと**親**の番号になり同じ部分シェルの中の `set -e` が
                                         # 打ち消せない。`set` 側と同じく**先に振って**おき、開き側は空いて
@@ -4170,10 +4177,21 @@ ci_workflow_extract() {
                         # 印が浅くなりすぎて `dead_depth >= 0` を満たさなくなる（fail-open）
                         if (dead_depth < 0) {
                             dead_probe = strip_dead_cond_prefixes(struct_text)
+                            # **語リストが空の `for` / `select` も本体が 1 度も走らない**
+                            # （issue #200 のレビュー。`main` 既存の fail-closed で、`for v in ; do set +e; done`
+                            #  ＋ スイート ＋ `echo x` は真値 GATES なのに未配線と答えていた）。
+                            # 直前の区切りの門番は要らない——語リストはコマンドではないので
+                            # `in` の直後に `&&` / `||` / `|` / `&` が来る綴りは bash の構文エラーで、
+                            # 「split された結果 `in` の後ろが空に見えるだけ」という形が作れない。
+                            # **`in` の後ろに 1 語でもあれば対象外**（`for v in "" ;` は空文字 1 語で
+                            # 本体が 1 度走る。`for v in $EMPTY;` は中身が読めないので**数えない**
+                            # ——空と決め打つと、実際は回る本体の `set +e` を捨てて
+                            # 握り潰されたスイートを「ゲートしている」と読む fail-open になる）
                             if ((ops[j] != "||" \
                                  && dead_probe ~ /^(if|while)[[:space:]]+false([[:space:]]|;|$)/) \
                                 || (ops[j] != "&&" \
-                                    && dead_probe ~ /^until[[:space:]]+true([[:space:]]|;|$)/)) {
+                                    && dead_probe ~ /^until[[:space:]]+true([[:space:]]|;|$)/) \
+                                || dead_probe ~ /^(for|select)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]+in[[:space:]]*(;|$)/) {
                                 dead_lead = last_deciding_open(open_head, fn_form, (open_head == struct_text), was_pending_fndef)
                                 if (dead_lead < 1) { dead_lead = 1 }
                                 dead_depth = depth + dead_lead - 1

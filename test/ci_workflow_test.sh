@@ -3066,6 +3066,78 @@ jobs:
           set -o pipefail
           bash ${SUITE_PATH} | cat )"
 
+# **語リストが空の `for` / `select` は本体が 1 度も走らない**（issue #200 のレビュー指摘）。
+# `for v in ; do set +e; done` の `set +e` は実行されないので errexit は生きたままで、
+# スイートの失敗はそのまま伝わる（真値 GATES）。`main` は未配線と答えていた＝**fail-closed**
+# （兄弟の `if false` / `while false` / `until true` は以前から正しく扱えており、
+#  空の語リストだけが漏れていた）。**この差分がこの根を踏んだ**——弱めを部分シェルの中へ
+# 反映するようにした結果、`( for v in ; do quiet; done` が `main` では wired だったのに
+# 未配線へ倒れた。根を直したので両方の綴り（素の `set` と関数の呼び出し）が真値どおりになる
+for empty_list_case in \
+    "素の set +e・最上位:for v in ; do set +e; done
+          bash ${SUITE_PATH}
+          echo x" \
+    "素の set +e・部分シェルの中:( for v in ; do set +e; done
+          bash ${SUITE_PATH}
+          echo x )" \
+    "弱める関数・部分シェルの中:quiet() { set +e; }
+          ( for v in ; do quiet; done
+          bash ${SUITE_PATH}
+          echo x )" \
+    "select も同じ:quiet() { set +e; }
+          ( select v in ; do quiet; done
+          bash ${SUITE_PATH}
+          echo x )" \
+    "in の後ろで改行する綴り:quiet() { set +e; }
+          ( for v in
+          do
+          quiet
+          done
+          bash ${SUITE_PATH}
+          echo x )"
+do
+    assert_wired "語リストが空のループの中の弱めは反映しない（${empty_list_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${empty_list_case#*:}"
+done
+
+# **空と決め打つのは「`in` の後ろに 1 語も無い」ときだけ。** `for v in "" ;` は空文字 1 語なので
+# 本体が 1 度走り、弱めは反映される（真値 NOGATE）。`main` は wired＝fail-open だった
+assert_not_wired "空文字 1 語のリストは走るので弱めが反映される" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          quiet() { set +e; }
+          ( for v in \"\" ; do quiet; done
+          bash ${SUITE_PATH}
+          echo x )"
+
+# **中身が読めないリスト（`for v in $L`）は空と決め打たない。** 回数が分からないので真値は
+# 変数の中身で変わる（空なら GATES・非空なら NOGATE）。ライブラリは**素の `set +e` と同じ側**
+# ——「弱めは反映する」＝未配線——へそろえる。**そろえること自体が issue #200 の目的**で、
+# 以前は同じ意味の 2 つの綴りで答えが割れていた（素の `set` は未配線・呼び出しは wired）。
+# 向きは反 fail-open（リストが非空のときに正しく、空のときは `main` の素の `set` と同じ
+# fail-closed）。**片方だけを動かすとこのピンが落ちる**
+assert_not_wired "読めないリストの中の弱めは素の set と同じく反映する" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          quiet() { set +e; }
+          ( for v in \$L; do quiet; done
+          bash ${SUITE_PATH}
+          echo x )"
+
 # --- 先頭の飾り（同じシェルのまま `set` を呼ぶ書き方）------------------------------
 #
 # 落としてよいのはブレースグループ / 変数代入 / `builtin` / `command` / `eval` だけ。
