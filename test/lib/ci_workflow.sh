@@ -1002,25 +1002,8 @@ ci_workflow_run_with_structure() {
     # 1 つも無いとき**＝全ステップが GitHub の既定（bash）のときに限って、
     # 区切りの走査で算術コマンドの中も潰す。1 つでもあれば潰さない（`main` と同じ
     # 側へ倒れる＝fail-open で、`sh` のステップのコマンドを消さない）。
-    # **これは近似だが向きが決まっている**——`shell: bash` と書いたワークフローでも
-    # 潰さなくなるぶん #206 の `||` を含む形は直らないままになる（残る境界）。
-    # **見るのは生のワークフローではなく構造行**（`emit_structural_lines` の出力）。
-    # ここで鍵の文法を書き直すと、awk 側の `unquote_key` / `read_shell_value` が
-    # 既に持っている規則の**写し**になって必ず食い違う——実際、生の行に
-    # `^[[:space:]]*shell:` を当てていた版では `- shell: sh`（シェルをステップの
-    # 最初の鍵に書く普通の形）と `"shell": sh` を取りこぼし、`sh` のステップで
-    # **握り潰されたスイートを配線と答えた**（真値 NOGATE・`main` not-wired →
-    # wired。レビュー 6 巡目が実測）。構造行なら引用符は落ちており、
-    # ブロックスカラー（`run: |`）の本文は**そもそも含まれない**ので、
-    # 本文に書いた `shell:` を宣言と読み違える心配も無い。
-    # **当たり方は広く取る**（`- ` 付き・フロー形式 `{shell: sh}`・コメント中の言及も
-    # 拾う）——広く取るほど「潰さない」＝`main` と同じ側へ倒れるので、
-    # 誤って拾っても失うのは #206 の修正の適用範囲だけで、実在するスイートは消えない
-    local any_shell=0
-    grep -Eq 'shell[[:space:]]*:' "${structural_file}" && any_shell=1
     # 構造行の表を BEGIN で読み込んでから、呼び出し側のプログラムを続ける
     awk -v structural_file="${structural_file}" -v comment_re="${CI_WORKFLOW_COMMENT_START}" \
-        -v any_shell="${any_shell}" \
         -v prop_re="${CI_WORKFLOW_NODE_PROPERTY_BLOCK}" \
         -v prop_plain_re="${CI_WORKFLOW_NODE_PROPERTY}" \
         -v group_open_re="${CI_WORKFLOW_GROUP_OPENER}" \
@@ -1082,6 +1065,8 @@ ci_workflow_extract() {
             # （YAML のキー順は自由で、Actions は位置に関わらずトップレベルの `defaults:` を適用する）。
             # 桁 0 の行だけを見るので、`run: |` の本文（必ず字下げされる）と取り違えることはない
             while ((getline preline < ARGV[1]) > 0) {
+                # 読んだ行の番号（構造行の表と突き合わせるため）
+                preno++
                 # Windows 改行が混じっていても桁の判定が狂わないよう CR を落とす
                 sub(/\r$/, "", preline)
                 # **行末コメントを落としてから判定する。** 本文側の走査は既にそうしており
@@ -1106,6 +1091,20 @@ ci_workflow_extract() {
                 # ブロック形式の中に現れた `shell:` を既定として控える
                 if (in_top_defaults && preline ~ /^[[:space:]]+shell:[[:space:]]*[^[:space:]]/) {
                     workflow_shell = read_shell_value(preline)
+                }
+                # **bash 以外のシェルが 1 つでも宣言されているか**を同じ走査で控える
+                # （`split_commands()` が算術コマンドを潰すかの判断に使う。下記）。
+                # **見るのは構造行だけ**——`run: |` の本文に書いた `shell:` を宣言と
+                # 読み違えないため（表は `ci_workflow_run_with_structure` が用意する）
+                if (preno in structural && preline ~ /shell[[:space:]]*:/) {
+                    # 鍵として読める形（行頭・`- ` 付きのどちらも）なら値を見る。
+                    # それ以外（フロー形式 `{shell: sh}` など）は読めないので
+                    # **bash 以外が居るもの**として扱う（潰さない側＝`main` と同じ側）
+                    if (preline ~ /^[[:space:]]*-?[[:space:]]*shell:[[:space:]]*[^[:space:]]/) {
+                        if (read_shell_value(preline) != "bash") { non_bash_shell = 1 }
+                    } else {
+                        non_bash_shell = 1
+                    }
                 }
             }
             # 本文の走査に影響しないよう読み終えたファイルを閉じる
@@ -1441,11 +1440,16 @@ ci_workflow_extract() {
                 # **引用符で囲ったコマンド置換**は `mask_quoted()` が塗り潰すので
                 # 下の門番が空振りし、実際に走る綴りを照合から消す（fail-closed。実測）
                 body = substr(t, start + 2, j - start - 3)
-                # **照合へ出す写しでは、コマンド置換を含む本文は触らない**——
+                # **コマンド置換を含む本文はどの用途でも触らない**——
                 # 算術コマンドはコマンドを走らせないが、**その中のコマンド置換は走る**
                 # （実測: `(( $(bash <スイート>) > 2 ))` はスイートを実行する）。
                 # 潰すと実在する綴りを「無い」と答える fail-closed になるので、
                 # 判断の根拠が無いこの形は `main` と同じ「触らない」側へ倒す。
+                # **区切りの走査でも同じ**（レビュー 7 巡目が実測）——置換の中の
+                # `;` / `&&` / `||` は**実際に走るコマンドの区切り**なので、
+                # 潰すと断片が割れずに `X=$(( $(true; bash <スイート>) ))` の
+                # 記録が 1 つになり、照合の境界が `X=$(( $(` を越えられずに
+                # **未配線と答える**（真値 GATES・`main` wired → not-wired）。
                 # **`$((` も `$(` を含むのでこの門番に当たる**（レビュー 6 巡目）——
                 # 入れ子の算術**展開**はコマンドを持たないので、本当は潰してよい。
                 # それでも分けないのは、`$((` が**算術展開**とは限らないため:
@@ -1453,7 +1457,7 @@ ci_workflow_extract() {
                 # 実測でスイートを実行する。綴りだけでは区別できず、間違えた側は
                 # **実際に走るスイートを消す** fail-closed なので、広い側へ倒す。
                 # 残るのは `main` と同じ fail-open（下記「残る境界」）
-                if (purpose == "match" && (index(body, "$(") > 0 || index(body, "`") > 0)) {
+                if (index(body, "$(") > 0 || index(body, "`") > 0) {
                     i = j + 1
                     continue
                 }
@@ -1588,7 +1592,7 @@ ci_workflow_extract() {
             # `mask_arith_spans()` は桁を保って空白へ潰すので、`mask_quoted()` の
             # 後ろに重ねても `substr(line, …)` の切り出しは狂わない。
             # **`strip_arithmetic()` は使えない**（理由はあちらの docstring の (b)）
-            masked = mask_arith_spans(line, (any_shell == "0") ? "sep-bash" : "sep")
+            masked = mask_arith_spans(line, (non_bash_shell == 0) ? "sep-bash" : "sep")
             n = 0; start = 1
             for (i = 1; i <= length(masked); i++) {
                 c = substr(masked, i, 1)
@@ -6200,9 +6204,14 @@ ci_workflow_extract() {
                     # （fail-closed。レビュー 5 巡目が 82 形中 11 形で実測）。
                     # **`rec_shell[i]` を読む**（`shell_name` ではない）。ここは 1 巡目とは
                     # 別のループで、局所変数には最後の記録のシェルが残っている
+                    # **`trim()` は掛けない。** 記録の本文は `split_commands()` が
+                    # `trim(seg[j])` ＋ タブ→空白で正規化した綴りで、算術の伏せ字は
+                    # `((` と `))` を必ず残すので前後に空白は生まれない（`main` も掛けて
+                    # いない）。掛けると「本文は未正規化で届くことがある」と読めてしまい、
+                    # 次の読み手が存在しない正規化を探すことになる（§6）
                     print jobname "#" parts[1] "\t" gate "\t" parts[5] "\t" \
                         ((rec_shell[i] == "" || rec_shell[i] == "bash") \
-                            ? trim(mask_arith_spans(parts[6], "match")) : trim(parts[6]))
+                            ? mask_arith_spans(parts[6], "match") : parts[6])
                 }
             }
             # 次のジョブに備えて控えと状態を捨てる

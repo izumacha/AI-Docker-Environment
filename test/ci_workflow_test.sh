@@ -5002,6 +5002,64 @@ jobs:
         run: |
           (( bash ${SUITE_PATH} | cat ))"
 
+# **算術の中のコマンド置換は区切りの走査でも触らない**（レビュー 7 巡目）。算術
+# コマンドはコマンドを走らせないが、**その中のコマンド置換は走る**ので、置換の中の
+# `;` / `&&` / `||` は実際に走るコマンドの区切り。潰すと断片が割れず、記録が
+# `X=$(( $(true; bash <スイート>) ))` の 1 つになって照合の境界が `X=$(( $(` を
+# 越えられず**未配線と答える**（真値 GATES・`main` wired → not-wired の fail-closed）
+assert_wired "算術の中のコマンド置換の区切りは残す（算術展開）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          X=\$(( \$(true; bash ${SUITE_PATH}) ))
+          echo tail"
+
+# **`shell: bash` と明示した形でも伏せる**（レビュー 7 巡目）。判断の材料を
+# 「`shell:` の宣言が 1 つでもあるか」にしていた版は**極性が逆**で、
+# `(( … ))` が算術だと確定している綴り（`shell: bash`）でちょうど伏せなくなり、
+# #206 の fail-open がそこだけ生きていた（真値 NOGATE・`main` wired → wired）。
+# いまは**bash 以外のシェルが 1 つでも宣言されているか**で切る
+assert_not_wired "shell: bash を明示しても算術コマンドを伏せる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        shell: bash
+        run: |
+          (( bash ${SUITE_PATH} || exit 1 ))"
+
+# **コメント中の `shell:` は宣言ではない**（レビュー 7 巡目）。構造行にはコメントが
+# 残るので、行の綴りだけを探す判定だと**ステップにコメントを 1 行足すだけで**
+# 伏せ字が外れて #206 の fail-open が戻る（実測。この repo の `ci.yml` 自身が
+# 「no \`shell:\`, no \`defaults:\`」と書いたコメントを持っており、そこに当たっていた）
+assert_not_wired "コメント中の shell: は宣言として数えない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      # uses the default shell: bash
+      - name: subject
+        run: |
+          (( bash ${SUITE_PATH} || exit 1 ))"
+
+# **`run:` の本文に書いた `shell:` も宣言ではない**（レビュー 7 巡目）。判定は構造行
+# （`emit_structural_lines` の出力）に限って見るので、ブロックスカラーの本文は
+# そもそも対象に入らない。見てしまうと**本文に `shell:` という文字列を出力する
+# ステップ**だけで伏せ字が外れ、#206 の fail-open が戻る（真値 NOGATE）
+assert_not_wired "run の本文の shell: は宣言として数えない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          echo \"shell: sh\"
+          (( bash ${SUITE_PATH} || exit 1 ))"
+
 # **伏せるかはステップごとに決まる**（レビュー 6 巡目）。`flush_job()` の 2 巡目は
 # 1 巡目とは別のループなので、1 巡目の局所変数（最後の記録のシェル）を読むと
 # 判定が**ジョブ単位**になり、多段のジョブで両方向に壊れる。**下の 2 形がそれを
