@@ -3547,7 +3547,25 @@ for always_failing_case in \
     "同（包みの中）:{
           ( false && true )
           }
-          bash ${SUITE_PATH}"
+          bash ${SUITE_PATH}" \
+    "包みの閉じの || が吸う（スイートは中）:{
+          false
+          bash ${SUITE_PATH}
+          } || true" \
+    "同（部分シェル）:(
+          false
+          bash ${SUITE_PATH}
+          ) || true" \
+    "包みの後ろに行がある:{
+          false
+          bash ${SUITE_PATH}
+          } && echo ok
+          echo tail" \
+    "ループの閉じに && が付く:while true; do
+          false
+          bash ${SUITE_PATH}
+          break
+          done && true"
 do
     assert_not_wired "必ず失敗するコマンドの後ろは実行の証拠にしない（${always_failing_case%%:*}）" "name: ci
 jobs:
