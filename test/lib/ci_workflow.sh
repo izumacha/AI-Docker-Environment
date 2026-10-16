@@ -277,8 +277,11 @@ CI_WORKFLOW_NODE_PROPERTY="((&${CI_WORKFLOW_ANCHOR_NAME}+|${CI_WORKFLOW_VERBATIM
 # この非対称は伏せ処理側の `propend > i || ch == "!"` と**対で保つこと**（対になるのは
 # **こちらの定数**で、上の名前を要する形ではない——取り違えると、片方を直したときに
 # もう片方が issue #126 か上の fail-open のどちらかを開き直す）。
-# **なお伏せ処理側の 1 文字ずつの歩きは名前の集合を共有しない**（終わりの文字だけを
-# `prop_stop_re` で見る）。あちらの安全な向きは逆で、プロパティを読まないと引用が
+# **なお伏せ処理側の 1 文字ずつの歩きは名前の集合を共有しない**（名前は空白で終わらせ、
+# **アンカー名だけ**を `anchor_stop_re` で追加して切る。短縮形のタグ名はフロー形式の
+# 区切りを含められるので切らない＝issue #201。以前ここには `prop_stop_re` という
+# **いまは存在しない名前**と「終わりの文字だけを見る」という**反対の規則**が
+# 書いてあった＝レビュー 9 巡目で実測）。あちらの安全な向きは逆で、プロパティを読まないと引用が
 # 開かず**本物の `, secrets:` を伏せてしまう**（issue #124 の経路＝SHA ピンの強制が外れる）ため、
 # 狭めない。**残っている境界**: そのため `&a:b "a #b, secrets: inherit"` のような綴りでは
 # 2 つの読み手の答えが分かれる（配線の判定は fail-closed、特権の判定は値を引用として
@@ -2028,6 +2031,24 @@ ci_workflow_extract() {
             return s2
         }
 
+        # **「この断片のコマンドが必ず走ると証明できるか」の核**（レビュー 9 巡目で 1 か所へ寄せた）。
+        # 4 つの材料で決まる: 関数定義の本文の中ではないこと（`pr_fndef` / `pr_cmdfndef`。
+        # 定義しただけの本文は呼ばれるまで走らない）、走るか分からない階層の中ではないこと
+        # （`pr_uncertain`。`if` / `case` のアーム等）、連鎖（`&&` / `||`）で入った階層の中では
+        # ないこと（`pr_chain`。左辺次第で飛ぶ）。
+        # **以前はこの 4 つがファイルの 3 か所に写しで書かれていた**——そろっていなかったことが
+        # `chain_depth` の取り落としの原因で（レビュー 1 巡目で実測）、残った唯一の歯止めが
+        # 「3 つとも動かすこと」という散文だった。消費側が増えるたびに同じ取り落としが
+        # 起こりうるので、§6（DRY）に従って述語へ切り出す。
+        # **引数名を呼び出し側のローカルとそろえない**のは、awk の関数引数が同名の外側の変数を
+        # 覆い隠す綴りになり、読み手が「これは外から見えているのか」を取り違えるため。
+        # 消費側はこの核に**それぞれ固有の条件を足す**（`set` の強める向きは前置きの形、
+        # 無条件に `exit` する関数の呼び出しは `fnexit` と `case` のアーム見出し、
+        # 素の脱出は何も足さない）。**核を広げるときはこの関数だけを動かす。**
+        function provably_runs(pr_fndef, pr_cmdfndef, pr_uncertain, pr_chain) {
+            return (!pr_fndef && pr_cmdfndef == 0 && pr_uncertain == 0 && pr_chain == 0)
+        }
+
         # いまいる階層を内側から外側へたどり、**一番内側の部分シェルの階層**を返す（無ければ 0）。
         # もとは「部分シェルの中で握り潰された最後のコマンド」を覚える台帳のために入れたが
         # （issue #152）、**その台帳は issue #199 で削除した**。いまの消費側は
@@ -2905,7 +2926,7 @@ ci_workflow_extract() {
             scope_op[scope_serial] = ""
             scope_close_at[scope_serial] = 0
         }
-        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, fndef, fndef_at, struct_text, set_probe, set_open_n, set_crossed_sub, set_sub, sub_res_at, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_lead_n, set_lead_ok, set_arm_here, set_rest, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fnexit, fnret, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, closed_subshell, closed_uncertain, chain_in, inverted, arm_masked, arm_at, arm_expected, case_scope, opens_case, opens_case_here, case_opens_at, close_probe, close_rest, close_first, open_head, esac_probe, esac_rest, esac_first, dead_probe, dead_lead, dead_scope, dead_scope_here, close_n, exit_seen, exit_seen_plain, chain_at, chain_depth, loop_at, call_inverted, esc_inverted, call_condition, esc_condition, esc_ret_exempt, ret_shell_at, ret_shell_scope, ret_shell_here, ret_shell_kept, ret_new_at, ret_new_scope, sc, exit_is_ret, esc_is_return, esc_is_loop_escape, esc_ends_shell, esc_loop_at, esc_ends_loop, esc_return_local, closed_sub_seen, closed_sub_e, closed_sub_p, sub_id, open_stripped, head_inverted, inverted_at, closed_inverted, sub_serial, depth_in, cmd_rest, cmd_sub, cmd_fndef, cmd_fnname, cmd_fnat, fn_name_here, esc_probe, esc_is_exit, esc_sub, esc_paren, esc_sub_depth, esc_close, esc_tail, sub_lead_in, fn_lead, call_sub, call_weak_at, call_weak_sub, exit_here, exit_sub,
+        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, fndef, fndef_at, struct_text, set_probe, set_open_n, set_crossed_sub, set_sub, sub_res_at, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_lead_n, set_lead_ok, set_arm_here, set_rest, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fnexit, fnret, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, closed_subshell, closed_uncertain, chain_in, inverted, arm_masked, arm_at, arm_expected, case_scope, opens_case, opens_case_here, case_opens_at, close_probe, close_rest, close_first, open_head, esac_probe, esac_rest, esac_first, dead_probe, dead_lead, dead_scope, dead_scope_here, close_n, exit_seen, end_top, end_ret, end_exit, end_ret_n, end_exit_n, end_kill, end_nkill, end_kill_ret, end_kill_exit, end_ks, ek, chain_at, chain_depth, loop_at, call_inverted, esc_inverted, call_condition, esc_condition, esc_ret_exempt, ret_shell_here, exit_shell_here, ret_new_at, ret_new_scope, sc, exit_is_ret, esc_is_return, esc_is_loop_escape, esc_ends_shell, esc_loop_at, esc_ends_loop, esc_return_local, closed_sub_seen, closed_sub_e, closed_sub_p, sub_id, open_stripped, head_inverted, inverted_at, closed_inverted, sub_serial, depth_in, cmd_rest, cmd_sub, cmd_fndef, cmd_fnname, cmd_fnat, fn_name_here, esc_probe, esc_is_exit, esc_sub, esc_paren, esc_sub_depth, esc_close, esc_tail, sub_lead_in, fn_lead, call_sub, call_weak_at, call_weak_sub, exit_here, exit_sub,
                               cmd_opens, run_depth, rec_at, nclosed_scope, closed_scope, ci) {
             # **シェルのオプションはステップごとにリセットする。** ステップは 1 つずつ
             # 別のシェルで走るので、前のステップの `set +e` / `pipefail` は引き継がれない。
@@ -2927,7 +2948,27 @@ ci_workflow_extract() {
             # **無条件の `exit` を見たらこの先は 1 つも走らない**（issue #151）。
             # ステップごとに戻す（シェルはステップ単位で新しくなる）
             exit_seen = 0
-            exit_seen_plain = 0
+            # **「ここでシェルが終わる」の印は階層ごとの台帳で持つ**（レビュー 9 巡目）。
+            # 以前は真偽 2 つ（`exit_seen` / `exit_seen_plain`）と**1 つしか持てない印**
+            # （`ret_shell_at` / `ret_shell_scope`）＋取り消し不能の旗（`ret_shell_kept`）で
+            # 表していたが、**入れ子は真偽 1 つでは表せない**。印を 2 つ立てると 1 つ目の寄与が
+            # どの旗にも残らず、祖先の印を内側の印で上書きしたあとは**祖先の閉じに付いた
+            # `||` で取り消せない**（実測で真値 GATES が not-wired ＝正しくゲートしている
+            # ワークフローを未配線と誤報。`main` は wired なので**この差分が入れた退行**で、
+            # 460 形の掃きで 38 形がこの形だった）。
+            # 台帳は階層の識別子（`scope_at[]`）を鍵にして 2 種類を別に持つ——
+            # **関数外 `return` が立てた分**（`end_ret`）と**素の `exit` が立てた分**
+            # （`end_exit`）で、取り消せる区切りが違う（`{ return 0; } || true` の後ろは走るが、
+            # `{ exit 0; } || true` の後ろは走らない＝実測）。最上位の分は `end_top` で、
+            # どの閉じでも取り消さない（囲いが無いので終わりは確定している）。
+            # `exit_seen` はこの 3 つから**導く**（読む側は 2 か所だけなので、台帳が動いた
+            # ところで必ず計算し直す）。件数を数えておくのは、`length(配列)` が POSIX awk に
+            # 無いため（§10 の移植性）
+            end_top = 0
+            end_ret_n = 0
+            end_exit_n = 0
+            for (ek in end_ret) { delete end_ret[ek] }
+            for (ek in end_exit) { delete end_exit[ek] }
             # 連鎖（`&&` / `||`）で入った階層の数。脱出を数えてよいかの判断に使う
             chain_depth = 0
             # `case` の入れ子の数（パターン末尾の `)` を見分けるために数える）
@@ -3552,13 +3593,8 @@ ci_workflow_extract() {
                             #     右辺か」、後者は「囲っている階層が連鎖の右辺で開かれたか」
                             # **errexit 側（`strengthen_base`）の門番は緩めないこと**——
                             # あちらを同じ条件にすると issue #152 の fail-open に戻る。
-                            # **この 4 つ（`!in_fndef_here` / `cmd_fndef == 0` / `uncertain == 0` /
-                            # `chain_depth == 0`）は脱出の門番 2 か所とまったく同じ核で、
-                            # いまこのファイルに 3 つの写しがある**（そろっていなかったことが
-                            # `chain_depth` の取り落としの原因＝レビュー 1 巡目で実測）。
-                            # **1 つの述語へ切り出すのは別の変更**（脱出側は issue #204 / #207 /
-                            # #209 が書き換える予定なので、同じ差分に混ぜない）。
-                            # **どれか 1 つを直すときは 3 つとも動かすこと。**
+                            # **4 つの核は `provably_runs()` が唯一の源**（レビュー 9 巡目で
+                            # 3 つの写しを畳んだ。ここが足すのは「前置きの形」と `!chain_in` だけ）。
                             # **残る境界 2 つ**（どちらも実測）: 呼んだ関数の `set -o pipefail` は
                             # **強める向きの台帳が無い**ので反映しない（`fnweak_pipe` は弱める向き
                             # だけ。fail-closed 12 形。issue #221）。閉じ括弧の無い綴り
@@ -3575,10 +3611,9 @@ ci_workflow_extract() {
                                            || (set_lead_n > 0 \
                                                && substr(text, set_lead_n + 1) == set_probe \
                                                && substr(text, 1, set_lead_n) !~ cmdsub_open_re))
-                            strengthen_pipe_ok = (set_placed && set_lead_ok \
-                                                  && !in_fndef_here && cmd_fndef == 0 \
-                                                  && !chain_in && chain_depth == 0 \
-                                                  && uncertain == 0)
+                            strengthen_pipe_ok = (set_placed && set_lead_ok && !chain_in \
+                                                  && provably_runs(in_fndef_here, cmd_fndef, \
+                                                                   uncertain, chain_depth))
                             # **`case` を開く断片に載ったアームの `set` は、本体の階層に属する。**
                             # 深さが増えるのはこの断片の**末尾**なので、素直に `depth` で記録すると
                             # 同じアームの後続（1 つ深い）の `set -e` が打ち消せず、
@@ -3884,9 +3919,9 @@ ci_workflow_extract() {
                                 # `wired` → `not-wired`＝正しくゲートしているワークフローを赤くする
                                 # 向き。部分シェル・ブレースの両方で実測）。素の `exit` の枝が
                                 # 同じ理由で `cmd_fndef == 0` を持っているので、そこへそろえる
-                                if (!in_fndef_here && cmd_fndef == 0 && fnexit[fncall] && !opens_case_here \
-                                    && uncertain == 0 && chain_depth == 0 \
-                                    && !chain_in) {
+                                if (fnexit[fncall] && !opens_case_here && !chain_in \
+                                    && provably_runs(in_fndef_here, cmd_fndef, \
+                                                     uncertain, chain_depth)) {
                                     # 旗だけ立てて、下の 1 か所（解除のあと）で適用する
                                     exit_here = 1
                                     exit_sub = call_sub
@@ -4210,9 +4245,10 @@ ci_workflow_extract() {
                         # `errexit` の免除は**複合の中まで伝わる**ので、`{ return 0; } || true` では
                         # シェルは終わらない（実測で真値 GATES。`set -e; { return 0; } || true;`
                         # `echo after` は `after` を出す）。`return` を見つけた断片では閉じの区切りが
-                        # まだ分からないので、**閉じた時点で取り消す**（`ret_shell_at` は印を立てた
-                        # ときの深さ。`exit` には掛けない——`exit` は状態と無関係に終わるので、
-                        # `{ exit 0; } || true` の後ろは実際に走らない＝実測）。
+                        # まだ分からないので、**閉じた時点で取り消す**（台帳 `end_ret` は印を
+                        # 立てた階層が鍵。`exit` の分（`end_exit`）には `&&` / `||` を掛けない
+                        # ——`exit` は状態と無関係に終わるので、`{ exit 0; } || true` の後ろは
+                        # 実際に走らない＝実測）。
                         # **実際に階層を閉じた断片でだけ見る**（`close_n > 0`。レビュー 4 巡目で
                         # 入れた門番。無条件だと、印を立てた階層より浅いところに**後から**現れた
                         # `&&` / `||` で終わる断片——`{ return 0; }` 改行 `false || echo rec`——が
@@ -4234,13 +4270,10 @@ ci_workflow_extract() {
                         # `{` 改行 `{ return 0; }` 改行 `} || true` では印は内側（深さ 2）に立ち、
                         # `||` が付くのは外側（深さ 1）の閉じ（実測でピン 1 件が落ちた）。
                         # 親の連なりは `scope_parent[]` が既に持っているのでそれを辿る
-                        # **`ret_shell_scope > 0` にはピンが無い**（外しても 1 件も落ちない＝実測）。
-                        # `open_scope()` は 1 から番号を振るので、階層が登録されていれば
-                        # `ret_shell_at > 0` から常に導ける。それでも残すのは、**登録されていない
-                        # 階層では両辺が 0 になって偶然一致し、取り消しが誤って発火する**ため
-                        # （`closed_scope[]` 側も同じ `scope_at[]` から取るので、印の側だけ 0 に
-                        #  なることはない＝0 同士で当たる）。倒れる向きが fail-open なので、
-                        # 「いまは導ける」を理由に外さない
+                        # **登録されていない階層（識別子が無い＝最上位）は台帳へ入れない**
+                        # （`end_top` が持つ）。鍵が 0 の印を台帳へ入れると、`closed_scope[]` 側も
+                        # 同じ `scope_at[]` から取るので**0 同士で偶然一致し、取り消しが誤って
+                        # 発火する**（倒れる向きが fail-open）。
                         # **フォークした複合の閉じ（`|` / `&`）でも取り消す**（レビュー 6 巡目。
                         # この差分が入れた fail-closed）。`{ return 0; } | cat` のブレースは
                         # パイプラインの子シェルで走るので、そこで `return` が非ゼロで返っても
@@ -4248,26 +4281,73 @@ ci_workflow_extract() {
                         # `after` を出す。並びの状態は `cat` の 0）。`&&` / `||` だけを見ていた版は
                         # 真値 GATES を not-wired と答えていた（`main` は wired ＝**退行**）。
                         # 隣の巻き戻し（`closed_entry_seen`）が同じ 2 つの区切りを見ているのと同じ理由
-                        if (exit_seen && ret_shell_at > 0 && depth < ret_shell_at \
-                            && ret_shell_scope > 0 \
-                            && (ops[j] == "|" || ops[j] == "&" \
-                                || (ops[j] == "&&" \
-                                    && innermost_marked_depth(depth, subshell_at) == 0) \
-                                || (ops[j] == "||" \
-                                    && !chain_never_succeeds(seg[j + 1])))) {
-                            for (ci = 1; ci <= nclosed_scope && ret_shell_scope > 0; ci++) {
-                                for (sc = ret_shell_scope; sc > 0; sc = scope_parent[sc]) {
-                                    if (closed_scope[ci] == sc) {
-                                        # **戻すのは「関数外 `return` が立てた分」だけ**——
-                                        # 素の `exit` も同じ旗を立てるので、0 に落とすと
-                                        # その寄与まで消える（上の `exit_seen_plain` 参照）
-                                        exit_seen = (exit_seen_plain || ret_shell_kept) ? 1 : 0
-                                        ret_shell_at = 0
-                                        ret_shell_scope = 0
-                                        break
+                        # **取り消すのは「この断片が閉じた階層の中にある印」だけ**
+                        # （レビュー 9 巡目で台帳へ移した）。印は階層ごとに別に立っているので、
+                        # 内側の印を取り消しても**祖先の印はそのまま残る**——以前の 1 枠＋旗の形で
+                        # 38 形が fail-closed へ化けていたのはここ。
+                        # 区切りによって取り消せる種類が違う:
+                        # **フォークした複合の閉じ（`|` / `&`）は 2 種類とも取り消す**——複合は
+                        # 子シェルで走るので、中の `exit` も、非ゼロで返った `return` も親へ届かない
+                        # （実測で `set -e; { exit 0; } | cat; echo after` と
+                        #  `set -e; { return 0; } | cat; echo after` はどちらも `after` を出す）。
+                        # 以前は `exit` の分（当時の `exit_seen_plain`）を残していたので、
+                        # フォークした複合の中の素の `exit` でステップの後ろが死に体のままだった
+                        # （実測で真値 GATES が not-wired。`{ exit 0; } | cat` は `main` も誤る
+                        #  **既存**の fail-closed で、この台帳で一緒に閉じた）。
+                        # **`&&` / `||` の閉じは `return` の分だけ**——`errexit` の免除は複合の
+                        # 中まで伝わるが、`exit` は状態と無関係に終わるので免除できない。
+                        # `&&` は「閉じた後に囲っている部分シェルが無い」とき（部分シェルが
+                        # あると並びの終了状態はその部分シェルの状態になる）、`||` は
+                        # 「右辺が成功しうる」とき（成功しえないなら並びはいつでも失敗する）に限る
+                        # ——どちらもレビュー 8 巡目に実測して足した 2 つの条件そのもの
+                        # （**この awk はシェルの単一引用符の中**なので、コメントに
+                        #  アポストロフィを書かない。FR-8.1 の採番を引くときは本文を参照する）
+                        end_nkill = 0
+                        if ((end_ret_n > 0 || end_exit_n > 0) && nclosed_scope > 0) {
+                            end_kill_ret = (ops[j] == "|" || ops[j] == "&" \
+                                            || (ops[j] == "&&" \
+                                                && innermost_marked_depth(depth, subshell_at) == 0) \
+                                            || (ops[j] == "||" \
+                                                && !chain_never_succeeds(seg[j + 1])))
+                            end_kill_exit = (ops[j] == "|" || ops[j] == "&")
+                            # 閉じた階層のどれかが印の階層を**内側に含む**かで見る
+                            # （深さの数値だけでは兄弟の複合と区別できない＝レビュー 5 巡目の実測）。
+                            # 親の連なりは `scope_parent[]` が既に持っているのでそれを辿る。
+                            # 走査中に消すと awk の実装差が出るので、**消す鍵を控えてから消す**
+                            for (ci = 1; ci <= nclosed_scope; ci++) {
+                                if (end_kill_ret) {
+                                    for (ek in end_ret) {
+                                        for (sc = ek + 0; sc > 0; sc = scope_parent[sc]) {
+                                            if (closed_scope[ci] == sc) {
+                                                end_nkill++; end_kill[end_nkill] = "r\t" ek
+                                                break
+                                            }
+                                        }
+                                    }
+                                }
+                                if (end_kill_exit) {
+                                    for (ek in end_exit) {
+                                        for (sc = ek + 0; sc > 0; sc = scope_parent[sc]) {
+                                            if (closed_scope[ci] == sc) {
+                                                end_nkill++; end_kill[end_nkill] = "e\t" ek
+                                                break
+                                            }
+                                        }
                                     }
                                 }
                             }
+                            for (ci = 1; ci <= end_nkill; ci++) {
+                                split(end_kill[ci], end_ks, "\t")
+                                if (end_ks[1] == "r" && (end_ks[2] in end_ret)) {
+                                    delete end_ret[end_ks[2]]; end_ret_n--
+                                }
+                                else if (end_ks[1] == "e" && (end_ks[2] in end_exit)) {
+                                    delete end_exit[end_ks[2]]; end_exit_n--
+                                }
+                                delete end_kill[ci]
+                            }
+                            # 台帳が動いたので `exit_seen` を導き直す（最上位の分は残る）
+                            exit_seen = (end_top || end_ret_n > 0 || end_exit_n > 0) ? 1 : 0
                         }
                         # **ループ脱出の区間は、フォークした複合を閉じた時点で取り消す**
                         # （レビュー 7 巡目）。子シェルで走った `break` / `continue` は親の
@@ -4868,7 +4948,7 @@ ci_workflow_extract() {
                                 # `function_form()` 由来なので `( f() { exit 0` を定義と読めず、
                                 # 定義しただけの本文の脱出でその部分シェルの残りを死に体に
                                 # していた（実測で真値 GATES なのに not-wired）
-                                if (uncertain == 0 && chain_depth == 0 && !in_fndef_here && cmd_fndef == 0) {
+                                if (provably_runs(in_fndef_here, cmd_fndef, uncertain, chain_depth)) {
                                     # 旗だけ立てて、下の 1 か所（呼び出し側と共通）で適用する
                                     exit_here = 1
                                     exit_sub = esc_sub
@@ -4998,8 +5078,11 @@ ci_workflow_extract() {
                                 # ループへ届かない**（実測で診断が出てスイートが走る＝真値 GATES。
                                 # `main` は wired）。ところが**フォークかどうかは閉じる断片でしか
                                 # 分からない**ので、脱出の時点では区間を付けるしかない。
-                                # `return` 側の印（`ret_shell_at` / `ret_shell_scope`）と
-                                # **同じ材料・同じ場所**で階層の識別子を控え、下の取り消しが見る
+                                # `return` / `exit` の台帳（`end_ret` / `end_exit`）と
+                                # **同じ材料・同じ場所**で階層の識別子を控え、下の取り消しが見る。
+                                # **こちらは 1 枠のまま**（入れ子で押し出される実例が 654 形の
+                                # corpus に 1 つも無く、`dead_depth` は深さの区間なので
+                                # 台帳の鍵と意味が揃わない。実例が出たら同じ形へ移すこと）
                                 dead_scope_here = 1
                             }
                             # **関数の本文の中の `return` は従来どおりその階層だけ**——抜けるのは
@@ -5024,7 +5107,8 @@ ci_workflow_extract() {
                             # `&&` / `||` が吸う形は下の取り消しが見る**ので、
                             # `( return 0 ) || true` は正しく wired に戻る（実測）
                             if (exit_is_ret) {
-                                exit_seen = 1
+                                # 印の階層は開きを数え終わってからでないと決まらないので、
+                                # ここでは旗だけ立てて下の 1 か所（台帳への登録）で解決する
                                 ret_shell_here = 1
                             }
                             # この断片で開いた部分シェルの後ろなら、その階層が閉じるまで死に体
@@ -5040,7 +5124,13 @@ ci_workflow_extract() {
                             # 共有の旗を 0 に落とすと**同じ階層にある素の `exit` の寄与まで消える**
                             # （`{ return 0; exit 0; } || true` 改行 `bash <スイート>` が真値 NOGATE
                             #  なのに wired。`main` は not-wired だったので**この差分の退行**＝実測）
-                            else { exit_seen = 1; exit_seen_plain = 1 }
+                            # 部分シェルの外の脱出。**素の `exit` も階層ごとの台帳へ登録する**
+                            # （レビュー 9 巡目）。以前は真偽 1 つ（当時の `exit_seen_plain`）で、
+                            # フォークした複合の中（`{ exit 0; } | cat`）でも取り消せなかった
+                            # ——子シェルで終わるだけなので親は続き、真値は GATES（`main` も
+                            # 誤る既存の fail-closed。実測）。登録先は下の 1 か所で、
+                            # `return` の分と**同じ材料・同じ場所**で階層を解決する
+                            else { exit_shell_here = 1 }
                         }
                         # **閉じた外側の区切りを中身の記録へ塗り替える処理は置いていない。**
                         # `( bash x ) || true` のように grouping を閉じた断片に付いた区切りは
@@ -5344,35 +5434,35 @@ ci_workflow_extract() {
                             dead_scope = scope_at[depth_in + cmd_opens]
                             dead_scope_here = 0
                         }
-                        if (ret_shell_here) {
+                        # **2 種類の印を階層ごとの台帳へ登録する**（レビュー 9 巡目）。
+                        # 階層の識別子で持つのが要点で、深さだけだと同じ深さで開いて閉じた
+                        # **兄弟の複合**が取り消しを発火させてしまう（レビュー 5 巡目の実測）。
+                        # **印を 1 枠＋旗で持っていた版は入れ子を表せなかった**——
+                        # 2 つ目の `return` が 1 つ目を押し出すと、押し出された分は
+                        # 「取り消せない」旗へ逃がすしかなく、それが**祖先**の印だと
+                        # 祖先の閉じに付いた `||` でも取り消せない（実測で真値 GATES が
+                        # not-wired。`main` は wired ＝この差分が入れた退行で、460 形の掃きで
+                        # 38 形）。台帳なら内側と祖先が別の鍵になるので、それぞれの閉じが
+                        # それぞれを取り消す（`{` / `return 0` / `{ return 0; } || true` /
+                        #  `} || true` / スイートは真値 GATES で wired ＝実測）。
+                        # **最上位（階層の識別子が無い）の分は `end_top` へ**——囲いが無いので
+                        # どの閉じでも取り消さない（`exit` も `return` も終わりは確定している）
+                        if (ret_shell_here || exit_shell_here) {
                             ret_new_at = depth_in + cmd_opens
-                            # **階層の識別子も同じ場所で控える**（レビュー 5 巡目）。
-                            # 深さだけでは、同じ深さで開いて閉じた**兄弟の複合**が
-                            # 取り消しを発火させてしまう
                             ret_new_scope = (ret_new_at > 0) ? scope_at[ret_new_at] : 0
-                            # **印は 1 つしか持てないので、押し出す寄与は別の旗へ退避する**
-                            # （レビュー 8 巡目。`main` 既存の fail-open）。`exit_seen` は
-                            # 真偽 1 つで、取り消しはそれを「素の `exit` の分」まで戻す。
-                            # 2 つ目の関数外 `return` が印を上書きすると、1 つ目の寄与が
-                            # どの旗にも残らず、2 つ目の囲いの `||` で**まとめて消えて**いた
-                            # （実測で `return 0` 改行 `{ return 0; } || true` 改行
-                            #  スイートが真値 NOGATE なのに wired ＝必須スイートが黙って
-                            #  ゲートから外れる）。退避するのは 2 つの場合だけ:
-                            #   - 最上位の `return`（`at` が 0）は**取り消せない**寄与。
-                            #     印の「無し」と同じ値なので、印としては持てない
-                            #   - 生きている印が**別の階層**のもの（同じ階層なら、その階層の
-                            #     閉じが両方を正しく取り消すので退避は要らない。実測で
-                            #     `{ return 0; return 0; } || true` は真値 GATES）
-                            if (ret_new_scope == 0 \
-                                || (ret_shell_scope > 0 && ret_shell_scope != ret_new_scope)) {
-                                ret_shell_kept = 1
+                            if (ret_new_scope == 0) { end_top = 1 }
+                            else if (ret_shell_here) {
+                                if (!(ret_new_scope in end_ret)) { end_ret_n++ }
+                                end_ret[ret_new_scope] = ret_new_at
                             }
-                            # 取り消せる印として持てるのは階層の識別子がある場合だけ
-                            if (ret_new_scope > 0) {
-                                ret_shell_at = ret_new_at
-                                ret_shell_scope = ret_new_scope
+                            else {
+                                if (!(ret_new_scope in end_exit)) { end_exit_n++ }
+                                end_exit[ret_new_scope] = ret_new_at
                             }
+                            # 台帳が動いたので `exit_seen` を導き直す
+                            exit_seen = (end_top || end_ret_n > 0 || end_exit_n > 0) ? 1 : 0
                             ret_shell_here = 0
+                            exit_shell_here = 0
                         }
                         # **この断片が開いた階層すべてに、断片に入る前のオプションを控える**
                         # （下の「フォークした複合の巻き戻し」で使う）。`errexit_before` /

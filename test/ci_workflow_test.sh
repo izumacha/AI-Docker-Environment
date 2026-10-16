@@ -3125,6 +3125,46 @@ for escape_reach_control in \
     "フォークした閉じの return は後ろの取り消しに寄与しない:{ return 0; } | cat
           { return 0; } || true
           bash ${SUITE_PATH}" \
+    "入れ子の 2 つの印はそれぞれの階層の閉じで取り消す:{
+          return 0
+          { return 0; } || true
+          } || true
+          bash ${SUITE_PATH}" \
+    "同（内側がフォークした閉じ）:{
+          return 0
+          { return 0; } | cat
+          } || true
+          bash ${SUITE_PATH}" \
+    "同（内側の複合に素の exit がある）:{
+          return 0
+          { exit 0; } | cat
+          } || true
+          bash ${SUITE_PATH}" \
+    "フォークした閉じは中の素の exit も取り消す:{ exit 0; } | cat
+          bash ${SUITE_PATH}" \
+    "同（非同期の & 側）:{ exit 0; } &
+          bash ${SUITE_PATH}" \
+    "同（return の印と同じ複合の中にある exit）:{
+          return 0
+          { exit 0; }
+          } | cat
+          bash ${SUITE_PATH}" \
+    "同（ループ脱出と同じ複合の中にある exit）:{ break
+          { exit 0; } } | cat
+          bash ${SUITE_PATH}" \
+    "同（ループの中）:while true; do
+          { exit 0; } | cat
+          bash ${SUITE_PATH}
+          break
+          done" \
+    "同（必ず走る条件の中）:if true; then
+          exit 0
+          fi | cat
+          bash ${SUITE_PATH}" \
+    "同（部分シェルの中）:(
+          { exit 0; } | cat
+          )
+          bash ${SUITE_PATH}" \
     "1 行に畳んだ部分シェルの break はループを抜けない（対照）:while true; do
           ( break )
           bash ${SUITE_PATH}
@@ -3365,6 +3405,14 @@ for escape_in_loop_case in \
           bash ${SUITE_PATH}" \
     "取り消しは押し出した最上位の return の寄与まで消さない:return 0
           { return 0; } || true
+          bash ${SUITE_PATH}" \
+    "最上位の素の exit はフォークした閉じでも取り消せない:exit 0
+          { :; } | cat
+          bash ${SUITE_PATH}" \
+    "フォークして閉じた複合の外にある exit は取り消さない:{
+          exit 0
+          }
+          { :; } | cat
           bash ${SUITE_PATH}" \
     "同（押し出したのが別の階層の印）:{ return 0; }
           { return 0; } || true
