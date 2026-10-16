@@ -4914,7 +4914,9 @@ for arith_body_case in \
           (( bash ${SUITE_PATH} ))" \
     "算術の中の || と exit:(( bash ${SUITE_PATH} || exit 1 ))" \
     "算術の中の || と false:(( bash ${SUITE_PATH} || false ))" \
-    "後ろに && が付く:(( bash ${SUITE_PATH} )) && echo ok"
+    "後ろに && が付く:(( bash ${SUITE_PATH} )) && echo ok" \
+    "入れ子の括弧がある:(( (1+2) * bash ${SUITE_PATH} ))" \
+    "閉じない算術:(( bash ${SUITE_PATH}"
 do
     assert_not_wired "算術コマンドの中身は実行の証拠にしない（${arith_body_case%%:*}）" "name: ci
 jobs:
@@ -4934,7 +4936,10 @@ for arith_expansion_case in \
           bash ${SUITE_PATH}" \
     "代入の値:X=\$(( 2 * 3 ))
           bash ${SUITE_PATH}" \
-    "後ろの行の展開:bash ${SUITE_PATH} && echo \$(( 1 ))"
+    "後ろの行の展開:bash ${SUITE_PATH} && echo \$(( 1 ))" \
+    "展開の中のパイプ記号:bash ${SUITE_PATH} \$(( (1<<2)|3 ))" \
+    "展開の中の論理積:bash ${SUITE_PATH} --n=\$(( (1|2) ))" \
+    "置換の隣の入れ子の展開:X=\$(bash ${SUITE_PATH})\$(( (1+2) ))"
 do
     assert_wired "算術展開は後続の実行を消さない（${arith_expansion_case%%:*}）" "name: ci
 jobs:
@@ -4945,6 +4950,20 @@ jobs:
         run: |
           ${arith_expansion_case#*:}"
 done
+
+# **算術展開を伏せてはいけない**（issue #206 のレビューが実測した 2 つ目の向き）。
+# 展開はコマンドの**一部**なので、照合へ出す本文から消すと**別のコマンドに化ける**。
+# 下は真値 NOGATE——実 bash は `test/subject_test.sh1` というファイルを探して 127 で終わる
+# （区切りの空白が無い）。展開まで伏せる版では本文が `bash <スイート>` に化け、
+# **走らないスイートを「配線されている」**と答えた（`strip_arithmetic` を照合へ渡していた）
+assert_not_wired "算術展開はコマンドの一部なので伏せない（空白なしで続く展開）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH}\$(( 1 ))"
 
 # 同じ取り違えは**逆向き**にも効く（この差分が入れかけた退行）。`! (( true ))` を「偽」と読むと
 # 右辺の `set +e` が「走らない」ことになり、握り潰されたスイートが「ゲートしている」と読まれる
