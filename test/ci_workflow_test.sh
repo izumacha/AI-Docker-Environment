@@ -5046,6 +5046,30 @@ jobs:
         run: |
           (( bash ${SUITE_PATH} || exit 1 ))"
 
+# **読めない綴りの `shell:` は「bash」と決めつけない**（レビュー 8 巡目）。
+# `shell : sh`（コロンの手前に空白。PyYAML も GitHub も鍵として読む）や値が次の行に
+# ある形は、**ステップの `shell:` を読む側でも同じ規則で外れる**ので控えが空＝
+# 「既定の bash」に見える。区切りの走査だけを倒しても、照合側が「bash だから伏せる」と
+# 判断して**`sh` で実際に走るスイートを消す**（下の 2 形はどちらも実 `sh -e` で真値
+# GATES ・ `main` は wired なので、伏せると退行）。1 つでも読めない宣言があれば
+# ファイル全体で照合側の伏せ字も止める（fail-open ＝ `main` と同じ側）
+for arith_unreadable_shell_case in \
+    "コロンの手前に空白がある:      - shell : sh
+        name: subject" \
+    "値が次の行にある:      - name: subject
+        shell:
+          sh"
+do
+    assert_wired "読めない shell: の綴りでは算術コマンドを伏せない（${arith_unreadable_shell_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+${arith_unreadable_shell_case#*:}
+        run: |
+          (( bash ${SUITE_PATH} ))"
+done
+
 # **`run:` の本文に書いた `shell:` も宣言ではない**（レビュー 7 巡目）。判定は構造行
 # （`emit_structural_lines` の出力）に限って見るので、ブロックスカラーの本文は
 # そもそも対象に入らない。見てしまうと**本文に `shell:` という文字列を出力する

@@ -993,15 +993,6 @@ ci_workflow_run_with_structure() {
         rm -f "${structural_file}" "${program_file}" || true
         return 1
     fi
-    # **`shell:` を 1 つも書いていないワークフローか**を先に見て awk へ渡す。
-    # `(( … ))` が算術コマンドなのは **bash 固有**で、`sh`（GitHub は `sh -e {0}`＝dash）
-    # では入れ子の部分シェルになり中のコマンドが実際に走る。ところが
-    # `split_commands()` が区切りを切る時点ではステップのシェルが確定していない
-    # （ジョブの既定シェルは `steps:` の**後ろ**にも書けるので、`flush_step()` は
-    # 同じ理由で `errexit` を -1 のまま持ち越す）。そこで**ファイル全体で `shell:` が
-    # 1 つも無いとき**＝全ステップが GitHub の既定（bash）のときに限って、
-    # 区切りの走査で算術コマンドの中も潰す。1 つでもあれば潰さない（`main` と同じ
-    # 側へ倒れる＝fail-open で、`sh` のステップのコマンドを消さない）。
     # 構造行の表を BEGIN で読み込んでから、呼び出し側のプログラムを続ける
     awk -v structural_file="${structural_file}" -v comment_re="${CI_WORKFLOW_COMMENT_START}" \
         -v prop_re="${CI_WORKFLOW_NODE_PROPERTY_BLOCK}" \
@@ -1103,7 +1094,18 @@ ci_workflow_extract() {
                     if (preline ~ /^[[:space:]]*-?[[:space:]]*shell:[[:space:]]*[^[:space:]]/) {
                         if (read_shell_value(preline) != "bash") { non_bash_shell = 1 }
                     } else {
+                        # **読めなかったことを別の旗で覚える。** 読めない綴り
+                        # （`shell : sh` のようにコロンの手前に空白がある形、値が次の行に
+                        # ある形、フロー形式）は**ステップの `shell:` を読む側でも同じ規則で
+                        # 外れる**ので、そのステップの控えは空＝「既定の bash」に見える。
+                        # 区切りの走査だけを倒しても、照合側が「bash だから伏せる」と判断して
+                        # **`sh` で実際に走るスイートを消す**（真値 GATES を not-wired。
+                        # `main` は wired なので退行。レビュー 8 巡目が実測）。
+                        # どのステップの宣言かはここでは分からないので、1 つでも読めない
+                        # 宣言があればファイル全体で照合側の伏せ字も止める（fail-open ＝
+                        # `main` と同じ側。読めた宣言しか無いときの精度は落とさない）
                         non_bash_shell = 1
+                        unreadable_shell = 1
                     }
                 }
             }
@@ -1337,12 +1339,9 @@ ci_workflow_extract() {
         # 剥がさない）。実測で `(( (1+2) * bash <スイート> ))` も
         # `(( () bash <スイート> ))` も照合の答えは変わらなかった。
         #
-        # **釣り合う閉じが見つからない断片は触らない。** ここへ来る理由は 2 つあって
-        # 区別できない: (a) 綴り自体が閉じていない（bash の構文エラーでどのコマンドも
-        # 走らない）、(b) **入れ子の部分シェルを `split_commands()` が区切りで切った断片**
-        # （`((bash <スイート>) && echo ok)` の前半）。行末まで潰す案は (b) の
-        # **実際に走るスイートを消して未配線と答えた**（実測）。(a) を取りこぼす代償は
-        # `main` と同じ fail-open 1 形だけで、その綴りのワークフローは毎回必ず赤。
+        # **釣り合う閉じが見つからない断片は触らない**（理由と代償は本体の該当分岐の
+        # コメントが唯一の源。ここへ写すと、理由が増えたときに片方だけが古くなる
+        # ——実際この docstring は「理由は 2 つ」のまま本体が 3 つへ増えていた）。
         #
         # 探すのは引用符を潰した写しの上（桁は同じ）で、潰すのは元の文字列
         function mask_arith_spans(t, purpose,   probe, out, n, i, j, c, prev, depth, start, early, body, spans) {
@@ -1413,7 +1412,12 @@ ci_workflow_extract() {
                 # **ここも 1 桁だけ進める**——2 桁進めると `start + 1` を飛ばすので、
                 # `(((bash <スイート>))` のように**外側が閉じない断片の中にある算術**を
                 # 一度も見ずに素通りする（実測で走らないスイートを配線と答えた）
-                if (depth != 0 || j > n) { i++; continue }
+                # **`depth != 0` だけで足りる。** 歩きは `depth == 0` でしか break せず、
+                # 先頭の `(` で必ず 1 になるので、行末まで走り切った（`j == n + 1`）
+                # ときは必ず `depth >= 1`。`|| j > n` を併記していたが、どのピンも
+                # 落とさない門番＝読み手に「0 のまま末尾へ抜けうる」と誤解させるだけ
+                # だった（§6。実測で外しても 1 件も落ちない）
+                if (depth != 0) { i++; continue }
                 # **内側が早く閉じていれば算術ではなく入れ子の部分シェル**。
                 # 中のコマンドは実際に走るので触らず、内側の算術を探して先へ進む。
                 # 進めるのは **1 桁**（下の「閉じなし」の分岐とそろえる。あちらは
@@ -6210,7 +6214,7 @@ ci_workflow_extract() {
                     # いない）。掛けると「本文は未正規化で届くことがある」と読めてしまい、
                     # 次の読み手が存在しない正規化を探すことになる（§6）
                     print jobname "#" parts[1] "\t" gate "\t" parts[5] "\t" \
-                        ((rec_shell[i] == "" || rec_shell[i] == "bash") \
+                        ((unreadable_shell == 0 && (rec_shell[i] == "" || rec_shell[i] == "bash")) \
                             ? mask_arith_spans(parts[6], "match") : parts[6])
                 }
             }
