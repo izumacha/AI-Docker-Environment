@@ -2926,7 +2926,7 @@ ci_workflow_extract() {
             scope_op[scope_serial] = ""
             scope_close_at[scope_serial] = 0
         }
-        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, fndef, fndef_at, struct_text, set_probe, set_open_n, set_crossed_sub, set_sub, sub_res_at, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_lead_n, set_lead_ok, set_arm_here, set_rest, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fnexit, fnret, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, closed_subshell, closed_uncertain, chain_in, inverted, arm_masked, arm_at, arm_expected, case_scope, opens_case, opens_case_here, case_opens_at, close_probe, close_rest, close_first, open_head, esac_probe, esac_rest, esac_first, dead_probe, dead_lead, dead_scope, dead_scope_here, close_n, exit_seen, end_top, end_ret, end_exit, end_ret_n, end_exit_n, end_kill, end_nkill, end_kill_ret, end_kill_exit, end_ks, ek, chain_at, chain_depth, loop_at, call_inverted, esc_inverted, call_condition, esc_condition, esc_ret_exempt, ret_shell_here, exit_shell_here, ret_new_at, ret_new_scope, sc, exit_is_ret, esc_is_return, esc_is_loop_escape, esc_ends_shell, esc_loop_at, esc_ends_loop, esc_return_local, closed_sub_seen, closed_sub_e, closed_sub_p, sub_id, open_stripped, head_inverted, inverted_at, closed_inverted, sub_serial, depth_in, cmd_rest, cmd_sub, cmd_fndef, cmd_fnname, cmd_fnat, fn_name_here, esc_probe, esc_is_exit, esc_sub, esc_paren, esc_sub_depth, esc_close, esc_tail, sub_lead_in, fn_lead, call_sub, call_weak_at, call_weak_sub, exit_here, exit_sub,
+        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, fndef, fndef_at, struct_text, set_probe, set_open_n, set_crossed_sub, set_sub, sub_res_at, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_lead_n, set_lead_ok, set_arm_here, set_rest, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fnexit, fnret, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, closed_subshell, closed_uncertain, chain_in, inverted, arm_masked, arm_at, arm_expected, case_scope, opens_case, opens_case_here, case_opens_at, close_probe, close_rest, close_first, open_head, esac_probe, esac_rest, esac_first, dead_probe, dead_lead, dead_scope, dead_scope_here, close_n, exit_seen, end_top, end_ret, end_exit, end_ret_n, end_exit_n, end_kill, end_nkill, end_kill_ret, end_kill_exit, end_ks, ek, chain_at, chain_depth, loop_at, call_inverted, esc_inverted, call_condition, esc_condition, esc_ret_exempt, ret_shell_here, exit_shell_here, ret_new_at, ret_new_scope, sc, exit_is_ret, esc_is_return, esc_is_loop_escape, esc_ends_shell, esc_loop_at, esc_ends_loop, esc_return_local, closed_sub_seen, closed_sub_e, closed_sub_p, sub_id, open_stripped, head_inverted, inverted_at, closed_inverted, sub_serial, depth_in, cmd_rest, cmd_sub, cmd_fndef, cmd_fnname, cmd_fnat, fn_name_here, esc_probe, esc_is_exit, esc_sub, esc_paren, esc_sub_depth, esc_close, esc_tail, esc_chain_end, esc_chain_or, sub_lead_in, fn_lead, call_sub, call_weak_at, call_weak_sub, exit_here, exit_sub,
                               cmd_opens, run_depth, rec_at, nclosed_scope, closed_scope, ci) {
             # **シェルのオプションはステップごとにリセットする。** ステップは 1 つずつ
             # 別のシェルで走るので、前のステップの `set +e` / `pipefail` は引き継がれない。
@@ -4931,23 +4931,68 @@ ci_workflow_extract() {
                         # 右辺が**空文字列**になり、「成功しうる」側＝免除へ倒れる＝実測で真値 GATES。
                         # 行をまたいで右辺を読む仕掛けは作らない——`joined[]` が繋ぐのは `\` の
                         # 継続と閉じていない引用符だけで、AND-OR の折り返しは別の行のままだから）
-                        # **`&&` の免除は「閉じたあとに囲っている部分シェルが残らない」とき
-                        # だけ**（レビュー 10 巡目）。8 巡目は `esc_close > 0`（＝この断片が
-                        # 閉じ括弧を落としたか）で免除していたが、それは**閉じた先がどこか**を
-                        # 問わない。`( ( return 0 ) && true )` では `&&` が内側の部分シェルに
-                        # 付き、短絡して残った非ゼロが**外側の部分シェルの終了状態**になるので
-                        # 親まで落ちる（実測で真値 NOGATE が wired。`main` も同じ fail-open で、
-                        # しかも 8 巡目が自分で書いた規則（部分シェルの中なら親へ伝わる）に
-                        # 反していた）。`esc_sub_depth` は脱出語が走る部分シェルの深さなので、
-                        # **落とした閉じの数を引いた残り**がそのまま「`&&` が付く階層」。
-                        # 0 以下なら最上位＝並びの非最後の要素として免除され、1 以上なら
-                        # 囲っている部分シェルの状態になって伝わる。
-                        # 実測で前の綴りと答えが変わるのは上の 3 形だけで、`( return 0 ) && true`
-                        # （1 − 1 = 0）と `( echo a; return 0 ) && true`（`sub_lead_in` 1 − 1 = 0）
-                        # は従来どおり免除される（どちらもピン済み）
+                        # **`&&` の免除を外すのは「この断片が自分で開いた部分シェルを
+                        # 閉じずに残している」ときだけ**（レビュー 11 巡目）。
+                        # `&&` の左辺は AND-OR の最後の要素ではないので `errexit` は常に免除される
+                        # ——シェルが死ぬのは、その並びが**囲っている部分シェルの最後のコマンド**
+                        # になって部分シェルごと非ゼロで終わるときで、`&&` 自体のせいではない。
+                        # その「最後のコマンドか」を近似する:
+                        # **この断片が `(` を開いたまま残しているなら、並びの続きはその部分シェルの
+                        # 中で終わる**（`( ( return 0 ) && true )` は `true )` が外側を閉じる）。
+                        # 逆に開きが手前の行・手前の断片にあるなら、その部分シェルはこの行では
+                        # 閉じず**並びの後ろにまだコマンドが来られる**ので免除して正しい。
+                        # 10 巡目は深さ（`esc_sub_depth <= esc_close`）で測っていたが、**絶対深さと
+                        # 個数の比較**なので包みの中では必ず偽になり、`{` 改行
+                        # `( return 0 ) && true` 改行 スイート 改行 `}` のような**ごく普通の綴り**で
+                        # 真値 GATES を not-wired と答えていた（実測で 14 形。`main` は wired ＝
+                        # **10 巡目が入れた fail-closed の退行**で、しかも 10 巡目のコメントが
+                        # 「答えが変わるのは 3 形だけ」と書いていたのは corpus の死角による誤り）。
+                        # 実測で正しく分かれる 9 形: 免除する側が `( return 0 ) && true`（1 − 1）・
+                        # `( echo a; return 0 ) && true`（0 − 1）・`( ( return 0 ) ) && true`（2 − 2）・
+                        # `return 0 && true`（0 − 0）・上の 4 種の包みの中の形、免除しない側が
+                        # `( ( return 0 ) && true )`（2 − 1）・`( return 0 && true )`（1 − 0）。
+                        # **並びの後ろにまだコマンドが続くなら免除する**（同じ巡の追加）。
+                        # 開いたまま残した部分シェルの中でも、AND-OR の並びが**その部分シェルの
+                        # 最後のコマンドでなければ**部分シェルの終了状態はその後のコマンドで
+                        # 決まるので、並びの失敗は親へ伝わらない（実測で
+                        # `( ( return 0 ) && true; echo z )` は真値 GATES）。
+                        # 並びの終わりは `ops[]` を `&&` / `||` のあいだだけ進めれば分かり、
+                        # そこで**行が終わっていなければ**（`;` / `|` / `&` が付いていれば）
+                        # 同じ複合の中に次のコマンドがある。行が終わっているときだけ
+                        # 「その部分シェルの最後のコマンド」と見なす（閉じ括弧が同じ断片に
+                        # 載る 1 行形がこれに当たる）。
+                        # **残る境界（この位置では決められない）**: 囲いの `(` が**手前の行**に
+                        # ある複数行の綴りでは同じ断片の値が同一になるので、
+                        # `(` 改行 `( return 0 ) && true` 改行 `)` 改行 スイート（真値 NOGATE。
+                        # 並びが部分シェルの最後のコマンド）と
+                        # `(` 改行 `( return 0 ) && true` 改行 スイート 改行 `)`（真値 GATES。
+                        # 後ろにコマンドがある）を**区別できない**（実測）。免除する側へ倒して
+                        # あるので前者が fail-open になる（`main` も同じ答えなので退行ではない）。
+                        # 「並びが囲っている複合の最後のコマンドか」は**後続の行**を見ないと
+                        # 決まらず、それを知っているのは `flush_job()` 側の「最後のコマンド」の
+                        # 機構（`last_scope_cmd` / `scope_op`）なので、ここで近似を 4 つ目に
+                        # 増やさず issue で追う
+                        # **並びのどこかに `||` があれば、脱出語の非ゼロは並びの状態にならない**
+                        # （同じ巡の追加）。`A && B || C` で A が失敗すると B は飛ぶが C が走るので、
+                        # 並びの終了状態は C の状態になる（実測で
+                        # `( return 0 && true || echo z )` は真値 GATES）。`&&` だけで続く並びの
+                        # ときに限って「脱出語の非ゼロがそのまま並びの状態になる」ので、
+                        # 歩きながら `||` の有無も控える。**`||` の右辺が成功しえない綴り**
+                        # （`… || false`）までは見ていない——それは issue #229（AND-OR の最後の
+                        # 要素が成功しえないとき並び全体が失敗する）の守備範囲で、ここで
+                        # 近似を足すと同じ判断が 2 か所に分かれる
+                        esc_chain_end = j
+                        esc_chain_or = 0
+                        while (esc_chain_end < nseg \
+                               && (ops[esc_chain_end] == "&&" || ops[esc_chain_end] == "||")) {
+                            if (ops[esc_chain_end] == "||") { esc_chain_or = 1 }
+                            esc_chain_end++
+                        }
                         esc_ret_exempt = (esc_condition \
                                           || (ops[j] == "&&" \
-                                              && esc_sub_depth <= esc_close) \
+                                              && (esc_sub - esc_close <= 0 \
+                                                  || ops[esc_chain_end] != "" \
+                                                  || esc_chain_or)) \
                                           || (ops[j] == "||" && !chain_never_succeeds(seg[j + 1])))
                         esc_ends_shell = (esc_is_exit \
                                           || (esc_is_return && !esc_return_local \

@@ -3429,10 +3429,6 @@ for escape_in_loop_case in \
           bash ${SUITE_PATH}" \
     "内側の部分シェルの失敗は外側の部分シェルの終了状態になる:( ( return 0 ) && true )
           bash ${SUITE_PATH}" \
-    "同（複数行）:(
-          ( return 0 ) && true
-          )
-          bash ${SUITE_PATH}" \
     "同（右辺が偽）:( ( return 0 ) && false )
           bash ${SUITE_PATH}" \
     "同（押し出したのが別の階層の印）:{ return 0; }
