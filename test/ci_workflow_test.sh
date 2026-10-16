@@ -4951,6 +4951,31 @@ jobs:
           ${arith_expansion_case#*:}"
 done
 
+# **区切りを探す写しは「手前にある無関係な括弧」を食ってはいけない**
+# （issue #206 のレビュー 2 巡目）。算術の中の演算子を区切りとして切らないために
+# 写しを重ねるが、`strip_arithmetic()` の入れ子向けの近似は「`((` が残る限り
+# 最も左の内側の括弧対を潰す」ので、**算術より手前にある部分シェル**を潰してしまう。
+# すると部分シェルの中の `||` / `&` が区切りから消え、握り潰しが読めなくなる。
+# **下の 2 形は向きが逆**——1 つ目は真値 NOGATE（`|| true` で握り潰されている）、
+# 2 つ目は真値 GATES（`set +e` のあとスイートが部分シェルの最後のコマンド）。実測
+assert_not_wired "区切りの走査が手前の部分シェルを食わない（握り潰しが読める）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ( bash ${SUITE_PATH} || true ) ; (( ${DOLLAR}(nproc) > 2 ))"
+
+assert_wired "区切りの走査が手前の部分シェルを食わない（ゲートが読める）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ( set +e ; bash ${SUITE_PATH} ) ; (( (1+2) ))"
+
 # **算術展開を伏せてはいけない**（issue #206 のレビューが実測した 2 つ目の向き）。
 # 展開はコマンドの**一部**なので、照合へ出す本文から消すと**別のコマンドに化ける**。
 # 下は真値 NOGATE——実 bash は `test/subject_test.sh1` というファイルを探して 127 で終わる
@@ -8438,6 +8463,21 @@ jobs:
       - name: lint
         run: shellcheck ${DOLLAR}LIST" \
     ci_workflow_command_matches "" '(^|[;&|(][[:space:]]*)shellcheck([^[:alnum:]_])' '[$][{]?LIST[}]?([^[:alnum:]_]|$)'
+
+# **算術展開（`$(( … ))`）の中身は照合から消さない**（issue #206 のレビュー 2 巡目）。
+# 算術**コマンド**（`(( … ))`）はコマンドを 1 つも走らせないので伏せてよいが、
+# **展開の中身は実際に走るコマンドの一部**。記録の本文から消すと、リンタの網が
+# `--jobs ${DOLLAR}(( ${DOLLAR}(nproc) + 1 ))` の `nproc` を見失い、**実在する綴りを「無い」と答える**
+# （fail-closed。`ci_coverage_test.sh` / `action_pin_test.sh` が使う入口なので、
+# 「リンタが配線されていない」という誤った報告になる）
+assert_matcher match "コマンド単位: 算術展開の中のコマンドも見える" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: lint
+        run: bash ${SUITE_PATH} --jobs ${DOLLAR}(( ${DOLLAR}(nproc) + 1 ))" \
+    ci_workflow_command_matches "" 'nproc'
 
 # **連鎖の右辺でもリンタの網は見る**（issue #150）。実行の照会は「走ると証明できない」として
 # 外すが、`test -n "${DOLLAR}LIST" && shellcheck ${DOLLAR}LIST` は正当な綴りなので、
