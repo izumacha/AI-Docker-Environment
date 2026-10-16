@@ -5002,6 +5002,60 @@ jobs:
         run: |
           (( bash ${SUITE_PATH} | cat ))"
 
+# **伏せるかはステップごとに決まる**（レビュー 6 巡目）。`flush_job()` の 2 巡目は
+# 1 巡目とは別のループなので、1 巡目の局所変数（最後の記録のシェル）を読むと
+# 判定が**ジョブ単位**になり、多段のジョブで両方向に壊れる。**下の 2 形がそれを
+# 両方向で観測する**: 既定 bash の算術 ＋ 後ろに `shell: sh` のステップ（真値 NOGATE。
+# 読み違えると伏せず #206 の fail-open が戻る）と、`shell: sh` の算術 ＋ 後ろに
+# 既定のステップ（実 `sh -e` で真値 GATES。読み違えると伏せて**実際に走るスイートを
+# 消す**＝`main` が wired なのでこちらは退行）
+assert_not_wired "後続ステップの shell が前のステップの判定を変えない（既定 bash → sh）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          (( bash ${SUITE_PATH} ))
+      - name: later
+        shell: sh
+        run: |
+          echo hi"
+
+assert_wired "後続ステップの shell が前のステップの判定を変えない（sh → 既定 bash）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        shell: sh
+        run: |
+          (( bash ${SUITE_PATH} ))
+      - name: later
+        run: |
+          echo hi"
+
+# **`shell:` の在否は構造行で見る**（レビュー 6 巡目）。生の行へ鍵の文法を書き直すと
+# awk 側の `unquote_key` / `read_shell_value` の**写し**になって必ず食い違う——
+# 実測で `- shell: sh`（シェルをステップの最初の鍵に書く普通の形）と `"shell": sh` を
+# 取りこぼし、区切りの走査が `sh` のステップで算術を潰して `|| true` を消し、
+# **握り潰されたスイートを配線と答えた**（真値 NOGATE・`main` not-wired → wired）
+for arith_shell_key_case in \
+    "シェルがステップの最初の鍵:      - shell: sh
+        name: subject" \
+    "鍵が引用されている:      - name: subject
+        \"shell\": sh"
+do
+    assert_not_wired "shell: の在否を構造行で見る（${arith_shell_key_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+${arith_shell_key_case#*:}
+        run: |
+          (( bash ${SUITE_PATH} || true ))"
+done
+
 # **締めすぎない側。** 算術**展開**（`$(( … ))`）はコマンドの引数・代入の値として普通に現れ、
 # その行のコマンドは走る。**下はすべて真値 GATES**（実測）
 for arith_expansion_case in \
