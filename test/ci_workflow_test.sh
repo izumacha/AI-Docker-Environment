@@ -4907,7 +4907,13 @@ done
 # 当たって「配線されている」と答え、`ci_coverage_test.sh` が**必ず赤くなるワークフロー**に
 # ついて誤った答えを返す。**下はすべて真値 NOGATE**（番兵なしの実 `bash -e` で実測）。
 # **`||` を含む 2 形が要点**で、算術の中の `||` は演算子なので並びの区切りとして切らない
-# ——切ると断片が `(( bash <スイート>` に割れ、`))` を持たないので伏せ字に当たらない
+# ——切ると断片が `(( bash <スイート>` に割れ、`))` を持たないので伏せ字に当たらない。
+# **ただし切らないのは「ワークフローが `shell:` を 1 つも書いていないとき」に限る**
+# （レビュー 5 巡目）。`(( … ))` が算術コマンドなのは bash 固有で、`sh` では入れ子の
+# 部分シェルになり中のコマンドが実際に走るのに、区切りを切る時点ではステップの
+# シェルが確定していない（`flush_step()` が同じ理由で `errexit` を -1 で持ち越す）。
+# `shell:` が 1 つでもあれば潰さず `main` と同じ側（fail-open）へ倒す——下に
+# `shell: sh` / `shell: bash` / ジョブの既定の対照がある
 for arith_body_case in \
     "算術の中のスイート:(( bash ${SUITE_PATH} ))" \
     "手前にコマンドがある:echo a
@@ -4929,6 +4935,72 @@ jobs:
         run: |
           ${arith_body_case#*:}"
 done
+
+# **`shell: sh` では伏せない**（レビュー 5 巡目）。`(( … ))` が算術コマンドなのは bash 固有で、
+# GitHub が `sh -e {0}` で走らせる `sh`（dash）では**入れ子の部分シェル**になり、
+# 中のコマンドが実際に走る。実測で `(( bash <スイート> ))` は `sh` では真値 GATES
+# （スイートが走り、その失敗もステップへ伝わる）。伏せると**実際に走るスイートを消して
+# 未配線と答える** fail-closed になるので、シェルが bash（または未指定）のときだけ伏せる
+assert_wired "shell: sh では算術コマンドを伏せない（部分シェルとして走る）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        shell: sh
+        run: |
+          (( bash ${SUITE_PATH} ))"
+
+assert_not_wired "shell: bash では算術コマンドを伏せる（算術として読まれる）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        shell: bash
+        run: |
+          (( bash ${SUITE_PATH} ))"
+
+# **ジョブの既定シェルでも同じ**（`shells[]` が空でも `job_shell` が効く）
+assert_wired "ジョブの既定が sh なら算術コマンドを伏せない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: sh
+    steps:
+      - name: subject
+        run: |
+          (( bash ${SUITE_PATH} ))"
+
+# **区切りを切る側も `shell:` を見る**（レビュー 5 巡目 / 6 巡目）。`flush_job()` は
+# ステップのシェルを確定済みだが、**区切りを切る時点では未確定**（ジョブ既定の `shell:` は
+# `steps:` の後ろにも書ける。`flush_step()` が同じ理由で `errexit` / `pipefail` を -1 で
+# 持ち越す）。そこで区切りの走査は**ファイル全体に `shell:` の宣言が 1 つも無いか**で切り、
+# 1 つでもあれば算術を潰さない。**下の 2 形がその門番を両方向で観測する**（どちらも
+# `shell: sh` ＝実 `sh -e` の真値で測った）——潰すと `;` が区切りから消えて
+# **実際に走るスイートが見えなくなり**（fail-closed）、パイプも消えて
+# **握り潰されたスイートを配線と答える**（fail-open）
+assert_wired "shell: sh では区切りも切る（算術の中の ; が並びの区切り）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        shell: sh
+        run: |
+          (( echo a ; bash ${SUITE_PATH} ))"
+
+assert_not_wired "shell: sh では区切りも切る（算術の中のパイプが状態を捨てる）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        shell: sh
+        run: |
+          (( bash ${SUITE_PATH} | cat ))"
 
 # **締めすぎない側。** 算術**展開**（`$(( … ))`）はコマンドの引数・代入の値として普通に現れ、
 # その行のコマンドは走る。**下はすべて真値 GATES**（実測）

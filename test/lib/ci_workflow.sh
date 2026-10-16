@@ -993,8 +993,22 @@ ci_workflow_run_with_structure() {
         rm -f "${structural_file}" "${program_file}" || true
         return 1
     fi
+    # **`shell:` を 1 つも書いていないワークフローか**を先に見て awk へ渡す。
+    # `(( … ))` が算術コマンドなのは **bash 固有**で、`sh`（GitHub は `sh -e {0}`＝dash）
+    # では入れ子の部分シェルになり中のコマンドが実際に走る。ところが
+    # `split_commands()` が区切りを切る時点ではステップのシェルが確定していない
+    # （ジョブの既定シェルは `steps:` の**後ろ**にも書けるので、`flush_step()` は
+    # 同じ理由で `errexit` を -1 のまま持ち越す）。そこで**ファイル全体で `shell:` が
+    # 1 つも無いとき**＝全ステップが GitHub の既定（bash）のときに限って、
+    # 区切りの走査で算術コマンドの中も潰す。1 つでもあれば潰さない（`main` と同じ
+    # 側へ倒れる＝fail-open で、`sh` のステップのコマンドを消さない）。
+    # **これは近似だが向きが決まっている**——`shell: bash` と書いたワークフローでも
+    # 潰さなくなるぶん #206 の `||` を含む形は直らないままになる（残る境界）
+    local any_shell=0
+    grep -Eq '^[[:space:]]*shell:[[:space:]]' "${workflow}" && any_shell=1
     # 構造行の表を BEGIN で読み込んでから、呼び出し側のプログラムを続ける
     awk -v structural_file="${structural_file}" -v comment_re="${CI_WORKFLOW_COMMENT_START}" \
+        -v any_shell="${any_shell}" \
         -v prop_re="${CI_WORKFLOW_NODE_PROPERTY_BLOCK}" \
         -v prop_plain_re="${CI_WORKFLOW_NODE_PROPERTY}" \
         -v group_open_re="${CI_WORKFLOW_GROUP_OPENER}" \
@@ -1320,7 +1334,7 @@ ci_workflow_extract() {
         # `main` と同じ fail-open 1 形だけで、その綴りのワークフローは毎回必ず赤。
         #
         # 探すのは引用符を潰した写しの上（桁は同じ）で、潰すのは元の文字列
-        function mask_arith_spans(t, with_expansion,   probe, out, n, i, j, c, prev, depth, start, early, body, spans) {
+        function mask_arith_spans(t, purpose,   probe, out, n, i, j, c, prev, depth, start, early, body, spans) {
             # **`((` が 1 つも無ければそのまま返す。** これが無いと `run:` の全行が
             # `mask_quoted()` の 1 周と桁ごとの `substr` を余分に払う（実測: 算術が
             # 1 つも無い 4000 行の `run:` で 797ms → 983ms → 872ms）。
@@ -1383,10 +1397,19 @@ ci_workflow_extract() {
                 # 「閉じなし」の分岐へ入るため（ピンは 1 件も落ちない＝実測）。
                 # そろえているのは読み手が 2 つの分岐を別の規則だと誤解しないため
                 if (early) { i++; continue }
-                # 算術**展開**は、呼び出し口が「中も潰す」と言ったときだけ潰す。
-                # 潰さないときは**対応する閉じの先まで飛ばす**（2 桁だけ進めると
-                # 展開の中に入れ子で書いた `((` を別の算術として潰してしまう。実測）
-                if (prev == "$" && with_expansion != 1) { i = j + 1; continue }
+                # `"sep"` と `"sep-bash"` はどちらも区切りの走査。違いは算術
+                # コマンドを潰すかだけで、`"sep-bash"` は**ワークフローが `shell:` を
+                # 1 つも書いていないとき**＝全ステップが GitHub の既定（bash）のときに使う
+                # **算術展開（`$((`）は区切りの走査のときだけ潰す。**
+                # 照合へ出す本文では中身が走るコマンドの一部なので触らず、
+                # **対応する閉じの先まで飛ばす**（2 桁だけ進めると展開の中に
+                # 入れ子で書いた `((` を別の算術として潰してしまう。実測）
+                if (prev == "$" && purpose !~ /^sep/) { i = j + 1; continue }
+                # **算術コマンド（`((`）は照合へ出す本文のときだけ潰す。**
+                # 区切りの走査では潰さない——あれは bash 固有で、`sh` では入れ子の
+                # 部分シェルになり中のコマンドが実際に走る（docstring の `"sep"` の項）。
+                # 1 桁だけ進めて、中に書いた算術**展開**は引き続き探す
+                if (prev != "$" && purpose == "sep") { i++; continue }
                 # 本文（`((` と `))` のあいだ）を**引用符を潰す前の綴り**で取り出す。
                 # **潰した写しから取ってはいけない**——`(( \"$(nproc)\" > 0 ))` のように
                 # **引用符で囲ったコマンド置換**は `mask_quoted()` が塗り潰すので
@@ -1397,7 +1420,7 @@ ci_workflow_extract() {
                 # （実測: `(( $(bash <スイート>) > 2 ))` はスイートを実行する）。
                 # 潰すと実在する綴りを「無い」と答える fail-closed になるので、
                 # 判断の根拠が無いこの形は `main` と同じ「触らない」側へ倒す
-                if (with_expansion != 1 && (index(body, "$(") > 0 || index(body, "`") > 0)) {
+                if (purpose == "match" && (index(body, "$(") > 0 || index(body, "`") > 0)) {
                     i = j + 1
                     continue
                 }
@@ -1532,7 +1555,7 @@ ci_workflow_extract() {
             # `mask_arith_spans()` は桁を保って空白へ潰すので、`mask_quoted()` の
             # 後ろに重ねても `substr(line, …)` の切り出しは狂わない。
             # **`strip_arithmetic()` は使えない**（理由はあちらの docstring の (b)）
-            masked = mask_arith_spans(mask_quoted(line), 1)
+            masked = mask_arith_spans(mask_quoted(line), (any_shell == "0") ? "sep-bash" : "sep")
             n = 0; start = 1
             for (i = 1; i <= length(masked); i++) {
                 c = substr(masked, i, 1)
@@ -6125,7 +6148,18 @@ ci_workflow_extract() {
                     #     「必ず赤い綴りについて答えが違う」以上の害は無い。
                     # **どちらも近似を足して埋めないこと**——このファイルが繰り返し
                     # 記録しているとおり、綴りを 1 つずつ追う検出網は必ず次の穴を作る
-                    print jobname "#" parts[1] "\t" gate "\t" parts[5] "\t" trim(mask_arith_spans(parts[6], 0))
+                    # **伏せるのはシェルが bash（または未指定＝GitHub の既定）のときだけ。**
+                    # `(( … ))` が算術コマンドなのは bash 固有で、`shell: sh`（GitHub は
+                    # `sh -e {0}`＝dash）では**入れ子の部分シェル**になり中のコマンドが
+                    # 実際に走る（実測: dash に `(( echo HI ))` を渡すと HI を出す。
+                    # このライブラリは `sh` を errexit 持ちとして扱い、
+                    # `test/ci_workflow_test.sh` の「shell: sh は -e を含む」が固定している）。
+                    # 伏せると `sh` のステップで**実際に走るスイートを消して未配線と答える**
+                    # （fail-closed。レビュー 5 巡目が 82 形中 11 形で実測）。
+                    # `shell_name` はこのループが上で確定している（`rec_e` / `rec_p` と同じ値）
+                    print jobname "#" parts[1] "\t" gate "\t" parts[5] "\t" \
+                        ((shell_name == "" || shell_name == "bash") \
+                            ? trim(mask_arith_spans(parts[6], "match")) : trim(parts[6]))
                 }
             }
             # 次のジョブに備えて控えと状態を捨てる
