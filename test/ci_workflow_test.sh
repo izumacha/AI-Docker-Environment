@@ -3492,6 +3492,111 @@ jobs:
           ${escape_in_loop_case#*:}"
 done
 
+# **`errexit` の下では「必ず失敗するコマンド」もシェルを終わらせる**（issue #229）。
+# 脱出語に固有の話ではなく、**裸の `false` 1 つで騙せる**のが根だった
+# （`main` ＝ `f53e155` は `{` ＋ `false` ＋ スイート ＋ `}` を wired と答えていた）。
+# 判定は既存の `chain_never_succeeds()` が唯一の源で、`false` ・ `(( 0 ))` ・
+# `exit N` ・ `return N` と `!` の反転を扱う。**包みの中の綴りで固定する**
+# ——レビュー 12 巡目で、最上位だけのピンでは包みが 1 枚増えた退行を見逃すと実測した
+
+for always_failing_case in \
+    "最上位の裸の false:false
+          bash ${SUITE_PATH}" \
+    "並びの最後が false:true && false
+          bash ${SUITE_PATH}" \
+    "|| の右辺も false:false || false
+          bash ${SUITE_PATH}" \
+    "セミコロンのあとにコマンドがある:false
+          true
+          bash ${SUITE_PATH}" \
+    "囲いの中の false:{
+          false
+          bash ${SUITE_PATH}
+          }" \
+    "囲いを閉じたあとのスイート:{
+          false
+          }
+          bash ${SUITE_PATH}" \
+    "部分シェルの中の false:(
+          false
+          bash ${SUITE_PATH}
+          )" \
+    "必ず走る条件の中の false:if true; then
+          false
+          bash ${SUITE_PATH}
+          fi" \
+    "ループの中の false:while true; do
+          false
+          bash ${SUITE_PATH}
+          break
+          done" \
+    "二重の囲いの中の false:{
+          {
+          false
+          bash ${SUITE_PATH}
+          }
+          }"
+do
+    assert_not_wired "必ず失敗するコマンドの後ろは実行の証拠にしない（${always_failing_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${always_failing_case#*:}"
+done
+
+# **締めすぎない側。** `errexit` が発火しない位置の失敗と、必ず失敗するとは言えない綴りは
+# 今までどおり実行の証拠にする。**AND-OR の最後の要素でなければ `errexit` は免除**され、
+# `!` も免除する（状態の反転とは別の軸）。実測で下の 12 形はすべて真値 GATES
+
+for always_failing_control in \
+    "並びの最後ではない（&& の左辺）:false && true
+          bash ${SUITE_PATH}" \
+    "同（|| の左辺）:false || true
+          bash ${SUITE_PATH}" \
+    "errexit を切ってある:set +e
+          false
+          bash ${SUITE_PATH}" \
+    "同（部分シェルの中で切る）:(
+          set +e
+          false
+          bash ${SUITE_PATH}
+          )" \
+    "反転して必ず成功する:! false
+          bash ${SUITE_PATH}" \
+    "反転は errexit を免除する:! true
+          bash ${SUITE_PATH}" \
+    "同（反転した囲い）:! { : ; }
+          bash ${SUITE_PATH}" \
+    "パイプの最後ではない:false | true
+          bash ${SUITE_PATH}" \
+    "非同期なので状態は 0:false &
+          bash ${SUITE_PATH}" \
+    "条件の中なので発火しない:if false; then
+          echo a
+          fi
+          bash ${SUITE_PATH}" \
+    "囲いの閉じに付いた && が吸う:{ false; } && true
+          bash ${SUITE_PATH}" \
+    "同（|| 側）:{ false; } || true
+          bash ${SUITE_PATH}" \
+    "包みの中でも並びの最後ではない:{
+          false && true
+          bash ${SUITE_PATH}
+          }"
+do
+    assert_wired "必ず失敗するコマンドの控え（${always_failing_control%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${always_failing_control#*:}"
+done
+
 # **締めすぎない側＝走るかどうか分からない位置の脱出は数えない。**
 # 条件次第で走らない `exit` の後ろを死に体にすると、**実際にはゲートしているスイートを
 # 「未配線」と報告**する（CI では通過する早期ガードを持つワークフローが軒並み赤くなる）。
