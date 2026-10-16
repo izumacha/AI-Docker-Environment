@@ -3097,6 +3097,21 @@ for escape_reach_control in \
           bash ${SUITE_PATH}" \
     "1 行に畳んだ部分シェルの exit は親を終わらせない（対照）:( exit 0 )
           bash ${SUITE_PATH}" \
+    "部分シェルの中の exit は手前にコマンドがあっても親を終わらせない:( echo a; exit 0 )
+          bash ${SUITE_PATH}" \
+    "ループの中の部分シェルの break は手前にコマンドがあってもループを抜けない:while true; do
+          ( echo a; break )
+          bash ${SUITE_PATH}
+          break
+          done" \
+    "errexit が免除される位置の return（&& の左辺・右辺が偽でも）:return 0 && false
+          bash ${SUITE_PATH}" \
+    "部分シェルの中の return を || が吸う（1 行）:( return 0 || true )
+          bash ${SUITE_PATH}" \
+    "同（右辺が普通のコマンド）:( return 0 || echo z )
+          bash ${SUITE_PATH}" \
+    "同（右辺が部分シェルを 0 で終える exit）:( return 0 || exit 0 )
+          bash ${SUITE_PATH}" \
     "1 行に畳んだ部分シェルの break はループを抜けない（対照）:while true; do
           ( break )
           bash ${SUITE_PATH}
@@ -3109,7 +3124,28 @@ for escape_reach_control in \
     "同（バックグラウンド）:{
           return 0
           } &
-          bash ${SUITE_PATH}"
+          bash ${SUITE_PATH}" \
+    "フォークした複合の中の break は親のループへ届かない（パイプ）:while true; do
+          {
+          break
+          } | cat
+          bash ${SUITE_PATH}
+          break
+          done" \
+    "同（バックグラウンド）:while true; do
+          {
+          break
+          } &
+          bash ${SUITE_PATH}
+          break
+          done" \
+    "同（必ず走る条件を閉じてパイプ）:while true; do
+          if true; then
+          continue
+          fi | cat
+          bash ${SUITE_PATH}
+          break
+          done"
 do
     assert_wired "脱出語の射程の控え（${escape_reach_control%%:*}）" "name: ci
 jobs:
@@ -3275,7 +3311,35 @@ for escape_in_loop_case in \
     "同じ階層の素の exit の寄与は取り消しで消さない:{ return 0; exit 0; } || true
           bash ${SUITE_PATH}" \
     "同（並び順を入れ替えても）:{ exit 0; return 0; } || true
-          bash ${SUITE_PATH}"
+          bash ${SUITE_PATH}" \
+    "|| の右辺が成功しえない位置の return はシェルを終わらせる:return 0 || false
+          bash ${SUITE_PATH}" \
+    "同（ブレースの中）:{ return 0 || false; }
+          bash ${SUITE_PATH}" \
+    "部分シェルの中の && の左辺の return は部分シェルごと落ちる:( return 0 && true )
+          bash ${SUITE_PATH}" \
+    "同（右辺が偽）:( return 0 && false )
+          bash ${SUITE_PATH}" \
+    "同（|| の右辺が成功しえない）:( return 0 || false )
+          bash ${SUITE_PATH}" \
+    "部分シェルの中で並びの最後に来る return:( true && return 0 )
+          bash ${SUITE_PATH}" \
+    "部分シェルの最後のコマンドが return:( echo a; return 0 )
+          bash ${SUITE_PATH}" \
+    "ループ脱出の区間は囲いの閉じに付いた || では取り消さない:while true; do
+          {
+          break
+          } || true
+          bash ${SUITE_PATH}
+          break
+          done" \
+    "同（&& 側）:while true; do
+          {
+          break
+          } && true
+          bash ${SUITE_PATH}
+          break
+          done"
 do
     assert_not_wired "ループの中の脱出語（${escape_in_loop_case%%:*}）の後ろは実行の証拠にしない" "name: ci
 jobs:
