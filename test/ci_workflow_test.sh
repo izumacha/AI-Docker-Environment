@@ -3535,7 +3535,19 @@ for always_failing_case in \
           false
           bash ${SUITE_PATH}
           }
-          }"
+          }" \
+    "部分シェルを閉じたあとのスイート:( false )
+          bash ${SUITE_PATH}" \
+    "同（複数行）:(
+          false
+          )
+          bash ${SUITE_PATH}" \
+    "部分シェルの中の並びが最後のコマンド:( false && true )
+          bash ${SUITE_PATH}" \
+    "同（包みの中）:{
+          ( false && true )
+          }
+          bash ${SUITE_PATH}"
 do
     assert_not_wired "必ず失敗するコマンドの後ろは実行の証拠にしない（${always_failing_case%%:*}）" "name: ci
 jobs:
@@ -3586,7 +3598,11 @@ for always_failing_control in \
     "包みの中でも並びの最後ではない:{
           false && true
           bash ${SUITE_PATH}
-          }"
+          }" \
+    "部分シェルの中の並びに || がある:( false || true )
+          bash ${SUITE_PATH}" \
+    "部分シェルの中で並びの後ろにコマンドがある:( false && true; echo z )
+          bash ${SUITE_PATH}"
 do
     assert_wired "必ず失敗するコマンドの控え（${always_failing_control%%:*}）" "name: ci
 jobs:
