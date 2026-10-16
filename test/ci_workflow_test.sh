@@ -4902,6 +4902,50 @@ jobs:
           echo end"
 done
 
+# **算術コマンドの中身は「走るコマンド」ではない**（issue #206）。実 bash は `(( … ))` の
+# 中を算術式として読むのでコマンドは 1 つも走らない。伏せないと中のスイート名が照合に
+# 当たって「配線されている」と答え、`ci_coverage_test.sh` が**必ず赤くなるワークフロー**に
+# ついて誤った答えを返す。**下の 5 形はすべて真値 NOGATE**（番兵なしの実 `bash -e` で実測）。
+# **`||` を含む 2 形が要点**で、算術の中の `||` は演算子なので並びの区切りとして切らない
+# ——切ると断片が `(( bash <スイート>` に割れ、`))` を持たないので伏せ字に当たらない
+for arith_body_case in \
+    "算術の中のスイート:(( bash ${SUITE_PATH} ))" \
+    "手前にコマンドがある:echo a
+          (( bash ${SUITE_PATH} ))" \
+    "算術の中の || と exit:(( bash ${SUITE_PATH} || exit 1 ))" \
+    "算術の中の || と false:(( bash ${SUITE_PATH} || false ))" \
+    "後ろに && が付く:(( bash ${SUITE_PATH} )) && echo ok"
+do
+    assert_not_wired "算術コマンドの中身は実行の証拠にしない（${arith_body_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${arith_body_case#*:}"
+done
+
+# **締めすぎない側。** 算術**展開**（`$(( … ))`）はコマンドの引数・代入の値として普通に現れ、
+# その行のコマンドは走る。**下の 4 形はすべて真値 GATES**（実測）
+for arith_expansion_case in \
+    "スイートの引数:bash ${SUITE_PATH} \$(( 1 + 2 ))" \
+    "手前の行の展開:echo \$(( 1 ))
+          bash ${SUITE_PATH}" \
+    "代入の値:X=\$(( 2 * 3 ))
+          bash ${SUITE_PATH}" \
+    "後ろの行の展開:bash ${SUITE_PATH} && echo \$(( 1 ))"
+do
+    assert_wired "算術展開は後続の実行を消さない（${arith_expansion_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${arith_expansion_case#*:}"
+done
+
 # 同じ取り違えは**逆向き**にも効く（この差分が入れかけた退行）。`! (( true ))` を「偽」と読むと
 # 右辺の `set +e` が「走らない」ことになり、握り潰されたスイートが「ゲートしている」と読まれる
 assert_not_wired "算術コマンドの反転で set +e を取り落とさない" "name: ci

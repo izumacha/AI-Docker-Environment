@@ -1376,7 +1376,14 @@ ci_workflow_extract() {
         # `bash x 2>&1 | tee log`（落ちてもステップは 0 で終わる）を「ゲートしている」と読む
         function split_commands(line, seg, ops,   i, n, c, nxt, prv, start, masked) {
             # 引用符の中を空白へ潰した写しの上で区切りを探す（桁が同じなので元の文字列を切れる）
-            masked = mask_quoted(line)
+            # **算術コマンドの中も同じ写しの上で潰す**（issue #206）。`(( a || b ))` の
+            # `||` は**算術の演算子**で並びの区切りではないのに、潰さないと断片が
+            # `(( bash <スイート>` と `exit 1 ))` に割れ、前者は `))` を持たないので
+            # 下の照合側の伏せ字にも当たらず**スイートが照合に当たってしまう**
+            # （実 bash は算術式として読むので 1 行も走らない）。
+            # `strip_arithmetic()` は桁を保って空白へ潰すので、`mask_quoted()` の
+            # 後ろに重ねても `substr(line, …)` の切り出しは狂わない
+            masked = strip_arithmetic(mask_quoted(line))
             n = 0; start = 1
             for (i = 1; i <= length(masked); i++) {
                 c = substr(masked, i, 1)
@@ -5942,7 +5949,20 @@ ci_workflow_extract() {
                 for (i = 1; i <= nbuf; i++) {
                     split(buf[i], parts, "\t")
                     gate = record_gates(i)
-                    print jobname "#" parts[1] "\t" gate "\t" parts[5] "\t" parts[6]
+                    # **照合へ出す本文からは算術コマンドの中身だけを伏せる**（issue #206）。
+                    # 実 bash は `(( … ))` の中を算術式として読むのでそこに書いた
+                    # スイート名は 1 行も走らないのに、伏せないと照合に当たって
+                    # 「配線されている」と答える——`ci_coverage_test.sh` が
+                    # **必ず赤くなるワークフロー**について誤った答えを返す形。
+                    # **伏せるのはここだけ**にするのが要点で、記録の本文そのもの
+                    # （`parts[6]` ・ `rec_txt`）は未加工のまま残す——算術コマンドは
+                    # **それ自身は走るコマンド**なので、伏せた本文を内側の判定へ回すと
+                    # (a) `chain_never_succeeds()` が `(( 0 ))` の真偽を読めなくなり
+                    # `|| (( 0 ))` の握り潰しが配線扱いへ倒れ、(b) `carries_command()` が
+                    # 「コマンドを持たない記録」と読んで**階層の最後のコマンドから消える**
+                    # ので `bash <スイート> || { (( 0 )); }` が未配線へ倒れる
+                    # （どちらも実測。真値 GATES を not-wired と答える fail-closed）
+                    print jobname "#" parts[1] "\t" gate "\t" parts[5] "\t" trim(strip_arithmetic(parts[6]))
                 }
             }
             # 次のジョブに備えて控えと状態を捨てる
