@@ -4915,7 +4915,10 @@ for arith_body_case in \
     "算術の中の || と exit:(( bash ${SUITE_PATH} || exit 1 ))" \
     "算術の中の || と false:(( bash ${SUITE_PATH} || false ))" \
     "後ろに && が付く:(( bash ${SUITE_PATH} )) && echo ok" \
-    "入れ子の括弧がある:(( (1+2) * bash ${SUITE_PATH} ))"
+    "入れ子の括弧がある:(( (1+2) * bash ${SUITE_PATH} ))" \
+    "三重括弧の内側が算術:(((bash ${SUITE_PATH})) && echo ok)" \
+    "三重括弧の内側が算術・後続の行:(((bash ${SUITE_PATH})); echo done)" \
+    "三重括弧の内側が算術・両方が部分シェル:(((bash ${SUITE_PATH})) && (echo b))"
 do
     assert_not_wired "算術コマンドの中身は実行の証拠にしない（${arith_body_case%%:*}）" "name: ci
 jobs:
@@ -4962,7 +4965,8 @@ for arith_subshell_case in \
     "部分シェル 2 つと後置の連鎖:((bash ${SUITE_PATH}) && echo ok)" \
     "部分シェル 2 つと後続の行:((bash ${SUITE_PATH}); echo done)" \
     "内側がどちらも部分シェル:((bash ${SUITE_PATH}) && (echo b))" \
-    "群のあとに連鎖でスイート:((echo a) && true) && bash ${SUITE_PATH}"
+    "群のあとに連鎖でスイート:((echo a) && true) && bash ${SUITE_PATH}" \
+    "三重括弧の中で走る:(((echo a); bash ${SUITE_PATH}) && echo c)"
 do
     assert_wired "入れ子の部分シェルの中身は消さない（${arith_subshell_case%%:*}）" "name: ci
 jobs:
@@ -8513,6 +8517,18 @@ jobs:
     steps:
       - name: lint
         run: (( ${DOLLAR}(nproc) > 2 )) && bash ${SUITE_PATH}" \
+    ci_workflow_command_matches "" 'nproc'
+
+# **引用符で囲ったコマンド置換も走る。** 門番が本文を**引用符を潰した写し**から取ると
+# `mask_quoted()` が塗り潰した分だけ空振りし、実際に走る綴りを照合から消す
+# （fail-closed。実測で `(( "${DOLLAR}(nproc)" > 0 ))` が nomatch になった）
+assert_matcher match "コマンド単位: 引用符で囲ったコマンド置換も見える" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: lint
+        run: (( \"${DOLLAR}(nproc)\" > 0 )) && bash ${SUITE_PATH}" \
     ci_workflow_command_matches "" 'nproc'
 
 # **算術展開の中身は変数名も含めて照合に残す。** 本 repo の `ci.yml` 自身が
