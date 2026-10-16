@@ -3207,7 +3207,40 @@ for escape_reach_control in \
           fi | cat
           bash ${SUITE_PATH}
           break
-          done"
+          done" \
+    "包みの中でも閉じ括弧の後ろの && は部分シェルの失敗を吸う:{
+          ( return 0 ) && true
+          bash ${SUITE_PATH}
+          }" \
+    "同（部分シェルの包み）:(
+          ( return 0 ) && true
+          bash ${SUITE_PATH}
+          )" \
+    "同（必ず走る条件の包み）:if true; then
+          ( return 0 ) && true
+          bash ${SUITE_PATH}
+          fi" \
+    "同（ループの包み）:while true; do
+          ( return 0 ) && true
+          bash ${SUITE_PATH}
+          break
+          done" \
+    "同（二重の囲い）:{
+          {
+          ( return 0 ) && true
+          bash ${SUITE_PATH}
+          }
+          }" \
+    "包みの中の && の左辺の return は右辺が偽でも吸われる:(
+          return 0 && false
+          bash ${SUITE_PATH}
+          )" \
+    "開いたままの部分シェルでも並びの後ろにコマンドが続けば吸う:( ( return 0 ) && true; echo z )
+          bash ${SUITE_PATH}" \
+    "同（並びに || がある）:( ( return 0 ) && true || echo z )
+          bash ${SUITE_PATH}" \
+    "同（&& の左辺が素の return）:( return 0 && true; echo z )
+          bash ${SUITE_PATH}"
 do
     assert_wired "脱出語の射程の控え（${escape_reach_control%%:*}）" "name: ci
 jobs:
