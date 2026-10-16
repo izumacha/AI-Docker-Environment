@@ -5450,14 +5450,20 @@ ci_workflow_extract() {
                         if (ret_shell_here || exit_shell_here) {
                             ret_new_at = depth_in + cmd_opens
                             ret_new_scope = (ret_new_at > 0) ? scope_at[ret_new_at] : 0
+                            # **台帳が持つのは鍵（階層の識別子）だけで、値は読まない。**
+                            # 深さを値に入れておくと「どこかで深さを見ている」と読めてしまうが、
+                            # 階層の深さは階層ごとに固定なので**親の連なりをたどる照合で足りる**
+                            # （以前の 1 枠の形が持っていた `depth < 印の深さ` という前段の篩は、
+                            #  「閉じた階層が印の階層を内側に含むか」と同じことを言っている）。
+                            # 同じ階層に 2 つ目の印が立っても鍵は 1 つなので、件数は初回だけ数える
                             if (ret_new_scope == 0) { end_top = 1 }
                             else if (ret_shell_here) {
                                 if (!(ret_new_scope in end_ret)) { end_ret_n++ }
-                                end_ret[ret_new_scope] = ret_new_at
+                                end_ret[ret_new_scope] = 1
                             }
                             else {
                                 if (!(ret_new_scope in end_exit)) { end_exit_n++ }
-                                end_exit[ret_new_scope] = ret_new_at
+                                end_exit[ret_new_scope] = 1
                             }
                             # 台帳が動いたので `exit_seen` を導き直す
                             exit_seen = (end_top || end_ret_n > 0 || end_exit_n > 0) ? 1 : 0
