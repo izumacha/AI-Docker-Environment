@@ -3165,6 +3165,15 @@ for escape_reach_control in \
           { exit 0; } | cat
           )
           bash ${SUITE_PATH}" \
+    "空白を挟んだ入れ子の部分シェルの exit は親を終わらせない:( ( exit 0 ) )
+          bash ${SUITE_PATH}" \
+    "同（ループ脱出）:while true; do
+          ( ( break ) )
+          bash ${SUITE_PATH}
+          break
+          done" \
+    "閉じ括弧が 2 つ並んだ後ろの && は最上位に掛かる:( ( return 0 ) ) && true
+          bash ${SUITE_PATH}" \
     "1 行に畳んだ部分シェルの break はループを抜けない（対照）:while true; do
           ( break )
           bash ${SUITE_PATH}
@@ -3413,6 +3422,18 @@ for escape_in_loop_case in \
           exit 0
           }
           { :; } | cat
+          bash ${SUITE_PATH}" \
+    "空白を挟んだ入れ子の部分シェルの関数外 return は親も終わらせる:( ( return 0 ) )
+          bash ${SUITE_PATH}" \
+    "同（三重）:( ( ( return 0 ) ) )
+          bash ${SUITE_PATH}" \
+    "内側の部分シェルの失敗は外側の部分シェルの終了状態になる:( ( return 0 ) && true )
+          bash ${SUITE_PATH}" \
+    "同（複数行）:(
+          ( return 0 ) && true
+          )
+          bash ${SUITE_PATH}" \
+    "同（右辺が偽）:( ( return 0 ) && false )
           bash ${SUITE_PATH}" \
     "同（押し出したのが別の階層の印）:{ return 0; }
           { return 0; } || true

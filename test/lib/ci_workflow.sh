@@ -4697,14 +4697,33 @@ ci_workflow_extract() {
                         # 落とした後は `sub_lead_in > 0` の枝が「その部分シェルの残りだけ」を
                         # 死に体にするが、閉じ括弧が同じ断片にあるので**次の記録で即解除**され、
                         # 答えは前後どちらも wired（真値 GATES）のまま
+                        # **閉じ括弧のあいだに空白や `;` が入る綴りも落とす**（レビュー 10 巡目）。
+                        # 開き側の歩き（`set_open_depth()`）は `( ( ` のように**空白を挟んだ
+                        # 入れ子**を 1 つずつ数えるのに、こちらは `\)+` で**続いた 1 固まり**しか
+                        # 落としていなかった。`( ( return 0 ) )` では `esc_probe` が `return 0 )`
+                        # のまま残り、3 語になって脱出語の門番（引数は 1 つまで）に当たらず
+                        # **脱出として 1 度も記録されない**（実測で真値 NOGATE が wired ＝必須
+                        # スイートが黙ってゲートから外れる fail-open。`main` も同じ）。
+                        # 数え方は変えない——落とした尾の `)` の個数が `esc_close`
                         esc_close = 0
                         if (esc_paren > 0 || esc_sub > 0 || sub_lead_in > 0) {
                             esc_tail = esc_probe
-                            sub(/[[:space:]]*;?[[:space:]]*\)+[[:space:]]*$/, "", esc_probe)
+                            sub(/[[:space:]]*;?[[:space:]]*(\)[[:space:]]*;?[[:space:]]*)+$/, "", esc_probe)
                             esc_tail = substr(esc_tail, length(esc_probe) + 1)
                             esc_close = gsub(/\)/, ")", esc_tail)
                         }
-                        if (esc_paren > esc_sub) { esc_sub = esc_paren }
+                        # **2 つの数は足す（大きい方を採るのではない）。** `call_sub` は
+                        # 前置き剥がし（`strip_command_prefixes()`）が**実際に食べた**開き括弧の数、
+                        # `esc_paren` はそのあとこの歩きが食べた数で、**同じ括弧を二重に
+                        # 数えることはない**（実測: `( ( return 0 )` では剥がしが外側を食べて
+                        # `call_sub = 1`・`call_probe = "( return 0 )"` になり、歩きが内側を
+                        # 食べて `esc_paren = 1`）。大きい方を採っていた版は**入れ子を 1 つと
+                        # 数え**、`( ( return 0 ) && true )` が `( return 0 ) && true` と
+                        # 区別できなくなって免除され、真値 NOGATE が wired になっていた
+                        # （レビュー 10 巡目。`main` も同じ fail-open）。どちらか一方だけが
+                        # 非ゼロのときは和と最大が一致するので、答えが変わるのは
+                        # **両方が非ゼロ＝空白を挟んだ入れ子**の綴りだけ
+                        esc_sub = call_sub + esc_paren
                         # **「その脱出語が部分シェルの中で走るか」は深さで測る**（issue #204 の
                         # レビュー 7 巡目）。`esc_sub` は**この断片で越えた数**なので、
                         # 閉じ括弧だけを同じ断片に載せた綴り（`break )`）では 0 のままで、
@@ -4912,9 +4931,23 @@ ci_workflow_extract() {
                         # 右辺が**空文字列**になり、「成功しうる」側＝免除へ倒れる＝実測で真値 GATES。
                         # 行をまたいで右辺を読む仕掛けは作らない——`joined[]` が繋ぐのは `\` の
                         # 継続と閉じていない引用符だけで、AND-OR の折り返しは別の行のままだから）
+                        # **`&&` の免除は「閉じたあとに囲っている部分シェルが残らない」とき
+                        # だけ**（レビュー 10 巡目）。8 巡目は `esc_close > 0`（＝この断片が
+                        # 閉じ括弧を落としたか）で免除していたが、それは**閉じた先がどこか**を
+                        # 問わない。`( ( return 0 ) && true )` では `&&` が内側の部分シェルに
+                        # 付き、短絡して残った非ゼロが**外側の部分シェルの終了状態**になるので
+                        # 親まで落ちる（実測で真値 NOGATE が wired。`main` も同じ fail-open で、
+                        # しかも 8 巡目が自分で書いた規則（部分シェルの中なら親へ伝わる）に
+                        # 反していた）。`esc_sub_depth` は脱出語が走る部分シェルの深さなので、
+                        # **落とした閉じの数を引いた残り**がそのまま「`&&` が付く階層」。
+                        # 0 以下なら最上位＝並びの非最後の要素として免除され、1 以上なら
+                        # 囲っている部分シェルの状態になって伝わる。
+                        # 実測で前の綴りと答えが変わるのは上の 3 形だけで、`( return 0 ) && true`
+                        # （1 − 1 = 0）と `( echo a; return 0 ) && true`（`sub_lead_in` 1 − 1 = 0）
+                        # は従来どおり免除される（どちらもピン済み）
                         esc_ret_exempt = (esc_condition \
                                           || (ops[j] == "&&" \
-                                              && (esc_sub_depth == 0 || esc_close > 0)) \
+                                              && esc_sub_depth <= esc_close) \
                                           || (ops[j] == "||" && !chain_never_succeeds(seg[j + 1])))
                         esc_ends_shell = (esc_is_exit \
                                           || (esc_is_return && !esc_return_local \
