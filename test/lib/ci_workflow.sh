@@ -2953,7 +2953,7 @@ ci_workflow_extract() {
             scope_op[scope_serial] = ""
             scope_close_at[scope_serial] = 0
         }
-        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, fndef, fndef_at, struct_text, set_probe, set_open_n, set_crossed_sub, set_sub, sub_res_at, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_lead_n, set_lead_ok, set_arm_here, set_rest, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fnexit, fnret, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, closed_subshell, closed_uncertain, chain_in, inverted, arm_masked, arm_at, arm_expected, case_scope, opens_case, opens_case_here, case_opens_at, close_probe, close_rest, close_first, open_head, esac_probe, esac_rest, esac_first, dead_probe, dead_lead, dead_scope, dead_scope_here, close_n, exit_seen, end_top, end_ret, end_exit, end_ret_n, end_exit_n, end_kill, end_nkill, end_kill_ret, end_kill_exit, end_ks, ek, chain_at, chain_depth, loop_at, call_inverted, esc_inverted, call_condition, esc_condition, esc_ret_exempt, ret_shell_here, exit_shell_here, ret_new_at, ret_new_scope, exit_is_ret, esc_is_return, esc_is_loop_escape, esc_ends_shell, esc_loop_at, esc_ends_loop, esc_return_local, closed_sub_seen, closed_sub_e, closed_sub_p, sub_id, open_stripped, head_inverted, inverted_at, closed_inverted, sub_serial, depth_in, cmd_rest, cmd_sub, cmd_fndef, cmd_fnname, cmd_fnat, fn_name_here, esc_probe, esc_is_exit, esc_sub, esc_paren, esc_sub_depth, esc_close, esc_tail, esc_chain_end, esc_chain_or, sub_lead_in, fn_lead, call_sub, call_weak_at, call_weak_sub, exit_here, exit_sub,
+        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, fndef, fndef_at, struct_text, set_probe, set_open_n, set_crossed_sub, set_sub, sub_res_at, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_lead_n, set_lead_ok, set_arm_here, set_rest, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fnexit, fnret, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, closed_subshell, closed_uncertain, chain_in, inverted, arm_masked, arm_at, arm_expected, case_scope, opens_case, opens_case_here, case_opens_at, close_probe, close_rest, close_first, open_head, esac_probe, esac_rest, esac_first, dead_probe, dead_lead, dead_scope, dead_scope_here, close_n, exit_seen, end_top, end_ret, end_exit, end_ret_n, end_exit_n, end_kill, end_nkill, end_kill_ret, end_kill_exit, end_ks, ek, chain_at, chain_depth, loop_at, call_inverted, esc_inverted, call_condition, esc_condition, esc_ret_exempt, esc_is_fail, esc_fail_exempt, ret_shell_here, exit_shell_here, ret_new_at, ret_new_scope, exit_is_ret, esc_is_return, esc_is_loop_escape, esc_ends_shell, esc_loop_at, esc_ends_loop, esc_return_local, closed_sub_seen, closed_sub_e, closed_sub_p, sub_id, open_stripped, head_inverted, inverted_at, closed_inverted, sub_serial, depth_in, cmd_rest, cmd_sub, cmd_fndef, cmd_fnname, cmd_fnat, fn_name_here, esc_probe, esc_is_exit, esc_sub, esc_paren, esc_sub_depth, esc_close, esc_tail, esc_chain_end, esc_chain_or, sub_lead_in, fn_lead, call_sub, call_weak_at, call_weak_sub, exit_here, exit_sub,
                               cmd_opens, run_depth, rec_at, nclosed_scope, closed_scope, ci) {
             # **シェルのオプションはステップごとにリセットする。** ステップは 1 つずつ
             # 別のシェルで走るので、前のステップの `set +e` / `pipefail` は引き継がれない。
@@ -2988,6 +2988,13 @@ ci_workflow_extract() {
             # （`end_exit`）で、取り消せる区切りが違う（`{ return 0; } || true` の後ろは走るが、
             # `{ exit 0; } || true` の後ろは走らない＝実測）。最上位の分は `end_top` で、
             # どの閉じでも取り消さない（囲いが無いので終わりは確定している）。
+            # **表を明示的に空にする必要はない**（レビュー 13 巡目）——`end_ret` / `end_exit` は
+            # `flush_step()` の引数として宣言した**局所配列**で、ステップごとに呼ばれるこの関数が
+            # 毎回新しいものを作る（§「ステップごとの独立性」がそう設計されている）。
+            # 以前はここに `for (ek in …) delete …` を 2 行置いていたが、**1 要素も消せない死んだ
+            # コード**で（消しても**全件緑**＝実測）、しかも**走査中に消す形**なので
+            # 下の取り消し（`end_kill` に鍵を控えてから消す）が避けている awk の実装差を
+            # **読み手が真似しうる**手本になっていた。
             # `exit_seen` はこの 3 つから `ledger_exit_seen()` で**導く**
             # （台帳が動いたところで必ず計算し直す。導出そのものは述語に 1 つだけ置く
             #  ——写しが 3 つあった頃の歯止めは「3 つとも動かすこと」という散文だけだった）。
@@ -2995,8 +3002,6 @@ ci_workflow_extract() {
             end_top = 0
             end_ret_n = 0
             end_exit_n = 0
-            for (ek in end_ret) { delete end_ret[ek] }
-            for (ek in end_exit) { delete end_exit[ek] }
             exit_seen = ledger_exit_seen(end_top, end_ret_n, end_exit_n)
             # 連鎖（`&&` / `||`）で入った階層の数。脱出を数えてよいかの判断に使う
             chain_depth = 0
@@ -3122,7 +3127,7 @@ ci_workflow_extract() {
                             # 作れないが、取り消しの門番を緩める次の変更で、無関係な死に体区間が
                             # 古い階層の閉じで取り消される fail-open になる。
                             # **対で持つ値は対で戻す**（片方だけ残ると意味が食い違う）。
-                            # **この 1 行にはピンが無い**——戻す変異は実測で 1207 件すべて緑
+                            # **この 1 行にはピンが無い**——戻す変異は実測で全件緑
                             # （上のとおり観測できる綴りが作れない）。`set_open_depth` と
                             # 同じ扱いで、規約とレビューで守る
                             else if (dead_depth >= 0 && depth == dead_depth + 1) {
@@ -4809,6 +4814,112 @@ ci_workflow_extract() {
                         # 片方だけが古くなる**（門番は 4 語を並べた 1 本なので、そちらを広げても
                         # 振り分けが追随しない）
                         esc_is_loop_escape = (esc_probe ~ /^(break|continue)([[:space:]]|$)/)
+                        # **必ず失敗するコマンドも「シェルを終わらせる語」と同じ扱いにする**
+                        # （issue #229）。`errexit` の下では非ゼロで終わったコマンドでシェルが
+                        # 死ぬので、`{` 改行 `false` 改行 スイート 改行 `}` は真値 NOGATE。
+                        # ライブラリはこれを模していなかったため**裸の `false` 1 つで騙せ**、
+                        # 走らないスイートが「ゲートしている」と数えられていた（fail-open）。
+                        # 判定は**既存の `chain_never_succeeds()` をそのまま使う**
+                        # （`false` / `(( 0 ))` / `exit N` / `return N` と `!` の反転まで
+                        #  既に扱える唯一の源。ここに綴りの表を作らない＝§6 DRY）。
+                        # **`exit` / `return` / ループ脱出と重ねない**——あちらは制御を移す語で
+                        # 条件が違う（`exit` は `errexit` と無関係に終わる）ので、
+                        # 既に分類された語はこちらから外す。
+                        # **`!` の反転はここで見ない**——`chain_never_succeeds()` が
+                        # `CHAIN_PROBE_FLIP` で内側に畳んでおり（`! true` は必ず失敗・
+                        # `! false` は成功しうる）、外側でもう一度見ると二重に数える
+                        # **`!` が付いていたら `errexit` は発火しない**（bash の規則。実測で
+                        # `! true` ・ `! { : ; }` はどちらも真値 GATES）。`chain_never_succeeds()` は
+                        # `!` を**終了状態の計算**へ畳むので（`! true` は必ず失敗）、
+                        # そのままでは「必ず失敗する＝シェルが死ぬ」と読んでしまう——
+                        # 状態の反転と `errexit` の免除は**別の軸**。
+                        # 免除の有無は述語が使ったのと**同じ源**（`CHAIN_PROBE_FLIP`）から読む。
+                        # `esc_inverted` を使わないのは、あちらの源 `CMD_PREFIX_INVERTED` が
+                        # 複合を開く断片（`! { : ; }`）では `!` に届かないため（issue #155 の形）。
+                        # **`chain_never_succeeds()` を先に呼ぶ順序に依存する**ので、
+                        # この 2 つは必ず同じ式の中で左から右へ並べる。
+                        # **ただしこの順序にはピンが無い**（14 巡目で実測）——入れ替えても
+                        # **全件緑**で、`CHAIN_PROBE_FLIP` を断片の境界を跨いで残そうと
+                        # 組んだ 40 形（前置き 8 × 後続 5）でも答えが 1 つも動かない。
+                        # `chain_status_probe()` が入口で 0 に戻すので、読める古い値は
+                        # **前の断片の呼び出しが残した分**だけで、いまの綴りではそこへ届く
+                        # 入力が無いということ。**順序は正しさの根拠であって守られた不変条件
+                        # ではない**ので、「ピンがあるから安全」と読まないこと
+                        esc_is_fail = (!esc_is_exit && !esc_is_return && !esc_is_loop_escape \
+                                       && chain_never_succeeds(seg[j]) && !CHAIN_PROBE_FLIP)
+                        # **残る境界**（レビュー 13〜14 巡目。**(a)〜(d) は `main` でも誤るので
+                        # この差分の退行ではないが、(e) は違う**——あちらはこの差分が交換した
+                        # 形で、`main` は正しく答える。次に触る人が同じ所で迷わないように残す。
+                        # **件数は書かない**——足したときにこの数字だけが古くなる）:
+                        # (a) **この区間が答えるのは「いまのシェルで `errexit` が発火するか」
+                        #     までで、複合の終了状態が親へ伝わる先は見ていない**（**issue #233**）。
+                        #     現れ方が 3 つあり、どれも真値 NOGATE なのに wired（14 巡目で実測）:
+                        #     **(a-1) `!` の免除**——部分シェルの中では反転した非ゼロが
+                        #     その部分シェルの終了状態になり、親の `errexit` が発火する
+                        #     （`( ! true )` ・ `( ! { : ; } )`）。
+                        #     **(a-2) `exit` を無条件に外していること**——`!esc_is_exit` は
+                        #     最上位では正しい（`exit` は `errexit` と無関係に終わる）が、
+                        #     **部分シェルの中の `exit` は部分シェルだけを終わらせ**、その非ゼロが
+                        #     親を落とす（`( exit 1 )` の 1 行形・複数行形とも）。
+                        #     **(a-3) 並びを改行で割った形**——`( false && true )` は 1 行なら
+                        #     この差分が直すが、`(` 改行 `false && true` 改行 `)` は wired のまま
+                        #     （断片が部分シェルを開いても閉じてもいないので免除側へ倒れる）。
+                        #     **同じ状況の綴りで答えが分かれていることに注意**: `( false )` は
+                        #     直って not-wired、`{ exit 1; }` は部分シェルを開かないので以前から
+                        #     not-wired、残っているのは上の 3 つ。直すには「複合の最後のコマンドが
+                        #     親へ伝える」機構が要る（下の (c) ではない——あちらはパイプの話）。
+                        # (b) **読む対象は正規化前の `seg[j]`** で、兄弟の 3 分類が読む
+                        #     `esc_probe`（前置き剥がし済み）ではない。そのため
+                        #     `eval false` ・ `X=1 false` ・ `command false` ・ `env false` ・
+                        #     `timeout 5 false` のように前置きの後ろの失敗は拾えない
+                        #     （5 形とも真値 NOGATE を wired と答える。実測）。
+                        #     **`esc_probe` へ替える形は測って戻した**——得るのは
+                        #     `strip_command_prefixes(…, 0)` が実際に落とす 2 形
+                        #     （`eval false` ・ `X=1 false`）だけで、`command` / `env` /
+                        #     `timeout` は残る（前者は関数の探索を飛ばす綴りなので
+                        #     第 2 引数が 0 のときは落とさず、後者は別プロセスを起こすので
+                        #     `CI_WORKFLOW_COMMAND_PREFIXES` 側とは意図して一覧を分けている）。
+                        #     しかも `!` が剥がされているため `! false` が「必ず失敗する」と
+                        #     誤読され、真値 GATES を not-wired と答える控えのピンが落ちた。
+                        #     直すなら前置きだけを落として `!` を残す別の正規化が要る。
+                        # (c) **パイプの中は門番（`!set_forked`）が先に外す**ので、
+                        #     `set -o pipefail` ＋ `false | cat` は拾えない（真値 NOGATE）。
+                        #     `set_forked` は `pipefail` の状態を見ないので、issue #203 で入れた
+                        #     「複合の中の `pipefail` を読む」機構とここが組み合わさっていない
+                        # (d) **1 行で書いた関数定義の本文は断片に割れない**ので、
+                        #     `f() { false; }` ＋ `f` ＋ スイートは wired（真値 NOGATE。
+                        #     `function f { false; }` も同じ。**issue #234**）。複数行形
+                        #     （`f() {` 改行 `false` 改行 `}`）は本文の `false` が自分の断片に
+                        #     なるのでこの分類が効き、この差分が直して not-wired になっている
+                        #     ——つまり**定義の書き方だけで答えが割れる**。`f() { exit 1; }` が
+                        #     正しく答えられているのは、`exit` 側が `function_body_rest()` を
+                        #     通した `call_probe` で**定義の本文を読む別の経路**を持つから。
+                        #     直すには「本文が必ず失敗する関数の呼び出しはシェルを終わらせる」を
+                        #     関数の台帳へ載せる必要があり、呼ばれた関数の本文を扱う issue #231 と
+                        #     同じ機構に当たる。
+                        # (e) **これは `main` でも誤る境界ではなく、この差分が交換したもの**
+                        #     （**issue #235**。レビュー 14 巡目に 2 つのレビューが独立に指摘）。
+                        #     `errexit` は **`&&` の左辺*全体*で抑止される**ので、閉じに `&&` が
+                        #     付く複合の中の失敗は親へ届かない——`{` `false` スイート `} && true` は
+                        #     真値 GATES（スイートは走り、その失敗が並びの状態になる）なのに
+                        #     not-wired と答える（`main` は wired ＝正しい）。
+                        #     **この 2 形は殺しの時点では区別できない**: `{ false; スイート; }`
+                        #     （真値 NOGATE）との違いは**後から来る閉じの演算子**だけで、本文が
+                        #     複数行なら別の `split_commands()` の呼び出しに属するのでここからは
+                        #     見えない。どちらかを正しく答えれば必ずもう一方が誤る。
+                        #     **壊れるのは 3 つそろったときだけ**（実測）: 閉じが `&&`
+                        #     （`|| true` は真値 NOGATE で正しい）・その複合が**ステップの最後の
+                        #     コマンド**（`} && echo ok` の後ろに行があれば正しい）・スイートが
+                        #     殺しと同じ複合の中で殺しより後ろ。`while … done && true` も正しい。
+                        #     **据え置いた理由**: 後置演算子の専用コーパス 207 形で誤りの総数は
+                        #     `main` と同じ（14）で、交換は 8 形 ↔ 8 形。得たのは
+                        #     **fail-open → 正解**（走らないスイートを数える＝この網が在る向き）、
+                        #     失ったのは**正解 → fail-closed**（赤くなるので見える）。加えて
+                        #     「必ず失敗する」と読むのはリテラルだけなので、壊れる形は
+                        #     `false` を `&&` の左辺の複合へ書きかつその複合をステップの最後に
+                        #     置く必要がある。正しい直し方は `flush_job()` 側（`scope_op[]` が
+                        #     同じ規則を既に持つ）へ区間の適用を繰り延べることで、issue #233 と
+                        #     同じ機構。**この境界を「`main` でも誤る」側に書かないこと。**
                         # **門番は語彙を数え直さない**（レビュー 7 巡目）。4 語を並べた正規表現を
                         # 下の門番にも持っていたので、語を増やすと**振り分けだけが追随して門番が
                         # 古くなる**（この差分が `exit` / `return` / `break` について潰した重複と
@@ -5012,7 +5123,7 @@ ci_workflow_extract() {
                         # 近似を足すと同じ判断が 2 か所に分かれる
                         # **この 3 つの条件はいずれも「包みの中の綴り」でしか分かれない。**
                         # 11 巡目はこれらを書いた時点でピンを 1 つも足しておらず、3 つを
-                        # 元へ戻す変異が**1198 件すべて緑のまま通った**（実測）——既存のピンが
+                        # 元へ戻す変異が**全件緑のまま通った**（実測）——既存のピンが
                         # すべて最上位の綴りで、退行した 14 形は `{ }` ・ `( )` ・ `if true` ・
                         # `while true` ・二重の囲いの**中**にあったから。いまは包みごとのピン
                         # （`escape_reach_control` の「包みの中でも閉じ括弧の後ろの &&〜」以下
@@ -5031,13 +5142,36 @@ ci_workflow_extract() {
                                                   || ops[esc_chain_end] != "" \
                                                   || esc_chain_or)) \
                                           || (ops[j] == "||" && !chain_never_succeeds(seg[j + 1])))
+                        # **必ず失敗するコマンドの免除は `return` より素直**（issue #229）。
+                        # `errexit` が発火するのは**その並びの最後の要素が失敗したとき**だけなので、
+                        # 後ろに `&&` / `||` が続いていれば（＝自分が最後ではない）免除する。
+                        # 実測: `false && true` ・ `false || true` は真値 GATES、
+                        # `true && false` ・ `false || false` は NOGATE（後者は 2 つ目の `false` が
+                        # 最後の要素として発火する）。条件の中（`if false; then`）も免除する
+                        # ——あちらは条件なので `errexit` が発火しない
+                        # **免除の形は `return` 側（`esc_ret_exempt`）とそろえる。** 後ろに
+                        # `&&` / `||` が続けば「自分が並びの最後ではない」ので `errexit` は
+                        # 免除されるが、**その並びが囲っている部分シェルの最後のコマンドになると
+                        # 部分シェルごと非ゼロで終わり、親の `errexit` が発火する**
+                        # （実測で `( false && true )` は真値 NOGATE）。
+                        # 11 巡目が `return` 側で詰めた近似（この断片が自分で開いた部分シェルを
+                        # 閉じずに残しているか・並びの後ろに次のコマンドがあるか・並びに `||` が
+                        # あるか）は**同じ問いに答えている**ので、条件を書き写さず**同じ値を使う**
+                        # （§6 DRY。片方だけ直すと答えが綴りで割れる）。
+                        # **14 巡目で書き写しを代入へ直した**——13 巡目は「同じ式を使う」と
+                        # 書きながら 6 行の式をそのまま 2 つ並べており（空白を詰めると同一）、
+                        # この段落自身が禁じている形になっていた。832 形で答えは 1 つも動かず、
+                        # `||` の右辺を 2 度 `chain_never_succeeds()` に通す無駄も消える（実測）
+                        esc_fail_exempt = esc_ret_exempt
                         esc_ends_shell = (esc_is_exit \
                                           || (esc_is_return && !esc_return_local \
-                                              && !esc_inverted && !esc_ret_exempt && errexit))
+                                              && !esc_inverted && !esc_ret_exempt && errexit) \
+                                          || (esc_is_fail && !esc_fail_exempt && errexit))
                         if (!set_forked && !unreachable && !opens_case_here && dead_depth < 0 \
                             && ((prev_op != "&&" && prev_op != "||") \
                                 || (!chain_in && (esc_ends_shell || esc_ends_loop))) \
-                            && (esc_is_exit || esc_is_return || esc_is_loop_escape) \
+                            && (esc_is_exit || esc_is_return || esc_is_loop_escape \
+                                || esc_is_fail) \
                             && esc_probe ~ /^[^[:space:]]+([[:space:]]+[^[:space:]]+)?[[:space:]]*$/) {
                             # `exit` はシェルごと終わるので、以降のすべての断片が到達不能。
                             # **部分シェルの中と定義の本文は除く**——`( exit 0 )` は親を終わらせず、
@@ -5072,7 +5206,15 @@ ci_workflow_extract() {
                                     # **無条件に `exit` する関数の呼び出し**（`esc_probe` は関数名なので
                                     # `exit` の綴りではない）まで「部分シェルで区切らない」側へ入り、
                                     # `( f )` の後ろが死に体になる（実測でピン 3 件が落ちた）
-                                    if (esc_is_return) { exit_is_ret = 1 }
+                                    # **必ず失敗するコマンドも `return` と同じ枠へ入れる**
+                                    # （issue #229）。どちらも死ぬ理由が「`errexit` が
+                                    # 発火したから」なので、**囲いの閉じに付いた `&&` / `||` が
+                                    # 吸う**（その複合は AND-OR の最後の要素ではないので
+                                    # errexit は免除され、中の失敗も親へ伝わらない）。
+                                    # 実測で `{ false; } && true` ・ `{ false; } || true` は
+                                    # どちらも真値 GATES ——素の `exit` の枠（フォークでしか
+                                    # 取り消せない）へ入れると**この 2 形が未配線へ退行する**
+                                    if (esc_is_return || esc_is_fail) { exit_is_ret = 1 }
                                 }
                                 # **定義の本文の無条件の `exit` は関数ごとの台帳へ控える**（issue #189）。
                                 # `!in_fndef_here` は「定義しただけの本文は走らない」ことを正しく
