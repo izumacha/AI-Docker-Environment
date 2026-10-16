@@ -3112,6 +3112,19 @@ for escape_reach_control in \
           bash ${SUITE_PATH}" \
     "同（右辺が部分シェルを 0 で終える exit）:( return 0 || exit 0 )
           bash ${SUITE_PATH}" \
+    "閉じ括弧の後ろに付いた && は部分シェルの失敗を吸う:( return 0 ) && true
+          bash ${SUITE_PATH}" \
+    "同（手前にコマンドがある）:( echo a; return 0 ) && true
+          bash ${SUITE_PATH}" \
+    "同（右辺が偽でも並びの最後ではない）:( return 0 ) && false
+          bash ${SUITE_PATH}" \
+    "部分シェルの中の囲いの閉じに付いた || は吸う:( { return 0; } || true )
+          bash ${SUITE_PATH}" \
+    "同じ階層の 2 つの return は囲いの閉じでまとめて取り消される:{ return 0; return 0; } || true
+          bash ${SUITE_PATH}" \
+    "フォークした閉じの return は後ろの取り消しに寄与しない:{ return 0; } | cat
+          { return 0; } || true
+          bash ${SUITE_PATH}" \
     "1 行に畳んだ部分シェルの break はループを抜けない（対照）:while true; do
           ( break )
           bash ${SUITE_PATH}
@@ -3325,6 +3338,36 @@ for escape_in_loop_case in \
     "部分シェルの中で並びの最後に来る return:( true && return 0 )
           bash ${SUITE_PATH}" \
     "部分シェルの最後のコマンドが return:( echo a; return 0 )
+          bash ${SUITE_PATH}" \
+    "部分シェルの中の囲いの閉じに付いた && は吸わない:( { return 0; } && true )
+          bash ${SUITE_PATH}" \
+    "同（複数行）:(
+          {
+          return 0
+          } && true
+          )
+          bash ${SUITE_PATH}" \
+    "同（内側が部分シェル）:(
+          (
+          return 0
+          ) && true
+          )
+          bash ${SUITE_PATH}" \
+    "同（内側が必ず走る条件）:(
+          if true; then
+          return 0
+          fi && true
+          )
+          bash ${SUITE_PATH}" \
+    "囲いの閉じの || は右辺が成功しえないなら吸わない:{ return 0; } || false
+          bash ${SUITE_PATH}" \
+    "同（部分シェルの中）:( { return 0; } || false )
+          bash ${SUITE_PATH}" \
+    "取り消しは押し出した最上位の return の寄与まで消さない:return 0
+          { return 0; } || true
+          bash ${SUITE_PATH}" \
+    "同（押し出したのが別の階層の印）:{ return 0; }
+          { return 0; } || true
           bash ${SUITE_PATH}" \
     "ループ脱出の区間は囲いの閉じに付いた || では取り消さない:while true; do
           {

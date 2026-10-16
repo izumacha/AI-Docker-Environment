@@ -2905,7 +2905,7 @@ ci_workflow_extract() {
             scope_op[scope_serial] = ""
             scope_close_at[scope_serial] = 0
         }
-        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, fndef, fndef_at, struct_text, set_probe, set_open_n, set_crossed_sub, set_sub, sub_res_at, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_lead_n, set_lead_ok, set_arm_here, set_rest, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fnexit, fnret, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, closed_subshell, closed_uncertain, chain_in, inverted, arm_masked, arm_at, arm_expected, case_scope, opens_case, opens_case_here, case_opens_at, close_probe, close_rest, close_first, open_head, esac_probe, esac_rest, esac_first, dead_probe, dead_lead, dead_scope, dead_scope_here, close_n, exit_seen, exit_seen_plain, chain_at, chain_depth, loop_at, call_inverted, esc_inverted, call_condition, esc_condition, esc_ret_exempt, ret_shell_at, ret_shell_scope, ret_shell_here, sc, exit_is_ret, esc_is_return, esc_is_loop_escape, esc_ends_shell, esc_loop_at, esc_ends_loop, esc_return_local, closed_sub_seen, closed_sub_e, closed_sub_p, sub_id, open_stripped, head_inverted, inverted_at, closed_inverted, sub_serial, depth_in, cmd_rest, cmd_sub, cmd_fndef, cmd_fnname, cmd_fnat, fn_name_here, esc_probe, esc_is_exit, esc_sub, esc_paren, esc_sub_depth, sub_lead_in, fn_lead, call_sub, call_weak_at, call_weak_sub, exit_here, exit_sub,
+        function flush_step(   i, j, nseg, seg, ops, text, errexit, pipefail, joined, njoined, carry, depth, dead_depth, paren, paren_probe, case_depth, prev_op, unreachable, chain_status, uncertain, uncertain_at, subshell, subshell_at, closing, fndef, fndef_at, struct_text, set_probe, set_open_n, set_crossed_sub, set_sub, sub_res_at, set_placed, set_forked, set_masked, set_arm, set_depth, strengthen_base, strengthen_pipe_ok, set_lead_n, set_lead_ok, set_arm_here, set_rest, fn_form, depth_before, case_before, pipe_in, in_fndef_here, pending_fndef, was_pending_fndef, true_at, setw, nsetw, sw, setopt, seton, setbody, setname, weaken_ok, fndef_name, pending_fndef_name, in_fndef_body, fndef_name_here, fnweak_e, fnweak_pipe, fnexit, fnret, fncall, fncall_rest, call_probe, fnweak_e_at, fnweak_pipe_at, fn_body_depth, fn_cancel_ok, open_probe, open_kind, open_rest_probe, first_open, od, entry_errexit, entry_pipefail, errexit_before, pipefail_before, closed_entry_e, closed_entry_p, closed_entry_seen, closed_subshell, closed_uncertain, chain_in, inverted, arm_masked, arm_at, arm_expected, case_scope, opens_case, opens_case_here, case_opens_at, close_probe, close_rest, close_first, open_head, esac_probe, esac_rest, esac_first, dead_probe, dead_lead, dead_scope, dead_scope_here, close_n, exit_seen, exit_seen_plain, chain_at, chain_depth, loop_at, call_inverted, esc_inverted, call_condition, esc_condition, esc_ret_exempt, ret_shell_at, ret_shell_scope, ret_shell_here, ret_shell_kept, ret_new_at, ret_new_scope, sc, exit_is_ret, esc_is_return, esc_is_loop_escape, esc_ends_shell, esc_loop_at, esc_ends_loop, esc_return_local, closed_sub_seen, closed_sub_e, closed_sub_p, sub_id, open_stripped, head_inverted, inverted_at, closed_inverted, sub_serial, depth_in, cmd_rest, cmd_sub, cmd_fndef, cmd_fnname, cmd_fnat, fn_name_here, esc_probe, esc_is_exit, esc_sub, esc_paren, esc_sub_depth, esc_close, esc_tail, sub_lead_in, fn_lead, call_sub, call_weak_at, call_weak_sub, exit_here, exit_sub,
                               cmd_opens, run_depth, rec_at, nclosed_scope, closed_scope, ci) {
             # **シェルのオプションはステップごとにリセットする。** ステップは 1 つずつ
             # 別のシェルで走るので、前のステップの `set +e` / `pipefail` は引き継がれない。
@@ -4250,15 +4250,18 @@ ci_workflow_extract() {
                         # 隣の巻き戻し（`closed_entry_seen`）が同じ 2 つの区切りを見ているのと同じ理由
                         if (exit_seen && ret_shell_at > 0 && depth < ret_shell_at \
                             && ret_shell_scope > 0 \
-                            && (ops[j] == "&&" || ops[j] == "||" \
-                                || ops[j] == "|" || ops[j] == "&")) {
+                            && (ops[j] == "|" || ops[j] == "&" \
+                                || (ops[j] == "&&" \
+                                    && innermost_marked_depth(depth, subshell_at) == 0) \
+                                || (ops[j] == "||" \
+                                    && !chain_never_succeeds(seg[j + 1])))) {
                             for (ci = 1; ci <= nclosed_scope && ret_shell_scope > 0; ci++) {
                                 for (sc = ret_shell_scope; sc > 0; sc = scope_parent[sc]) {
                                     if (closed_scope[ci] == sc) {
                                         # **戻すのは「関数外 `return` が立てた分」だけ**——
                                         # 素の `exit` も同じ旗を立てるので、0 に落とすと
                                         # その寄与まで消える（上の `exit_seen_plain` 参照）
-                                        exit_seen = exit_seen_plain
+                                        exit_seen = (exit_seen_plain || ret_shell_kept) ? 1 : 0
                                         ret_shell_at = 0
                                         ret_shell_scope = 0
                                         break
@@ -4614,8 +4617,12 @@ ci_workflow_extract() {
                         # 落とした後は `sub_lead_in > 0` の枝が「その部分シェルの残りだけ」を
                         # 死に体にするが、閉じ括弧が同じ断片にあるので**次の記録で即解除**され、
                         # 答えは前後どちらも wired（真値 GATES）のまま
+                        esc_close = 0
                         if (esc_paren > 0 || esc_sub > 0 || sub_lead_in > 0) {
+                            esc_tail = esc_probe
                             sub(/[[:space:]]*;?[[:space:]]*\)+[[:space:]]*$/, "", esc_probe)
+                            esc_tail = substr(esc_tail, length(esc_probe) + 1)
+                            esc_close = gsub(/\)/, ")", esc_tail)
                         }
                         if (esc_paren > esc_sub) { esc_sub = esc_paren }
                         # **「その脱出語が部分シェルの中で走るか」は深さで測る**（issue #204 の
@@ -4826,7 +4833,8 @@ ci_workflow_extract() {
                         # 行をまたいで右辺を読む仕掛けは作らない——`joined[]` が繋ぐのは `\` の
                         # 継続と閉じていない引用符だけで、AND-OR の折り返しは別の行のままだから）
                         esc_ret_exempt = (esc_condition \
-                                          || (ops[j] == "&&" && esc_sub_depth == 0) \
+                                          || (ops[j] == "&&" \
+                                              && (esc_sub_depth == 0 || esc_close > 0)) \
                                           || (ops[j] == "||" && !chain_never_succeeds(seg[j + 1])))
                         esc_ends_shell = (esc_is_exit \
                                           || (esc_is_return && !esc_return_local \
@@ -5337,11 +5345,33 @@ ci_workflow_extract() {
                             dead_scope_here = 0
                         }
                         if (ret_shell_here) {
-                            ret_shell_at = depth_in + cmd_opens
+                            ret_new_at = depth_in + cmd_opens
                             # **階層の識別子も同じ場所で控える**（レビュー 5 巡目）。
                             # 深さだけでは、同じ深さで開いて閉じた**兄弟の複合**が
                             # 取り消しを発火させてしまう
-                            ret_shell_scope = (ret_shell_at > 0) ? scope_at[ret_shell_at] : 0
+                            ret_new_scope = (ret_new_at > 0) ? scope_at[ret_new_at] : 0
+                            # **印は 1 つしか持てないので、押し出す寄与は別の旗へ退避する**
+                            # （レビュー 8 巡目。`main` 既存の fail-open）。`exit_seen` は
+                            # 真偽 1 つで、取り消しはそれを「素の `exit` の分」まで戻す。
+                            # 2 つ目の関数外 `return` が印を上書きすると、1 つ目の寄与が
+                            # どの旗にも残らず、2 つ目の囲いの `||` で**まとめて消えて**いた
+                            # （実測で `return 0` 改行 `{ return 0; } || true` 改行
+                            #  スイートが真値 NOGATE なのに wired ＝必須スイートが黙って
+                            #  ゲートから外れる）。退避するのは 2 つの場合だけ:
+                            #   - 最上位の `return`（`at` が 0）は**取り消せない**寄与。
+                            #     印の「無し」と同じ値なので、印としては持てない
+                            #   - 生きている印が**別の階層**のもの（同じ階層なら、その階層の
+                            #     閉じが両方を正しく取り消すので退避は要らない。実測で
+                            #     `{ return 0; return 0; } || true` は真値 GATES）
+                            if (ret_new_scope == 0 \
+                                || (ret_shell_scope > 0 && ret_shell_scope != ret_new_scope)) {
+                                ret_shell_kept = 1
+                            }
+                            # 取り消せる印として持てるのは階層の識別子がある場合だけ
+                            if (ret_new_scope > 0) {
+                                ret_shell_at = ret_new_at
+                                ret_shell_scope = ret_new_scope
+                            }
                             ret_shell_here = 0
                         }
                         # **この断片が開いた階層すべてに、断片に入る前のオプションを控える**
