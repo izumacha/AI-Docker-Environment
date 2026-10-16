@@ -1321,6 +1321,12 @@ ci_workflow_extract() {
         #
         # 探すのは引用符を潰した写しの上（桁は同じ）で、潰すのは元の文字列
         function mask_arith_spans(t, with_expansion,   probe, out, n, i, j, c, prev, depth, start, early, body, spans) {
+            # **`((` が 1 つも無ければそのまま返す。** これが無いと `run:` の全行が
+            # `mask_quoted()` の 1 周と桁ごとの `substr` を余分に払う（実測: 算術が
+            # 1 つも無い 4000 行の `run:` で 797ms → 983ms → 872ms）。
+            # 同じファイルの `mask_quoted()` / `mask_quoted_flow_punctuation()` も
+            # 同じ理由で同じ形の早抜けを持っている
+            if (index(t, "((") == 0) { return t }
             # 引用符の中は見ない（引用符で囲った算術の綴りは文字列で、算術ではない）
             probe = mask_quoted(t)
             out = t
