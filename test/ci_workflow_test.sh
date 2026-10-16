@@ -4905,7 +4905,7 @@ done
 # **算術コマンドの中身は「走るコマンド」ではない**（issue #206）。実 bash は `(( … ))` の
 # 中を算術式として読むのでコマンドは 1 つも走らない。伏せないと中のスイート名が照合に
 # 当たって「配線されている」と答え、`ci_coverage_test.sh` が**必ず赤くなるワークフロー**に
-# ついて誤った答えを返す。**下の 5 形はすべて真値 NOGATE**（番兵なしの実 `bash -e` で実測）。
+# ついて誤った答えを返す。**下はすべて真値 NOGATE**（番兵なしの実 `bash -e` で実測）。
 # **`||` を含む 2 形が要点**で、算術の中の `||` は演算子なので並びの区切りとして切らない
 # ——切ると断片が `(( bash <スイート>` に割れ、`))` を持たないので伏せ字に当たらない
 for arith_body_case in \
@@ -4915,8 +4915,7 @@ for arith_body_case in \
     "算術の中の || と exit:(( bash ${SUITE_PATH} || exit 1 ))" \
     "算術の中の || と false:(( bash ${SUITE_PATH} || false ))" \
     "後ろに && が付く:(( bash ${SUITE_PATH} )) && echo ok" \
-    "入れ子の括弧がある:(( (1+2) * bash ${SUITE_PATH} ))" \
-    "閉じない算術:(( bash ${SUITE_PATH}"
+    "入れ子の括弧がある:(( (1+2) * bash ${SUITE_PATH} ))"
 do
     assert_not_wired "算術コマンドの中身は実行の証拠にしない（${arith_body_case%%:*}）" "name: ci
 jobs:
@@ -4929,7 +4928,7 @@ jobs:
 done
 
 # **締めすぎない側。** 算術**展開**（`$(( … ))`）はコマンドの引数・代入の値として普通に現れ、
-# その行のコマンドは走る。**下の 4 形はすべて真値 GATES**（実測）
+# その行のコマンドは走る。**下はすべて真値 GATES**（実測）
 for arith_expansion_case in \
     "スイートの引数:bash ${SUITE_PATH} \$(( 1 + 2 ))" \
     "手前の行の展開:echo \$(( 1 ))
@@ -4949,6 +4948,30 @@ jobs:
       - name: subject
         run: |
           ${arith_expansion_case#*:}"
+done
+
+# **`((` は算術とは限らない**（issue #206 のレビュー 3 巡目）。bash は `((` … `))` が
+# **外側と内側を同時に閉じる**ときだけ算術コマンドとして読み、そうでなければ
+# **入れ子の部分シェル**へ落とす（実測: `((bash <スイート>) && echo ok)` はスイートを
+# 実行し、その失敗もステップへ伝わる＝真値 GATES。`(( bash <スイート> ))` は
+# 算術として読まれて実行時に式の構文エラーになり、何も走らない＝真値 NOGATE）。
+# 伏せる判断を**枠組み**（内側が最後の `))` より手前で閉じていないか）で切らないと、
+# **実際に走るスイートを消して未配線と答える**（fail-closed。`ci_coverage_test.sh` が
+# 正しいワークフローについて「このスイートは走らない」と報告する形）
+for arith_subshell_case in \
+    "部分シェル 2 つと後置の連鎖:((bash ${SUITE_PATH}) && echo ok)" \
+    "部分シェル 2 つと後続の行:((bash ${SUITE_PATH}); echo done)" \
+    "内側がどちらも部分シェル:((bash ${SUITE_PATH}) && (echo b))" \
+    "群のあとに連鎖でスイート:((echo a) && true) && bash ${SUITE_PATH}"
+do
+    assert_wired "入れ子の部分シェルの中身は消さない（${arith_subshell_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${arith_subshell_case#*:}"
 done
 
 # **区切りを探す写しは「手前にある無関係な括弧」を食ってはいけない**
@@ -8478,6 +8501,44 @@ jobs:
       - name: lint
         run: bash ${SUITE_PATH} --jobs ${DOLLAR}(( ${DOLLAR}(nproc) + 1 ))" \
     ci_workflow_command_matches "" 'nproc'
+
+# **算術コマンドの中のコマンド置換も走る。** `(( … ))` 自体はコマンドを走らせないが、
+# 本文の `${DOLLAR}( … )` は**算術の評価より前に展開されるので実際に走る**
+# （実測: `(( ${DOLLAR}(bash <スイート>) > 2 ))` はスイートを実行する）。
+# 伏せると実在する綴りを「無い」と答えるので、**置換を含む本文は触らない**
+assert_matcher match "コマンド単位: 算術コマンドの中のコマンド置換も見える" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: lint
+        run: (( ${DOLLAR}(nproc) > 2 )) && bash ${SUITE_PATH}" \
+    ci_workflow_command_matches "" 'nproc'
+
+# **算術展開の中身は変数名も含めて照合に残す。** 本 repo の `ci.yml` 自身が
+# `${DOLLAR}(( 0x${DOLLAR}capbnd & (1 << 21) ))` と書いており、ここへ網を掛ける照会
+# （`capbnd` や capability のマスクを見るもの）は**ありうる**。コマンド置換が無くても
+# 伏せれば「実在する綴りが無い」と答えるので、**展開は丸ごと触らない**
+assert_matcher match "コマンド単位: 算術展開の中の変数名も見える" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: lint
+        run: test \"${DOLLAR}(( 0x${DOLLAR}capbnd & (1 << 21) ))\" -ne 0 && bash ${SUITE_PATH}" \
+    ci_workflow_command_matches "" 'capbnd'
+
+# **展開を飛ばすときは対応する閉じの先まで飛ばす。** 2 桁だけ進めると、
+# 展開の中に入れ子で書いた `((` を別の算術として見つけて伏せてしまい、
+# そこにある綴りが照合から消える（fail-closed。実測）
+assert_matcher match "コマンド単位: 入れ子の算術展開の中の綴りも見える" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: lint
+        run: bash ${SUITE_PATH} --n=${DOLLAR}(( 2*((${DOLLAR}capbnd+1)) ))" \
+    ci_workflow_command_matches "" 'capbnd'
 
 # **連鎖の右辺でもリンタの網は見る**（issue #150）。実行の照会は「走ると証明できない」として
 # 外すが、`test -n "${DOLLAR}LIST" && shellcheck ${DOLLAR}LIST` は正当な綴りなので、

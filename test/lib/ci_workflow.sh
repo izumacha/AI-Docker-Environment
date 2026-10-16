@@ -1314,7 +1314,7 @@ ci_workflow_extract() {
         # 事実に近い（触らないままにすると `((` が部分シェル 2 つとして剥がされ、
         # 走らないスイートを配線と答える。実測で `main` と同じ fail-open）。
         # 探すのは引用符を潰した写しの上（桁は同じ）で、潰すのは元の文字列
-        function mask_arith_spans(t, with_expansion,   probe, out, n, i, j, c, prev, depth, start) {
+        function mask_arith_spans(t, with_expansion,   probe, out, n, i, j, c, prev, depth, start, early, body) {
             # 引用符の中は見ない（引用符で囲った算術の綴りは文字列で、算術ではない）
             probe = mask_quoted(t)
             out = t
@@ -1326,22 +1326,49 @@ ci_workflow_extract() {
                 if (substr(probe, i, 2) != "((") { i++; continue }
                 # 直前の 1 文字を見る（行頭なら空文字）
                 prev = (i > 1) ? substr(probe, i - 1, 1) : ""
-                # 算術**展開**は、呼び出し口が「中も潰す」と言ったときだけ潰す
-                if (prev == "$" && with_expansion != 1) { i += 2; continue }
-                # 釣り合いを数えて対応する閉じ括弧を探す
+                # 釣り合いを数えて外側の `(` に対応する閉じを探しつつ、
+                # **内側の `(` が最後の `))` より手前で閉じていないか**を見る
                 depth = 0
                 start = i
+                early = 0
                 for (j = i; j <= n; j++) {
                     c = substr(probe, j, 1)
                     # 開き括弧で 1 つ深くなる
                     if (c == "(") { depth++ }
-                    # 閉じ括弧で 1 つ浅くなり、0 に戻ったところが対応する閉じ
-                    else if (c == ")") { depth--; if (depth == 0) { break } }
+                    else if (c == ")") {
+                        # 閉じ括弧で 1 つ浅くなり、0 に戻ったところが対応する閉じ
+                        depth--
+                        if (depth == 0) { break }
+                        # 深さ 1 へ戻ったのに次が `)` でない＝内側が早く閉じている
+                        if (depth == 1 && substr(probe, j + 1, 1) != ")") { early = 1 }
+                    }
                 }
-                # 釣り合う閉じが無い（断片の途中で切れている）なら行末まで潰して終わり
-                if (depth != 0 || j > n) {
-                    out = substr(out, 1, start + 1) spaces(n - start - 1)
-                    break
+                # **釣り合う閉じが無い断片は触らない。** ここへ来る理由は 2 つあり、
+                # 区別できない: (a) 綴り自体が閉じていない（bash の構文エラーで
+                # どのコマンドも走らない）、(b) **入れ子の部分シェルを `split_commands()` が
+                # 区切りで切った断片**（`((bash <スイート>) && echo ok)` の前半）。
+                # 行末まで潰すと (b) の**実際に走るスイートを消して未配線と答える**
+                # （実測で `((bash <スイート>) && echo ok)` が真値 GATES → not-wired）。
+                # (a) を取りこぼす代償は `main` と同じ fail-open 1 形だけで、
+                # しかもその綴りのワークフローは構文エラーで毎回必ず赤
+                if (depth != 0 || j > n) { i += 2; continue }
+                # **内側が早く閉じていれば算術ではなく入れ子の部分シェル**。
+                # 中のコマンドは実際に走るので触らず、内側の算術を探して先へ進む
+                if (early) { i += 2; continue }
+                # 算術**展開**は、呼び出し口が「中も潰す」と言ったときだけ潰す。
+                # 潰さないときは**対応する閉じの先まで飛ばす**（2 桁だけ進めると
+                # 展開の中に入れ子で書いた `((` を別の算術として潰してしまう。実測）
+                if (prev == "$" && with_expansion != 1) { i = j + 1; continue }
+                # 本文（`((` と `))` のあいだ）を取り出す
+                body = substr(probe, start + 2, j - start - 3)
+                # **照合へ出す写しでは、コマンド置換を含む本文は触らない**——
+                # 算術コマンドはコマンドを走らせないが、**その中のコマンド置換は走る**
+                # （実測: `(( $(bash <スイート>) > 2 ))` はスイートを実行する）。
+                # 潰すと実在する綴りを「無い」と答える fail-closed になるので、
+                # 判断の根拠が無いこの形は `main` と同じ「触らない」側へ倒す
+                if (with_expansion != 1 && (index(body, "$(") > 0 || index(body, "`") > 0)) {
+                    i = j + 1
+                    continue
                 }
                 # **`))` の直前までが本文**（`((` は start・start+1、`))` は j-1・j）
                 out = substr(out, 1, start + 1) spaces(j - start - 3) substr(out, j - 1)
