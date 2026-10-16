@@ -4849,10 +4849,17 @@ ci_workflow_extract() {
                         #     同じ「複合の最後のコマンドが親へ伝える」機構が要る。
                         # (b) **読む対象は正規化前の `seg[j]`** で、兄弟の 3 分類が読む
                         #     `esc_probe`（前置き剥がし済み）ではない。そのため
-                        #     `command false` ・ `X=1 false` のように `chain_status_probe()` が
-                        #     見通せない前置きの後ろの失敗は拾えない（`eval false` は拾える）。
-                        #     **`esc_probe` へ替える形は測って戻した**——`!` が剥がされている
-                        #     ため `! false` が「必ず失敗する」と誤読され、控えのピンが落ちた。
+                        #     `eval false` ・ `X=1 false` ・ `command false` ・ `env false` ・
+                        #     `timeout 5 false` のように前置きの後ろの失敗は拾えない
+                        #     （5 形とも真値 NOGATE を wired と答える。実測）。
+                        #     **`esc_probe` へ替える形は測って戻した**——得るのは
+                        #     `strip_command_prefixes(…, 0)` が実際に落とす 2 形
+                        #     （`eval false` ・ `X=1 false`）だけで、`command` / `env` /
+                        #     `timeout` は残る（前者は関数の探索を飛ばす綴りなので
+                        #     第 2 引数が 0 のときは落とさず、後者は別プロセスを起こすので
+                        #     `CI_WORKFLOW_COMMAND_PREFIXES` 側とは意図して一覧を分けている）。
+                        #     しかも `!` が剥がされているため `! false` が「必ず失敗する」と
+                        #     誤読され、真値 GATES を not-wired と答える控えのピンが落ちた。
                         #     直すなら前置きだけを落として `!` を残す別の正規化が要る。
                         # (c) **パイプの中は門番（`!set_forked`）が先に外す**ので、
                         #     `set -o pipefail` ＋ `false | cat` は拾えない（真値 NOGATE）。
