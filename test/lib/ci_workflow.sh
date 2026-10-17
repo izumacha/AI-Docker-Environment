@@ -1856,17 +1856,29 @@ ci_workflow_extract() {
         # できるか」（`uncertain` を立てるか）。ここは「この階層へ制御が入ったとき、
         # 中の記録は必ず走るか」だけを見る——`||` の右辺の複合が「いつでも失敗する」と
         # 言えるかの判定（`scope_surely_runs()`）が唯一の読み手。
-        # **読めるのは 2 つだけ**: (a) 条件がリテラルで真（`if true` / `while :`）、
-        # (b) **リテラルの語だけを回る `for`**（1 周以上まわる）。
-        # (b) で綴りを絞るのは、展開・glob・ブレース展開が入ると**空になりうる**ため
+        # **読めるのは 3 つだけ**: (a) 条件がリテラルで真（`if true` / `while :`）、
+        # (b) **リテラルで偽の `until`**（`until false` は回り続ける）、
+        # (c) **リテラルの語だけを回る `for`**（1 周以上まわる）。
+        # (c) で綴りを絞るのは、展開・glob・ブレース展開が入ると**空になりうる**ため
         # （`for f in $LIST` は実測で真値 NOGATE＝本体が 1 度も走らない）。
         # **`case` は読まない**——アームが当たるかは模様の照合で、`case x in x)` のように
         # 当たると分かる形でも照合を実装することになる（issue #147 の境界）。
-        function head_body_surely_runs(probe) {
-            # 条件がリテラルで真（`open_form()` の枝 1 と同じ綴り。写しではなく同じ問いの別面）
-            if (probe ~ /^(if|while)[[:space:]]+(true|:)([[:space:]]|;|$)/) { return 1 }
-            # リテラルの語だけを回る `for`（`$` / 逆引用符 / glob / ブレースを含む形は読まない）
-            if (probe ~ /^for[[:space:]]+[A-Za-z_][A-Za-z_0-9]*[[:space:]]+in[[:space:]]+[A-Za-z0-9_.:\/=+,@%^-]+([[:space:]]+[A-Za-z0-9_.:\/=+,@%^-]+)*[[:space:]]*$/) { return 1 }
+        function head_body_surely_runs(t,   probe) {
+            # **飾り（`time` / `!`）を先に剥がす**（`open_form()` と同じ剥がし方。
+            # 剥がさないと `time if true; then` が分類では枝 1 なのにここでは読めず、
+            # 同じ見出しの答えが 2 か所で食い違う＝レビュー 1 巡目の指摘）
+            probe = strip_struct_wrappers(t)
+            # **条件がリテラルで真**（`if true` / `while :`）。**後ろに何も続かないことまで求める**
+            # ——`open_form()` の枝 1 の綴りは `([[:space:]]|;|$)` で終わるので
+            # `if true >/nonexistent/x` も分類では枝 1 だが、**条件はリダイレクトで失敗する**ので
+            # 本体は 1 度も走らない（実測で真値 NOGATE。緩い綴りを写すと fail-open＝レビュー 1 巡目）。
+            # ここは「入れば必ず走るか」だけを答えるので、断片がちょうど見出しであることを要求する
+            if (probe ~ /^(if|while)[[:space:]]+(true|:)[[:space:]]*;?[[:space:]]*$/) { return 1 }
+            # **条件がリテラルで偽の `until`** も本体が必ず走る（`until false` は回り続ける）
+            if (probe ~ /^until[[:space:]]+false[[:space:]]*;?[[:space:]]*$/) { return 1 }
+            # リテラルの語だけを回る `for`（`$` / 逆引用符 / glob / ブレースを含む形は
+            # **空になりうる**ので読まない。`for f in $LIST` は実測で真値 NOGATE）
+            if (probe ~ /^for[[:space:]]+[A-Za-z_][A-Za-z_0-9]*[[:space:]]+in[[:space:]]+[A-Za-z0-9_.:\/=+,@%^-]+([[:space:]]+[A-Za-z0-9_.:\/=+,@%^-]+)*[[:space:]]*;?[[:space:]]*$/) { return 1 }
             return 0
         }
         function open_form(t, cached_fn_form, use_cached,   ff, probe) {
@@ -3286,7 +3298,8 @@ ci_workflow_extract() {
                             # 本体は条件や一覧が空なら 1 度も走らないので、`|| if [ -n "$DEBUG" ]; then`
                             # 改行 `false` 改行 `fi` の複合は**成功して抜けうる**——実 `bash -e` は
                             # NOGATE なのに「並びはいつでも失敗する」と読んで配線済みを返していた
-                            # （6 形で実測）。門番は兄弟の `scope_fatal` が持つものと同じ `rec_unc` で、
+                            # （6 形で実測）。門番は `scope_surely_runs()`（issue #209 で
+                            # `rec_unc` から置き換えた。理由は同関数の説明）で、
                             # **`return 0` ではなく下の枝へ落とす**——本体が読めなくても手前に
                             # 「走ると証明できる」致命的な記録があれば複合はそこで死ぬので
                             # （実測: `|| ( false; if [ -n "$D" ]; then true; fi )` は GATES）
@@ -6053,7 +6066,16 @@ ci_workflow_extract() {
                             # 走るとは限らない本体が「最上位で確実に走る」に化ける（fail-open。実測）
                             if (open_kind == 1 && !chain_in && !inverted && ops[j] != "&&" && ops[j] != "||") {
                                 depth++; true_at[depth] = 1
-                                open_scope(depth); scope_sure[scope_at[depth]] = 1
+                                open_scope(depth)
+                                # **「入れば必ず走る」の印はこの枝でも述語で絞る**（issue #209 の
+                                # レビュー 1 巡目）。分類（`open_form()`）の綴りは後ろに何が続いても
+                                # 枝 1 になるので、`if true >/nonexistent/x` や `if true | grep -q x`
+                                # のように**条件が失敗する／続いている**形まで「必ず走る」と読んで
+                                # しまう（真値 NOGATE＝fail-open）。区切りは**並びを終える形だけ**
+                                # を認める（`;` と末尾。`|` / `&` は条件が続いている）
+                                if ((ops[j] == "" || ops[j] == ";") && head_body_surely_runs(open_probe)) {
+                                    scope_sure[scope_at[depth]] = 1
+                                }
                                 # **`while true` はループで、`if true` は違う**（issue #204）。
                                 # `break` / `continue` はループの中でしか意味を持たないので、この印を
                                 # 脱出のアームが読んで「区間を終わらせるか」を決める
@@ -6073,9 +6095,18 @@ ci_workflow_extract() {
                                 # 必ず走るが、`split_commands` が `&&` で切るので「最上位で確実に走る」
                                 # とは言えない、(iii) `!` で反転（走るが証拠にしない。issue #155）。
                                 # `scope_sure` が要るのは (ii) で、(i) と分けるには見出しを読む
-                                if (!inverted && ops[j] != "&&" && ops[j] != "||" \
+                                if (!inverted && (ops[j] == "" || ops[j] == ";") \
                                     && head_body_surely_runs(open_probe)) {
                                     scope_sure[scope_at[depth]] = 1
+                                    # **`true_at` も立てる**（レビュー 1 巡目。**この差分が入れた
+                                    # fail-open**）。残りのアームを死に体にする判定（`if true` の
+                                    # `else` / `elif` は 1 度も走らない）はこの印を読むので、
+                                    # `scope_sure` だけを立てると `|| if true; then true; else false; fi`
+                                    # の `else` 側の失敗を「複合はいつでも失敗する」と読む
+                                    # （真値 NOGATE・`main` は正しく未配線）。
+                                    # ここは述語が通った＝条件がリテラルで真と読めた枝なので、
+                                    # 分類が枝 1 を選べなかった理由（連鎖の中）とは独立に成り立つ
+                                    true_at[depth] = 1
                                 }
                                 # **`case` の入れ子はここで数える。** 断片の先頭とは限らない
                                 # （`f() { case x in` のように本体の中で開くことがある）
@@ -6163,6 +6194,9 @@ ci_workflow_extract() {
                         if (paren > 0) {
                             for (closing = 0; closing < paren; closing++) {
                                 depth++
+                                # **部分シェルは到達すれば必ず走る**（issue #209 の `scope_sure`。
+                                # こちらは釣り合いの正側＝`echo x | { (` のような開きなので、
+                                # 見出しの `!` 反転は掛からない）
                                 open_scope(depth); scope_sure[scope_at[depth]] = 1
                                 subshell_at[depth] = 1; subshell++; sub_serial++; sub_id[depth] = sub_serial
                             }

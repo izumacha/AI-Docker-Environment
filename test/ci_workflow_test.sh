@@ -8592,8 +8592,8 @@ done
 # **本体が必ず走ると読める制御構造は、並びがいつでも失敗すると読める**（issue #209 で
 # 反転したピン。真値はどちらも GATES で、以前は「走ると証明する手段が無い」ので
 # 握り潰し側＝未配線に倒れていた＝正しくゲートしている綴りを赤くする fail-closed）。
-# 読めるのは `head_body_surely_runs()` の 2 つ（条件がリテラルで真・リテラルの語だけを
-# 回る `for`）だけで、**`case` のアームは引き続き読まない**（下の境界のピンを参照）
+# 読めるのは `head_body_surely_runs()` の 3 つ（条件がリテラルで真・`until false`・
+# リテラルの語だけを回る `for`）だけで、**`case` のアームは引き続き読まない**（下の境界のピンを参照）
 for ctrl_or_boundary_case in \
     "リテラルの一覧を回る for の本体が失敗する:for f in a b; do
           false
@@ -8650,9 +8650,14 @@ jobs:
           echo tail"
 done
 
-# **残る境界（真値 GATES なので fail-closed・`main` と同じ側）**: `case` のアームが
-# 当たるかは模様の照合なので読まない（issue #147）。リテラルで必ず当たる綴りでも
-# 「必ず走る」と言えず、握り潰し側＝未配線へ倒れる
+# **残る境界（真値 GATES なので fail-closed）**: `case` のアームが当たるかは模様の照合
+# なので読まない（issue #147）。リテラルで必ず当たる綴りでも「必ず走る」と言えず、
+# 握り潰し側＝未配線へ倒れる。
+# **包んだ 2 形は `main` では wired だった**（レビュー 1 巡目の指摘で訂正。あちらは
+# 包んだ経路で「その階層が走るか」を一切見ていなかったので偶然正しかった）＝
+# **この差分が受け入れた交換**で、向きは安全側（正しくゲートしている綴りを赤くする）。
+# 同じ交換は条件が読めない `while` / `if … else`・glob の一覧の `for` にもあり、
+# まとめて `docs/requirements.md` の該当行に記録してある
 for case_arm_boundary_case in \
     "包まない case:case x in x)
           false
@@ -8684,6 +8689,22 @@ for head_unreadable_case in \
     "部分シェルの中の連鎖で続く条件:( if true && [ -n \"\$SKIP\" ]; then
           false
           fi )" \
+    "パイプで続く条件:if true | grep -q nope; then
+          false
+          fi" \
+    "リダイレクトで失敗する条件:if true >/nonexistent/x; then
+          false
+          fi" \
+    "リテラルで真の条件の else アーム:if true; then
+          true
+          else
+          false
+          fi" \
+    "リテラルで真の条件の elif アーム:if true; then
+          true
+          elif [ -n \"\$D\" ]; then
+          false
+          fi" \
     "glob の一覧を回る for:( for f in *.nope; do
           false
           done )"
@@ -8698,15 +8719,22 @@ jobs:
           bash ${SUITE_PATH} || ${head_unreadable_case#*:}"
 done
 
-# **`while true` の本体とリテラル 1 語の `for` も読める**（issue #209。
-# `head_body_surely_runs()` が見る 2 つの形の残り。真値はどちらも GATES）
+# **`while true` の本体・リテラル 1 語の `for`・`until false` の本体も読める**（issue #209。
+# `head_body_surely_runs()` が見る 3 つの形の残りと、飾り（`time`）を剥がす経路。
+# 真値はいずれも GATES）
 for head_readable_case in \
     "while true の本体:( while true; do
           false
           done )" \
     "リテラル 1 語の for:( for f in only; do
           false
-          done )"
+          done )" \
+    "リテラルで偽の until の本体:( until false; do
+          false
+          done )" \
+    "飾りを付けた見出し:( time if true; then
+          false
+          fi )"
 do
     assert_wired "読める見出しは必ず走ると読む（${head_readable_case%%:*}）" "name: ci
 jobs:
