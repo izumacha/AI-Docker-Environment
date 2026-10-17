@@ -8589,9 +8589,11 @@ jobs:
           bash ${SUITE_PATH} && ${inner_chain_case#*:}"
 done
 
-# **残る境界（記録。真値 GATES なので fail-closed・`main` と同じ答え）**: 本体が必ず走る
-# 制御構造でも、走ると証明する手段が無いので握り潰し側へ倒れる。上の fail-open を閉じる
-# 代償で、6 巡目が同じ理由で受け入れた 4 形と同種（直すときはこのピンを意図して反転させる）
+# **本体が必ず走ると読める制御構造は、並びがいつでも失敗すると読める**（issue #209 で
+# 反転したピン。真値はどちらも GATES で、以前は「走ると証明する手段が無い」ので
+# 握り潰し側＝未配線に倒れていた＝正しくゲートしている綴りを赤くする fail-closed）。
+# 読めるのは `head_body_surely_runs()` の 2 つ（条件がリテラルで真・リテラルの語だけを
+# 回る `for`）だけで、**`case` のアームは引き続き読まない**（下の境界のピンを参照）
 for ctrl_or_boundary_case in \
     "リテラルの一覧を回る for の本体が失敗する:for f in a b; do
           false
@@ -8600,7 +8602,7 @@ for ctrl_or_boundary_case in \
           false
           fi"
 do
-    assert_not_wired "残る境界: 本体が必ず走る制御構造も握り潰し側（${ctrl_or_boundary_case%%:*}）" "name: ci
+    assert_wired "必ず走る制御構造の本体が失敗すれば並びは失敗する（${ctrl_or_boundary_case%%:*}）" "name: ci
 jobs:
   type-check:
     runs-on: ubuntu-latest
@@ -8608,6 +8610,112 @@ jobs:
       - name: subject
         run: |
           bash ${SUITE_PATH} || ${ctrl_or_boundary_case#*:}"
+done
+
+# **`||` の右辺の複合が「いつでも失敗する」と言えるのは、最後に走った記録が
+# **必ず走る階層**にあるときだけ**（issue #209。`main` 既存の fail-open 28 形）。
+# 呼ばれていない関数の本体・条件が読めない `if` の本体・空になりうる `for` の本体は
+# 1 度も走らないので、複合は**成功して抜けうる**＝実 `bash -e` は失敗を握り潰す
+# （真値はすべて NOGATE。`rec_unc` では「包みの中の必ず走る制御構造」と区別できず、
+# 一律に掛けると上のピンの 20 形が退行するため、階層ごとの印をたどる）
+for scope_unsure_case in \
+    "部分シェルで包んだ読めない条件:( if [ -n \"\$D\" ]; then
+          false
+          fi )" \
+    "グループで包んだ読めない条件:{ if [ -n \"\$D\" ]; then
+          false
+          fi ; }" \
+    "部分シェルで包んだ展開の一覧の for:( for f in \$LIST; do
+          false
+          done )" \
+    "包まない関数定義:f() {
+          false
+          }" \
+    "部分シェルで包んだ関数定義:( f() {
+          false
+          }
+          )" \
+    "読めない条件の本体が exit:( if [ -n \"\$D\" ]; then
+          exit 1
+          fi )"
+do
+    assert_not_wired "1 度も走らない階層の記録は複合を落とさない（${scope_unsure_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || ${scope_unsure_case#*:}
+          echo tail"
+done
+
+# **残る境界（真値 GATES なので fail-closed・`main` と同じ側）**: `case` のアームが
+# 当たるかは模様の照合なので読まない（issue #147）。リテラルで必ず当たる綴りでも
+# 「必ず走る」と言えず、握り潰し側＝未配線へ倒れる
+for case_arm_boundary_case in \
+    "包まない case:case x in x)
+          false
+          ;; esac" \
+    "部分シェルで包んだ case:( case x in x)
+          false
+          ;; esac )"
+do
+    assert_not_wired "残る境界: case のアームは読まない（${case_arm_boundary_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || ${case_arm_boundary_case#*:}"
+done
+
+# **見出しが読めるのは「後ろの区切りが並びを終える」ときだけ**（issue #209）。
+# `split_commands` は `&&` / `||` で切るので `if true && [ -n "$SKIP" ]; then` の断片は
+# `if true` になる——条件が続いているのに「必ず走る」と読むと、2 トークン足すだけで
+# 走らない本体を当てにする（真値 NOGATE。実測で `[ -n "$SKIP" ]` は偽なので本体は 1 度も走らない）。
+# **glob / 展開を含む `for` の一覧も読まない**（`*.nope` は nullglob 次第で 0 周になりうる。
+# 真値は GATES なので**この 1 形は fail-closed**＝安全側の境界）
+for head_unreadable_case in \
+    "連鎖で続く条件:if true && [ -n \"\$SKIP\" ]; then
+          false
+          fi" \
+    "部分シェルの中の連鎖で続く条件:( if true && [ -n \"\$SKIP\" ]; then
+          false
+          fi )" \
+    "glob の一覧を回る for:( for f in *.nope; do
+          false
+          done )"
+do
+    assert_not_wired "読めない見出しは必ず走るとは読まない（${head_unreadable_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || ${head_unreadable_case#*:}"
+done
+
+# **`while true` の本体とリテラル 1 語の `for` も読める**（issue #209。
+# `head_body_surely_runs()` が見る 2 つの形の残り。真値はどちらも GATES）
+for head_readable_case in \
+    "while true の本体:( while true; do
+          false
+          done )" \
+    "リテラル 1 語の for:( for f in only; do
+          false
+          done )"
+do
+    assert_wired "読める見出しは必ず走ると読む（${head_readable_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          bash ${SUITE_PATH} || ${head_readable_case#*:}"
 done
 
 # **閉じ括弧が空白で隔てられていても右辺を読む**（レビュー 6 巡目の指摘。`main` も持つ
