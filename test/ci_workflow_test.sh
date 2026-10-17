@@ -7988,6 +7988,120 @@ jobs:
           ( bash ${SUITE_PATH} || exit 1 ) || true
           echo done"
 
+# **複合の閉じに `&&` / `||` が付くと中の errexit は複合まるごと免除されるので、
+# 追っている失敗はその場では落ちず次の記録へ進む。その次が「直前の状態を持ち出す
+# 脱出」なら、その失敗がそのまま終了状態になる**（issue #207。真値はすべて GATES で、
+# `main` は未配線＝**正しくゲートしている綴りを赤くする** fail-closed）。
+# 素のグループの `exit` は呼び出し元のシェルごと終えるので**後ろに行があっても**
+# 位置は効かない。部分シェルの `exit` はその部分シェルだけを終えるので、
+# 「複合が非 0 で失敗した」として外へ出る＝**並びが最後のときだけ**ステップの状態になる
+for exit_carries_case in \
+    "素のグループと引数なしの exit:{ bash ${SUITE_PATH}
+          exit
+          } && echo ok" \
+    "素のグループと exit \$? の後ろに行:{ bash ${SUITE_PATH}
+          exit \$?
+          } && echo ok
+          echo z" \
+    "引用した exit \"\$?\" と || の閉じ:{ bash ${SUITE_PATH}
+          exit \"\$?\"
+          } || echo ok" \
+    "波括弧の exit \${?}:{ bash ${SUITE_PATH}
+          exit \${?}
+          } && echo ok" \
+    "部分シェルで並びが最後:( bash ${SUITE_PATH}
+          exit \$?
+          ) && echo ok" \
+    "set +e の下の最上位の exit \$?:set +e
+          bash ${SUITE_PATH}
+          exit \$?
+          echo z"
+do
+    assert_wired "直後の脱出が追っている失敗を運ぶ（${exit_carries_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${exit_carries_case#*:}"
+done
+
+# 締めすぎない側（真値はすべて NOGATE か ALWAYSFAIL で、**どれも未配線が正しい**）。
+# **`$?` はコマンドが 1 つ走れば書き換わる**ので、あいだに 1 行挟んだ綴りは主張しない。
+# **読めない引数（変数）は 0 にもなりうる**（実測: `rc=0` のとき真値は NOGATE）。
+# **固定の数値リテラルはスイートの失敗を運ばない** —— `exit 1` はスイートが通っても
+# 非 0 で抜けるのでステップがいつでも赤く（真値オラクルの分類は ALWAYSFAIL）、
+# `exit 0` はいつでも緑。**`return` はシェルを終えない**（関数の外では誤りになる）。
+# **部分シェルは後ろに行があれば握り潰され**、パイプの左側は子シェルで終わる。
+# **脱出自身がパイプの要素・背後の実行なら、それも子シェルで死ぬ**（レビュー 1 巡目で
+# 見つかった、この差分が入れた fail-open。判定は `||` の歩きと共有する
+# `exit_in_caller_shell()` が持つ）。
+# **入れ子の包みに入れた脱出は数えない**（最後の 2 形）——包み自身がパイプの要素・
+# 背後の実行なら子シェルで死ぬのに、閉じを含む記録の区切りは `rec_opx` に残らないので
+# 見分けられない。だから「同じ階層の記録だけを見る」門番を置いており、その代償として
+# `{ exit $? ; }` を素のまま置いた形は未配線のまま（真値 GATES＝fail-closed。`main` も
+# 同じ側で、入れ子を読むには別の歩きが要る＝issue #244）
+for exit_carries_control_case in \
+    "あいだに 1 行挟む:{ bash ${SUITE_PATH}
+          echo a
+          exit \$?
+          } && echo ok" \
+    "変数へ写した引数:rc=0
+          { bash ${SUITE_PATH}
+          exit \$rc
+          } && echo ok" \
+    "固定の非ゼロのリテラル:{ bash ${SUITE_PATH}
+          exit 1
+          } && echo ok" \
+    "成功で抜けるリテラル:{ bash ${SUITE_PATH}
+          exit 0
+          } && echo ok" \
+    "関数の外の return:{ bash ${SUITE_PATH}
+          return \$?
+          } && echo ok" \
+    "走るか分からない枝の中の脱出:{ bash ${SUITE_PATH}
+          if [ -n \"\$X\" ]; then exit \$?; fi
+          } && echo ok" \
+    "部分シェルで後ろに行がある:( bash ${SUITE_PATH}
+          exit \$?
+          ) && echo ok
+          echo z" \
+    "部分シェルを || で受ける:( bash ${SUITE_PATH}
+          exit \$?
+          ) || echo ok" \
+    "パイプの左側で終わる:{ bash ${SUITE_PATH}
+          exit \$?
+          } | cat" \
+    "脱出自身がパイプの要素:{ bash ${SUITE_PATH}
+          exit \$? | cat
+          echo z
+          } && echo ok" \
+    "脱出自身が背後の実行:{ bash ${SUITE_PATH}
+          exit \$? &
+          echo z
+          } && echo ok" \
+    "脱出自身がパイプの要素で後ろの行なし:{ bash ${SUITE_PATH}
+          exit \$? | cat
+          } && echo ok" \
+    "入れ子の包みがパイプの要素:{ bash ${SUITE_PATH}
+          { exit \$? ; } | cat
+          } && echo ok" \
+    "入れ子の包みが背後の実行:{ bash ${SUITE_PATH}
+          { exit \$? ; } &
+          echo z
+          } && echo ok"
+do
+    assert_not_wired "運べない脱出は握り潰し側（${exit_carries_control_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${exit_carries_control_case#*:}"
+done
+
 # **`!` で反転した右辺は errexit を発動させない**（レビュー 4 巡目。この PR が入れた fail-open）。
 # 並びはいつでも失敗するが**その場では落ちない**ので、後ろに行があればその行の状態で
 # ステップが終わる（実測で NOGATE。反転を見ないと「1 件も走らないスイートがゲートして
