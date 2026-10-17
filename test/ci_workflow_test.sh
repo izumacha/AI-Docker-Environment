@@ -8033,7 +8033,15 @@ done
 # **固定の数値リテラルはスイートの失敗を運ばない** —— `exit 1` はスイートが通っても
 # 非 0 で抜けるのでステップがいつでも赤く（真値オラクルの分類は ALWAYSFAIL）、
 # `exit 0` はいつでも緑。**`return` はシェルを終えない**（関数の外では誤りになる）。
-# **部分シェルは後ろに行があれば握り潰され**、パイプの左側は子シェルで終わる
+# **部分シェルは後ろに行があれば握り潰され**、パイプの左側は子シェルで終わる。
+# **脱出自身がパイプの要素・背後の実行なら、それも子シェルで死ぬ**（レビュー 1 巡目で
+# 見つかった、この差分が入れた fail-open。判定は `||` の歩きと共有する
+# `exit_in_caller_shell()` が持つ）。
+# **入れ子の包みに入れた脱出は数えない**（最後の 2 形）——包み自身がパイプの要素・
+# 背後の実行なら子シェルで死ぬのに、閉じを含む記録の区切りは `rec_opx` に残らないので
+# 見分けられない。だから「同じ階層の記録だけを見る」門番を置いており、その代償として
+# `{ exit $? ; }` を素のまま置いた形は未配線のまま（真値 GATES＝fail-closed。`main` も
+# 同じ側で、入れ子を読むには別の歩きが要る＝issue #244）
 for exit_carries_control_case in \
     "あいだに 1 行挟む:{ bash ${SUITE_PATH}
           echo a
@@ -8064,7 +8072,25 @@ for exit_carries_control_case in \
           ) || echo ok" \
     "パイプの左側で終わる:{ bash ${SUITE_PATH}
           exit \$?
-          } | cat"
+          } | cat" \
+    "脱出自身がパイプの要素:{ bash ${SUITE_PATH}
+          exit \$? | cat
+          echo z
+          } && echo ok" \
+    "脱出自身が背後の実行:{ bash ${SUITE_PATH}
+          exit \$? &
+          echo z
+          } && echo ok" \
+    "脱出自身がパイプの要素で後ろの行なし:{ bash ${SUITE_PATH}
+          exit \$? | cat
+          } && echo ok" \
+    "入れ子の包みがパイプの要素:{ bash ${SUITE_PATH}
+          { exit \$? ; } | cat
+          } && echo ok" \
+    "入れ子の包みが背後の実行:{ bash ${SUITE_PATH}
+          { exit \$? ; } &
+          echo z
+          } && echo ok"
 do
     assert_not_wired "運べない脱出は握り潰し側（${exit_carries_control_case%%:*}）" "name: ci
 jobs:
