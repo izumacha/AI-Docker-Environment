@@ -290,7 +290,11 @@ CI_WORKFLOW_NODE_PROPERTY="((&${CI_WORKFLOW_ANCHOR_NAME}+|${CI_WORKFLOW_VERBATIM
 CI_WORKFLOW_NODE_PROPERTY_BLOCK="((&${CI_WORKFLOW_ANCHOR_NAME}+|${CI_WORKFLOW_VERBATIM_TAG}|!${CI_WORKFLOW_TAG_NAME}*)[[:space:]]+)*"
 
 # 抽出した「実行されるコマンド」を保持するファイル。1 行が
-# `<ジョブ名>#<ステップ番号><TAB><ゲートに効くか(1/0)><TAB><コマンドの断片>`
+# `<ジョブ名>#<ステップ番号><TAB><ゲートに効くか(1/0)><TAB><制御構造の深さ>`
+# `<TAB><本文: 走るかを問う用><TAB><本文: 綴りを引く用>`。
+# **本文が 2 列あるのは照会ごとに要るものが逆を向くため**で、理由は
+# `mask_arith_spans` の呼び出し側のコメントが正本（算術展開の中身を、
+# 走るかの照会では見てはいけず、綴りの照会では見なければいけない）
 CI_WORKFLOW_COMMANDS=""
 
 # 文字列を拡張正規表現のリテラルとして扱えるようにエスケープする
@@ -1087,11 +1091,20 @@ ci_workflow_extract() {
                 # （`split_commands()` が算術コマンドを潰すかの判断に使う。下記）。
                 # **見るのは構造行だけ**——`run: |` の本文に書いた `shell:` を宣言と
                 # 読み違えないため（表は `ci_workflow_run_with_structure` が用意する）
-                if (preno in structural && preline ~ /shell[[:space:]]*:/) {
-                    # 鍵として読める形（行頭・`- ` 付きのどちらも）なら値を見る。
-                    # それ以外（フロー形式 `{shell: sh}` など）は読めないので
-                    # **bash 以外が居るもの**として扱う（潰さない側＝`main` と同じ側）
-                    if (preline ~ /^[[:space:]]*-?[[:space:]]*shell:[[:space:]]*[^[:space:]]/) {
+                # **当てるのは鍵の位置**（行頭、または `- ` の直後）。行のどこかに
+                # `shell:` という綴りがあれば拾う形にしていたところ、構造行では引用符が
+                # 落ちるので `- name: prepare shell: wrappers` のような**無関係な値**が
+                # 当たってファイル全体の伏せ字が止まり、#206 の fail-open がそのまま
+                # 戻っていた（レビュー 9 巡目が実測）。倒れる向きは `main` と同じなので
+                # 退行ではないが、ステップ名を 1 つ変えるだけで手当てが消えるのは脆すぎる。
+                # **`with:` の入力として書かれた `shell:` は依然拾う**（前走査は桁から
+                # ステップの鍵かを判定しないため）——そちらは「bash 以外の宣言がある」側
+                # ＝ fail-open へ倒れるだけなので、覆う範囲が狭まるのを受け入れる
+                if (preno in structural && preline ~ /^[[:space:]]*-?[[:space:]]*shell[[:space:]]*:/) {
+                    # 鍵として読める形なら値を見る。それ以外（コロンの手前に空白がある
+                    # 形・値が次の行にある形）は読めないので**bash 以外が居るもの**として
+                    # 扱う（潰さない側＝`main` と同じ側）
+                    if (is_shell_key(preline)) {
                         if (read_shell_value(preline) != "bash") { non_bash_shell = 1 }
                     } else {
                         # **読めなかったことを別の旗で覚える。** 読めない綴り
@@ -1243,6 +1256,14 @@ ci_workflow_extract() {
         # 見た目だけの整形で「どこからも呼ばれていない」と事実と逆の診断が出る
         # （`is_disabling` が同じ理由で引用符を正規化しているのと揃える）。
         # 2 か所（ステップの `shell:` と `defaults:` の `shell:`）から呼ぶのでここに置く（§6 DRY）
+        # **行が `shell:` の鍵として読めるか。** 前走査（bash 以外のシェルの点検）と
+        # ステップ／ジョブ既定の読み取りが**同じ綴りを受け付ける**ことが `unreadable_shell`
+        # の前提で、写しを持つと片方だけが緩んだ瞬間にレビュー 8 巡目の fail-closed が戻る
+        # （前走査が読めたシェルをステップ側が読まない、またはその逆）。§6 DRY
+        function is_shell_key(t) {
+            return (t ~ /^[[:space:]]*-?[[:space:]]*shell:[[:space:]]*[^[:space:]]/)
+        }
+
         function read_shell_value(t,   value) {
             value = t
             sub(/^[[:space:]]*-?[[:space:]]*shell:[[:space:]]*/, "", value)
@@ -1429,11 +1450,13 @@ ci_workflow_extract() {
                 # `"sep"` と `"sep-bash"` はどちらも区切りの走査。違いは算術
                 # コマンドを潰すかだけで、`"sep-bash"` は**ワークフローが `shell:` を
                 # 1 つも書いていないとき**＝全ステップが GitHub の既定（bash）のときに使う
-                # **算術展開（`$((`）は区切りの走査のときだけ潰す。**
-                # 照合へ出す本文では中身が走るコマンドの一部なので触らず、
+                # **算術展開（`$((`）を潰すのは区切りの走査と「走るか」の照会のとき。**
+                # 綴りを引く照会（`"match"`）では中身が走るコマンドの一部——より正確には
+                # 「実行はされないが、リンタの網が引きたい綴りがそこにある」（`ci.yml` 自身の
+                # `$(( 0x$capbnd & (1 << 21) ))` がその例）——なので触らず、
                 # **対応する閉じの先まで飛ばす**（2 桁だけ進めると展開の中に
                 # 入れ子で書いた `((` を別の算術として潰してしまう。実測）
-                if (prev == "$" && purpose !~ /^sep/) { i = j + 1; continue }
+                if (prev == "$" && purpose !~ /^(sep|run)/) { i = j + 1; continue }
                 # **算術コマンド（`((`）は照合へ出す本文のときだけ潰す。**
                 # 区切りの走査では潰さない——あれは bash 固有で、`sh` では入れ子の
                 # 部分シェルになり中のコマンドが実際に走る（docstring の `"sep"` の項）。
@@ -6037,7 +6060,7 @@ ci_workflow_extract() {
         # ステップ番号にジョブ名を冠するのは、呼び出し側が「どのジョブが実行するか」まで
         # 問えるようにするため（env は同じジョブからしか見えないので、ジョブを跨いだ
         # 分割は「配線されている」と答えてはいけない）
-        function flush_job(   i, parts, shell_name, gate, sc, preceded_here) {
+        function flush_job(   i, parts, shell_name, gate, sc, preceded_here, maskable) {
             # 未確定のステップをジョブの控えへ移してから判断する
             flush_step()
             # **env の記録は無効化に関わらず出す。** これは「何が実行されるか」ではなく
@@ -6207,15 +6230,26 @@ ci_workflow_extract() {
                     # 伏せると `sh` のステップで**実際に走るスイートを消して未配線と答える**
                     # （fail-closed。レビュー 5 巡目が 82 形中 11 形で実測）。
                     # **`rec_shell[i]` を読む**（`shell_name` ではない）。ここは 1 巡目とは
-                    # 別のループで、局所変数には最後の記録のシェルが残っている
+                    # 別のループで、局所変数には最後の記録のシェルが残っている。
+                    # 伏せてよいかの判断は 2 列で共通なので 1 度だけ求める
+                    maskable = (unreadable_shell == 0 && (rec_shell[i] == "" || rec_shell[i] == "bash"))
                     # **`trim()` は掛けない。** 記録の本文は `split_commands()` が
                     # `trim(seg[j])` ＋ タブ→空白で正規化した綴りで、算術の伏せ字は
                     # `((` と `))` を必ず残すので前後に空白は生まれない（`main` も掛けて
                     # いない）。掛けると「本文は未正規化で届くことがある」と読めてしまい、
                     # 次の読み手が存在しない正規化を探すことになる（§6）
+                    # **本文は 2 列で出す。** 同じ綴りに対して照会が 2 種類あり、
+                    # 要るものが逆を向く（レビュー 9 巡目が実測）:
+                    # 「このスイートは走るか」は**算術展開の中を見てはいけない**
+                    # （`x=$(( bash <スイート> || true ))` は算術式として評価され
+                    # 1 行も走らないのに、見ると配線と答える＝真値 NOGATE を wired。
+                    # `main` は区切りで割れて正しく答えていたので退行だった）。
+                    # 「この綴りはあるか」は**見なければいけない**（`capbnd`）。
+                    # 1 列で両方を満たす伏せ方は無いので、照会ごとに列を選ぶ
+                    # （`ci_workflow_gating_commands` の第 3 引数）
                     print jobname "#" parts[1] "\t" gate "\t" parts[5] "\t" \
-                        ((unreadable_shell == 0 && (rec_shell[i] == "" || rec_shell[i] == "bash")) \
-                            ? mask_arith_spans(parts[6], "match") : parts[6])
+                        ((maskable) ? mask_arith_spans(parts[6], "run") : parts[6]) "\t" \
+                        ((maskable) ? mask_arith_spans(parts[6], "match") : parts[6])
                 }
             }
             # 次のジョブに備えて控えと状態を捨てる
@@ -6541,7 +6575,7 @@ ci_workflow_extract() {
             # 自分で書くと `-e` が消える**——ループの途中の失敗が握り潰され、最後の 1 回の結果だけが
             # ステップの成否になる。1 行足すだけでリンタがゲートでなくなる形なので、
             # 確かめられない綴りは「合否に効かない」側へ倒す（fail-closed）
-            if (probe ~ /^[[:space:]]*-?[[:space:]]*shell:[[:space:]]*[^[:space:]]/) {
+            if (is_shell_key(probe)) {
                 shells[step_id] = read_shell_value(probe)
                 next
             }
@@ -6638,7 +6672,7 @@ ci_workflow_load() {
 }
 
 # **合否に効くコマンドだけ**を `<ジョブ名>#<ステップ番号><TAB><コマンド>` の形で書き出す。
-# 第 1 引数はジョブ名の絞り込み（空文字列なら全ジョブ）。
+# 第 1 引数はジョブ名の絞り込み（空文字列なら全ジョブ）、第 3 引数で本文の列を選ぶ。
 #
 # ここを 1 か所に持つ理由は、照会が 3 つ（コマンド単位・ステップ単位・スクリプトの実行）あり、
 # **「ゲートに効くか」の判定を写すと片方だけが古くなる**ため。実際、`|| true` を弾く判定は
@@ -6652,16 +6686,28 @@ ci_workflow_gating_commands() {
     # 条件や呼び出し元を読まないと決まらないため。一方でリンタの形を見る照会は
     # `for … do bash -n "$f"` のようにループの**中**を見たいので、除かない
     local top_only="${2-}"
-    # 走査中の 1 行・`ジョブ名#ステップ番号`・ゲートに効くかの印・制御構造の深さ・コマンド本文
-    local record key gate depth text
+    # 第 3 引数に `match` を渡すと、**綴りを引くための本文**（算術展開の中身を残した列）を返す。
+    # 既定は**走るかを問うための本文**（算術展開の中身も伏せた列）。
+    # 同じ記録に対して照会が 2 種類あり、要るものが逆を向くため列を選ばせる
+    # （理由は `mask_arith_spans` の呼び出し側のコメントが正本）
+    local want_text="${3-}"
+    # 走査中の 1 行・`ジョブ名#ステップ番号`・ゲートに効くかの印・制御構造の深さ・
+    # 2 通りの本文（走るか用 / 綴り用）・呼び出し側へ返す本文
+    local record key gate depth run_text match_text text
     while IFS= read -r record; do
-        # 1 行を「キー」「ゲート印」「深さ」「本文」の 4 列に分ける
+        # 1 行を「キー」「ゲート印」「深さ」「走るか用の本文」「綴り用の本文」の 5 列に分ける
         key="${record%%$'\t'*}"
         record="${record#*$'\t'}"
         gate="${record%%$'\t'*}"
         record="${record#*$'\t'}"
         depth="${record%%$'\t'*}"
-        text="${record#*$'\t'}"
+        record="${record#*$'\t'}"
+        # 本文はタブを含まない（抽出時に空白へ置き換えている）ので、ここで割れる
+        run_text="${record%%$'\t'*}"
+        match_text="${record#*$'\t'}"
+        # 呼び出し側が求めた列を選ぶ（既定は走るか用）
+        text="${run_text}"
+        [ "${want_text}" != "match" ] || text="${match_text}"
         # 失敗が job に伝わらないコマンドは、実行の証拠として数えない
         [ "${gate}" = "1" ] || continue
         # 最上位だけを求められていれば、制御構造の中は除く
@@ -6769,7 +6815,9 @@ ci_workflow_command_matches() {
         done
         # すべて満たすコマンドが見つかれば成功
         [ "${matched_all}" -eq 1 ] && return 0
-    done < <(ci_workflow_gating_commands "${job_filter}")
+        # **綴りを引く照会なので `match` 列を読む**（算術展開の中身も走査対象。
+        # `ci.yml` 自身の `$(( 0x$capbnd & (1 << 21) ))` を「無い」と答えないため）
+    done < <(ci_workflow_gating_commands "${job_filter}" "" match)
     # 最後まで見つからなければ失敗
     return 1
 }
@@ -6796,7 +6844,8 @@ ci_workflow_step_matches() {
             # 一致したら「このステップでこのパターンが見つかった」と印を付ける
             [[ "${text}" =~ $pattern ]] && hits["${step}:${index}"]=1
         done
-    done < <(ci_workflow_gating_commands "${job_filter}")
+        # 上と同じ理由で `match` 列を読む（綴りがあるかの照会）
+    done < <(ci_workflow_gating_commands "${job_filter}" "" match)
 
     # すべてのパターンが揃ったステップが 1 つでもあるかを調べる
     # 何らかのパターンが当たったステップ番号の集合

@@ -5225,6 +5225,60 @@ jobs:
         run: |
           bash ${SUITE_PATH}\$(( 1 ))"
 
+# **「走るか」の照会では算術展開の中を見てはいけない**（issue #206 のレビュー 9 巡目が実測）。
+# 下の 3 つは真値 NOGATE——`x=$(( bash <スイート> || true ))` は算術**式**として評価されるので
+# `bash` も `<スイート>` も変数名（未設定＝0）として読まれ、**1 行も実行されない**。
+# `main` は `||` を区切りとして割っていたため正しく答えており、照合用の伏せ字を
+# 「走るか」の照会にも使った版では**配線されている**と答えた＝退行だった。
+# そこで記録の本文を 2 列に分け、照会ごとに列を選ぶ（綴りを引く照会は下の
+# `capbnd` / `nproc` の pin が逆向きを固定する）。囲いを 3 通り当てるのは、
+# 展開が制御構造の中にあるときだけ伏せ方が変わる形を塞ぐため
+for arith_expansion_wrapper in \
+    "素のまま:x=${DOLLAR}(( bash ${SUITE_PATH} || true ))" \
+    "if の中:if (( ${DOLLAR}(id -u) == 0 )); then x=${DOLLAR}(( bash ${SUITE_PATH} || true )); fi" \
+    "ループの中:for i in 1; do x=${DOLLAR}(( bash ${SUITE_PATH} || true )); done"; do
+    assert_not_wired "算術展開の中は実行されない（${arith_expansion_wrapper%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ${arith_expansion_wrapper#*:}"
+done
+
+# **鍵として読める綴りの集合は、前走査とステップの読み取りで必ず同じにする**
+# （`is_shell_key()` の 1 か所が持つ理由。レビュー 9 巡目が実測）。
+# `- shell: bash`（シェルをステップの最初の鍵に書く普通の形）を前走査が読めないと、
+# 「読めない宣言がある」側＝伏せ字を止める側へ倒れ、**明示的に bash と書いた
+# ステップでだけ** issue #206 の fail-open が生き残る（真値 NOGATE を wired）。
+# 判定を写した版（`-?` を落とした綴り）で実測した
+assert_not_wired "シェルを最初の鍵に書いた明示 bash でも伏せ字が効く" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - shell: bash
+        name: subject
+        run: |
+          (( bash ${SUITE_PATH} ))"
+
+# **`shell:` の点検は鍵の位置で当てる。** 構造行では引用符が落ちるので、行のどこかに
+# `shell:` という綴りがあれば拾う形にしていると**ステップ名の中の文字列**が当たり、
+# 「bash 以外のシェルが居る」と誤読してファイル全体の算術の伏せ字が止まる
+# （＝issue #206 の fail-open がそのまま戻る。レビュー 9 巡目が実測）。
+# 真値は NOGATE（`(( … ))` の中は算術式なのでスイートは走らない）
+assert_not_wired "ステップ名の中の shell: という綴りで伏せ字を止めない" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: \"prepare shell: wrappers\"
+        run: echo prepared
+      - name: subject
+        run: |
+          (( bash ${SUITE_PATH} ))"
+
 # 同じ取り違えは**逆向き**にも効く（この差分が入れかけた退行）。`! (( true ))` を「偽」と読むと
 # 右辺の `set +e` が「走らない」ことになり、握り潰されたスイートが「ゲートしている」と読まれる
 assert_not_wired "算術コマンドの反転で set +e を取り落とさない" "name: ci
@@ -8713,6 +8767,34 @@ jobs:
       - name: lint
         run: bash ${SUITE_PATH} --jobs ${DOLLAR}(( ${DOLLAR}(nproc) + 1 ))" \
     ci_workflow_command_matches "" 'nproc'
+
+# **算術コマンド（`(( … ))`）の中の綴りは「走るコマンド」ではないので照合に当てない。**
+# 記録の本文が 2 列になったあと（レビュー 9 巡目）、**この向きを見るピンが 1 つも無く**
+# なっていた——照合用の列で伏せるのをやめる変異が**全ピン緑のまま通った**（実測）。
+# 伏せないと `ci_coverage_test.sh` の「リンタが配線されているか」を
+# `(( shellcheck ))` の 1 行で満たせてしまう（必ず赤くなるワークフローを緑と答える）。
+# 下の 2 件は**算術が前にある / 後ろにある**の両方を見る（記録の並びに依存しないため）
+assert_matcher no-match "コマンド単位: 算術コマンドの中の綴りは当てない（算術が前）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: lint
+        run: |
+          (( shellcheck ))
+          bash ${SUITE_PATH}" \
+    ci_workflow_command_matches "" 'shellcheck'
+
+assert_matcher no-match "コマンド単位: 算術コマンドの中の綴りは当てない（算術が後）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: lint
+        run: |
+          bash ${SUITE_PATH}
+          (( shellcheck ))" \
+    ci_workflow_command_matches "" 'shellcheck'
 
 # **算術コマンドの中のコマンド置換も走る。** `(( … ))` 自体はコマンドを走らせないが、
 # 本文の `${DOLLAR}( … )` は**算術の評価より前に展開されるので実際に走る**
