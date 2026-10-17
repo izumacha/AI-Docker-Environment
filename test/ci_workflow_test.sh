@@ -5263,6 +5263,54 @@ jobs:
         run: |
           (( bash ${SUITE_PATH} ))"
 
+# **フロー形式（`{ … }`）で宣言されたシェルも前走査が拾う。** 鍵の位置で当てる形に
+# しただけでは `defaults: {run: {shell: sh}}` が外れ、**ワークフロー既定・ジョブ既定の
+# 5 通りすべて**で区切りの走査が「全ステップ bash」と判断して `sh` で実際に走る
+# スイートを消していた（真値 GATES・`main` wired → not-wired ＝ fail-closed の退行。
+# レビュー 10 巡目が実測）。真値は **GATES**——`sh` では `(( … ))` が入れ子の
+# 部分シェルなので `;` は本物の区切りで、スイートが走り失敗もステップへ伝わる。
+# 鍵は引用できる（`{"shell": sh}` / 単引用符）ので、そこも 1 件ずつ見る
+for flow_shell_case in \
+    "ワークフロー既定を 1 行で:defaults: {run: {shell: sh}}" \
+    "ワークフロー既定の run を 1 行で:defaults:\n  run: {shell: sh}" \
+    "フロー形式の鍵を引用:defaults:\n  run: {\"shell\": sh}"; do
+    assert_wired "フロー形式のシェル宣言を拾う（${flow_shell_case%%:*}）" "name: ci
+$(printf '%b' "${flow_shell_case#*:}")
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          (( echo a ; bash ${SUITE_PATH} ))"
+done
+
+assert_wired "フロー形式のシェル宣言を拾う（ジョブ既定を 1 行で）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    defaults: {run: {shell: sh}}
+    steps:
+      - name: subject
+        run: |
+          (( echo a ; bash ${SUITE_PATH} ))"
+
+# **釣り合う閉じが無い断片は触らない**——この門番には**ピンが 1 件も無く**、外しても
+# 1293 件すべて緑のまま 1440 形のうち 100 形の答えが反転していた（レビュー 10 巡目が実測）。
+# 既存の算術のピンはすべて 1 行で、1 行なら手前の `early` の門番が先に拾ってしまうため、
+# **行をまたいで閉じる形**でなければこの分岐に `early == 0` で到達しない。
+# 真値は GATES——bash は `))` を見つけられず**入れ子の部分シェル**へ落とすので
+# スイートが走り、失敗もステップへ伝わる
+assert_wired "行をまたいで閉じる (( は触らない（部分シェルとして走る）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          ((bash ${SUITE_PATH}
+          ) && echo ok)"
+
 # **算術展開（`$(( … ))`）は POSIX なので、シェルに関わらず「走るか」の列で伏せる。**
 # 伏せるかをステップのシェルで決めていた版は、下の 2 形で**走らないスイートを配線と
 # 答えた**（どちらも真値 NOGATE・`main` は not-wired ＝退行。レビュー 10 巡目が実測）。
