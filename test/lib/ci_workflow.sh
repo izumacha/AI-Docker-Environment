@@ -1699,7 +1699,15 @@ ci_workflow_extract() {
             # （実 bash は算術式として読むので 1 行も走らない）。
             # `mask_arith_spans()` は桁を保って空白へ潰すので、`mask_quoted()` の
             # 後ろに重ねても `substr(line, …)` の切り出しは狂わない。
-            # **`strip_arithmetic()` は使えない**（理由はあちらの docstring の (b)）
+            # **`strip_arithmetic()` は使えない**（理由はあちらの docstring の (b)）。
+            # **潰すかの判定はファイル全体で 1 つ**（この時点ではステップのシェルが
+            # 確定していないため）で、その近似は**照合の答えにも出る**（レビュー 11 巡目が
+            # 実測）——算術の中に区切りがあると、潰さない側へ倒れた時点でここが断片を割り、
+            # `((` と `))` が別の記録へ分かれてどちらも照合側の伏せ字に当たらない。
+            # 結果 `(( 1 || shellcheck … ))` の `shellcheck` が
+            # `ci_workflow_command_matches` に見え、**必ず赤くなるワークフローについて
+            # 「リンタは配線されている」と答える**（`main` も同じ答えなので退行ではないが、
+            # 無関係なジョブの `shell: pwsh` 1 つでそこへ戻る）
             masked = mask_arith_spans(line, (non_bash_shell == 0) ? "sep-bash" : "sep")
             n = 0; start = 1
             for (i = 1; i <= length(masked); i++) {
