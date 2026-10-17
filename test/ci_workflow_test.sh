@@ -8681,7 +8681,12 @@ done
 # `if true` になる——条件が続いているのに「必ず走る」と読むと、2 トークン足すだけで
 # 走らない本体を当てにする（真値 NOGATE。実測で `[ -n "$SKIP" ]` は偽なので本体は 1 度も走らない）。
 # **glob / 展開を含む `for` の一覧も読まない**（`*.nope` は nullglob 次第で 0 周になりうる。
-# 真値は GATES なので**この 1 形は fail-closed**＝安全側の境界）
+# 真値は GATES なので**この 1 形は fail-closed**＝安全側の境界）。
+# **条件が「並び」で続く形も読まない**（レビュー 2 巡目。**この差分が入れた fail-open**）
+# ——`if true; false; then` の断片も `split_commands` が `;` で切るので `if true` になり、
+# 区切りだけでは `if true; then` と見分けられない。終了状態を決めるのは後ろの `false` で
+# 本体は 1 度も走らないので（真値 NOGATE）、**次に来るのが本体を開く語か**まで見る
+# （`head_body_opens_next()`）。包んだ形は `main` では wired だった＝ここも閉じた
 for head_unreadable_case in \
     "連鎖で続く条件:if true && [ -n \"\$SKIP\" ]; then
           false
@@ -8707,7 +8712,18 @@ for head_unreadable_case in \
           fi" \
     "glob の一覧を回る for:( for f in *.nope; do
           false
-          done )"
+          done )" \
+    "; で続く条件の並び:if true; false; then
+          exit 1
+          fi" \
+    "行で続く条件の並び:if true
+          false
+          then
+          exit 1
+          fi" \
+    "包んだ ; で続く条件の並び:( if true; false; then
+          false
+          fi )"
 do
     assert_not_wired "読めない見出しは必ず走るとは読まない（${head_unreadable_case%%:*}）" "name: ci
 jobs:
@@ -8721,7 +8737,9 @@ done
 
 # **`while true` の本体・リテラル 1 語の `for`・`until false` の本体も読める**（issue #209。
 # `head_body_surely_runs()` が見る 3 つの形の残りと、飾り（`time`）を剥がす経路。
-# 真値はいずれも GATES）
+# 真値はいずれも GATES）。**本体を開く語が次の行にある形も読める**（レビュー 2 巡目。
+# `if true` 改行 `then` は普通の書き方なので、行をまたぐ形を一律に落とすと
+# 正しく配線された綴りを赤くする側へ倒れる＝`main` はここを未配線と答えていた）
 for head_readable_case in \
     "while true の本体:( while true; do
           false
@@ -8733,6 +8751,10 @@ for head_readable_case in \
           false
           done )" \
     "飾りを付けた見出し:( time if true; then
+          false
+          fi )" \
+    "本体を開く語が次の行:( if true
+          then
           false
           fi )"
 do

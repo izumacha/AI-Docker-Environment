@@ -1881,6 +1881,52 @@ ci_workflow_extract() {
             if (probe ~ /^for[[:space:]]+[A-Za-z_][A-Za-z_0-9]*[[:space:]]+in[[:space:]]+[A-Za-z0-9_.:\/=+,@%^-]+([[:space:]]+[A-Za-z0-9_.:\/=+,@%^-]+)*[[:space:]]*;?[[:space:]]*$/) { return 1 }
             return 0
         }
+        # **その見出しが本体を開く語（`then` / `do`）を返す**（issue #209 のレビュー 2 巡目）。
+        # 綴りは `head_body_opens_next()` が次の断片と突き合わせるのに使う
+        function head_body_word(t,   probe) {
+            # 飾り（`time` / `!`）は見出しの綴りに掛からないので先に剥がす
+            probe = strip_struct_wrappers(t)
+            # `if` / `elif` の本体は `then` が開く
+            if (probe ~ /^(if|elif)([[:space:]]|$)/) { return "then" }
+            # ループ（`while` / `until` / `for` / `select`）の本体は `do` が開く
+            if (probe ~ /^(while|until|for|select)([[:space:]]|$)/) { return "do" }
+            # それ以外は見出しではない
+            return ""
+        }
+        # **条件がこの断片で終わっているか**（issue #209 のレビュー 2 巡目。**この差分が
+        # 入れた fail-open**）。`split_commands` は `;` で切るので、条件が**並び**で続く
+        # `if true; false; then` の断片も `if true` になる——終了状態を決めるのは後ろの
+        # `false` なので本体は 1 度も走らず、実 `bash -e` は失敗を握り潰す（真値 NOGATE。
+        # `main` は正しく未配線。実測で head だけが wired だった）。断片の綴りだけでは
+        # 見分けられないので、**次に来るのが本体を開く語であること**まで求める。
+        # 次の断片（同じ論理行の `;` の後ろ）と、**次の論理行の先頭**の両方を見る
+        # ——`if true` 改行 `then` は普通の書き方なので、行をまたぐ形を一律に落とすと
+        # 正しく配線された綴りを赤くする側へ倒れる。どちらも読めなければ主張しない
+        function head_body_opens_next(segs, cur, limit, lines, li, nlines, head_probe,   nx, w) {
+            # この見出しが開く語（`then` / `do`）。見出しでなければ主張しない
+            w = head_body_word(head_probe)
+            if (w == "") { return 0 }
+            # 同じ論理行に次の断片があればそれを見る（`if true; then` の `then`）
+            if (cur + 1 <= limit) { nx = trim(segs[cur + 1]) }
+            # 無ければ次の論理行の先頭を見る（`if true` 改行 `then`）
+            else if (li + 1 <= nlines) { nx = trim(lines[li + 1]) }
+            # 行も断片も無い（ステップの末尾）＝構文として閉じていないので主張しない
+            else { return 0 }
+            # タブは空白へ潰してから綴りを当てる（本文のタブは `text` 側と同じ扱い）
+            gsub(/\t/, " ", nx)
+            # 本体を開く語で始まっていれば、条件はこの断片で終わっている
+            return (nx ~ ("^" w "([[:space:]]|;|$)"))
+        }
+        # **この見出しは「階層へ入ったら本体が必ず走る」と読めるか**（呼び出し側 2 か所の
+        # 条件を 1 か所に集めたもの。写すと片方だけが古くなる＝このファイルの教訓）
+        function head_body_runs_here(segs, cur, limit, lines, li, nlines, sep, head_probe) {
+            # 区切りが `&&` / `||` / `|` / `&` なら条件が続いている（読めていない）
+            if (sep != "" && sep != ";") { return 0 }
+            # 見出しの綴りが「必ず走る」と読める 3 つのどれかであること
+            if (!head_body_surely_runs(head_probe)) { return 0 }
+            # かつ、条件がこの断片で終わっていること（並びで続いていないこと）
+            return head_body_opens_next(segs, cur, limit, lines, li, nlines, head_probe)
+        }
         function open_form(t, cached_fn_form, use_cached,   ff, probe) {
             # **自分では階層を開かない飾り（`time` / `!`）の後ろも分類する。**
             # （`eval` は**落とさない**。理由は `strip_struct_wrappers()` の説明）
@@ -3362,6 +3408,13 @@ ci_workflow_extract() {
                         # 呼び出し元のシェルは終わらない（`bash <スイート> || exit 1 | cat` は
                         # `exit 1` が部分シェルで死ぬだけで並びは `cat` の成功で終わる＝
                         # 実 `bash -e` は NOGATE。印を立てると fail-open）
+                        # **この呼び出しでは共有述語の「部分シェルを開いているか」の半分は死んでいる**
+                        # （レビュー 2 巡目）——`exit_ends_shell()` が先に同じ判定で 0 を返すため。
+                        # ここで効くのは**区切りの半分**（`|` / `&` ならその脱出は子シェルで起きる）だけで、
+                        # 両方が効くのは `exit_carries_the_failure()` 側（あちらは綴りを先に調べない）。
+                        # **`exit_ends_shell()` からその判定を外して一本化しない**——あちらの
+                        # もう 1 つの呼び出し（同じ階層の最後の記録を見る枝）は共有述語を通らないので、
+                        # 外すと部分シェルの中の `exit` がその階層を終わらせたことになる（fail-open）
                         if (exit_ends_shell(rec_txt[nx]) && exit_in_caller_shell(nx, s)) { aborts = 1 }
                     }
                     # `&&` の左辺が落ちると右辺は走らず、並びの状態は左辺の失敗になる。
@@ -6073,7 +6126,7 @@ ci_workflow_extract() {
                                 # のように**条件が失敗する／続いている**形まで「必ず走る」と読んで
                                 # しまう（真値 NOGATE＝fail-open）。区切りは**並びを終える形だけ**
                                 # を認める（`;` と末尾。`|` / `&` は条件が続いている）
-                                if ((ops[j] == "" || ops[j] == ";") && head_body_surely_runs(open_probe)) {
+                                if (head_body_runs_here(seg, j, nseg, joined, i, njoined, ops[j], open_probe)) {
                                     scope_sure[scope_at[depth]] = 1
                                 }
                                 # **`while true` はループで、`if true` は違う**（issue #204）。
@@ -6095,8 +6148,8 @@ ci_workflow_extract() {
                                 # 必ず走るが、`split_commands` が `&&` で切るので「最上位で確実に走る」
                                 # とは言えない、(iii) `!` で反転（走るが証拠にしない。issue #155）。
                                 # `scope_sure` が要るのは (ii) で、(i) と分けるには見出しを読む
-                                if (!inverted && (ops[j] == "" || ops[j] == ";") \
-                                    && head_body_surely_runs(open_probe)) {
+                                if (!inverted \
+                                    && head_body_runs_here(seg, j, nseg, joined, i, njoined, ops[j], open_probe)) {
                                     scope_sure[scope_at[depth]] = 1
                                     # **`true_at` も立てる**（レビュー 1 巡目。**この差分が入れた
                                     # fail-open**）。残りのアームを死に体にする判定（`if true` の
