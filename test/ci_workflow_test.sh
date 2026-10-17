@@ -8686,7 +8686,10 @@ done
 # ——`if true; false; then` の断片も `split_commands` が `;` で切るので `if true` になり、
 # 区切りだけでは `if true; then` と見分けられない。終了状態を決めるのは後ろの `false` で
 # 本体は 1 度も走らないので（真値 NOGATE）、**次に来るのが本体を開く語か**まで見る
-# （`head_body_opens_next()`）。包んだ形は `main` では wired だった＝ここも閉じた
+# （`head_body_opens_next()`）。包んだ形は `main` では wired だった＝ここも閉じた。
+# **区切りの検査も残す**（下の 3 形。`if true && then` のような**構文エラー**の綴りでは
+# 次に来るのが本体を開く語になりうるので、区切りを見なくすると「スイートが 1 件も
+# 走らないのに配線済み」と答える＝実測で `wired` になった。真値はいずれも NOGATE）
 for head_unreadable_case in \
     "連鎖で続く条件:if true && [ -n \"\$SKIP\" ]; then
           false
@@ -8723,7 +8726,16 @@ for head_unreadable_case in \
           fi" \
     "包んだ ; で続く条件の並び:( if true; false; then
           false
-          fi )"
+          fi )" \
+    "&& の後ろに本体を開く語:if true && then
+          false
+          fi" \
+    "パイプの後ろに本体を開く語:if true | then
+          false
+          fi" \
+    "&& の後ろに do:while true && do
+          false
+          done"
 do
     assert_not_wired "読めない見出しは必ず走るとは読まない（${head_unreadable_case%%:*}）" "name: ci
 jobs:

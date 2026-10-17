@@ -1863,6 +1863,10 @@ ci_workflow_extract() {
         # （`for f in $LIST` は実測で真値 NOGATE＝本体が 1 度も走らない）。
         # **`case` は読まない**——アームが当たるかは模様の照合で、`case x in x)` のように
         # 当たると分かる形でも照合を実装することになる（issue #147 の境界）。
+        # **`case` はここへ足しても読めるようにはならない**（レビュー 2 巡目の実測）
+        # ——下の `head_body_word()` が `case` に本体を開く語を返さないので、
+        # `head_body_opens_next()` が主張しない側へ倒す。実際に `case` の枝を足す変異を
+        # 当てても 1355 件すべて緑のままで、答えは 1 つも動かなかった（二重に外れている）。
         function head_body_surely_runs(t,   probe) {
             # **飾り（`time` / `!`）を先に剥がす**（`open_form()` と同じ剥がし方。
             # 剥がさないと `time if true; then` が分類では枝 1 なのにここでは読めず、
