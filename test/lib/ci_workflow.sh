@@ -1123,11 +1123,20 @@ ci_workflow_extract() {
                 preflow = preline
                 gsub(/"/, "", preflow)
                 gsub(sprintf("%c", 39), "", preflow)
+                # **フロー写しは行をまたげる。** `defaults: {run:` の続きを次の行へ書く
+                # 形（`  {shell: sh}}`）や `run:` の値を次の行の `{…}` にする形では、
+                # 鍵と `{` が別の行に来るので上の目印に当たらない。そのまま放置すると
+                # レビュー 10 巡目で塞いだ fail-closed がこの綴りで戻る（真値 GATES・
+                # `main` wired → not-wired。レビュー 12 巡目が実測）。そこで
+                # **`{` で始まる行に `shell:` があれば宣言とみなす**——続きの行はこの形に
+                # なり、ステップ名（`- name: …`）や `env: {shell: …}` のように**鍵から
+                # 始まる行**は当たらないので、絞った目印の精度を落とさない
                 if (preno in structural \
                     && (preline ~ /^[[:space:]]*-?[[:space:]]*shell[[:space:]]*:/ \
                         || (preflow ~ /shell[[:space:]]*:/ \
                             && (preflow ~ /(^|[[:space:]])(defaults|run)[[:space:]]*:[[:space:]]*[{]/ \
-                                || preflow ~ /^[[:space:]]*-[[:space:]]*[{]/)))) {
+                                || preflow ~ /^[[:space:]]*-[[:space:]]*[{]/ \
+                                || preflow ~ /^[[:space:]]*[{]/)))) {
                     # 鍵として読める形なら値を見る。それ以外（コロンの手前に空白がある
                     # 形・値が次の行にある形）は読めないので**bash 以外が居るもの**として
                     # 扱う（潰さない側＝`main` と同じ側）
@@ -1422,7 +1431,7 @@ ci_workflow_extract() {
         # ——実際この docstring は「理由は 2 つ」のまま本体が 3 つへ増えていた）。
         #
         # 探すのは引用符を潰した写しの上（桁は同じ）で、潰すのは元の文字列
-        function mask_arith_spans(t, purpose,   probe, out, n, i, j, c, prev, depth, start, early, body, spans) {
+        function mask_arith_spans(t, purpose,   probe, out, n, i, j, c, prev, depth, start, early, body, spans, guardmax) {
             # **用途の綴りを検証して、知らない綴りでは解析ごと落とす（fail-closed）。**
             # 3 か所の正規表現（頭 `sep` / `run` / `match` と接尾辞 `-bash`）が互いに
             # 独立に当たるので、綴りを 1 文字間違えるだけで**別の伏せ方が静かに選ばれる**
@@ -1469,7 +1478,8 @@ ci_workflow_extract() {
             # `main` 98ms → 上限を外す **8474ms** → 上限あり 306ms。
             # ワークフローは信頼入力なので攻撃経路ではないが、
             # 上限は安い。超えたら以降は触らない（`main` と同じ側へ倒れる）
-            while (i <= n - 1 && spans < 100) {
+            guardmax = arith_scan_guard()
+            while (i <= n - 1 && spans < guardmax) {
                 # 2 文字が `((` でなければ次の桁へ
                 if (substr(probe, i, 2) != "((") { i++; continue }
                 # 見つけた span を 1 つ数える
@@ -1577,10 +1587,18 @@ ci_workflow_extract() {
             return out
         }
 
-        function strip_arithmetic(t,   guard) {
+        # **算術の走査に置く回数上限。** `strip_arithmetic()` と `mask_arith_spans()` が
+        # **同じしきい値**を使う（どちらも「閉じない `((` を大量に並べた 1 行が行長の
+        # 2 乗で効く」ことへの手当て）。2 か所に裸の数値を置くと片方だけ動かせてしまい、
+        # もう片方が取り残される（§6 マジックナンバーの一元管理）。呼び出しは
+        # ループの外で 1 度だけ行い、桁ごとの判定の中では局所変数を読む
+        function arith_scan_guard() { return 100 }
+
+        function strip_arithmetic(t,   guard, guardmax) {
             # 置換のたびに減るのは括弧の数だけだが、万一に備えて回数にも上限を置く
             guard = 0
-            while (guard < 100) {
+            guardmax = arith_scan_guard()
+            while (guard < guardmax) {
                 guard++
                 # まず `((` … `))` の形を丸ごと塗り潰す
                 if (match(t, /\$?\(\([^()]*\)\)/)) {

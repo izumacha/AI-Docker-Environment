@@ -5299,6 +5299,25 @@ jobs:
         run: |
           (( echo a ; bash ${SUITE_PATH} ))"
 
+# **フロー写しは行をまたげる。** `defaults: {run:` の続きを次の行へ書く形や、`run:` の値を
+# 次の行の `{…}` にする形では鍵と `{` が別の行に来るので、同じ行だけを見る目印では外れて
+# レビュー 10 巡目で塞いだ fail-closed がこの綴りで戻る（真値 GATES・`main` wired →
+# not-wired。レビュー 12 巡目が実測）。`{` で始まる行に `shell:` があれば宣言とみなす
+for split_flow_case in \
+    "鍵の続きを次の行へ:defaults: {run:\n  {shell: sh}}" \
+    "値を次の行の写しに:defaults:\n  run:\n    {shell: sh}" \
+    "続きの行で鍵を引用:defaults:\n  run:\n    {\"shell\": sh}"; do
+    assert_wired "行をまたぐフロー写しのシェル宣言を拾う（${split_flow_case%%:*}）" "name: ci
+$(printf '%b' "${split_flow_case#*:}")
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        run: |
+          (( echo a ; bash ${SUITE_PATH} ))"
+done
+
 # **フロー形式の目印は「シェルを運べる鍵の値」に絞る。** `{` を含むことだけを目印に
 # した版は、ステップ名や `env:` / `with:` のようなシェルと無関係な鍵まで拾って
 # 伏せ字をファイル全体で止め、**走らない算術の中身を配線と答えた**（真値 NOGATE を
