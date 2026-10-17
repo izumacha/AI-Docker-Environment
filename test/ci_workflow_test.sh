@@ -4908,11 +4908,14 @@ done
 # ついて誤った答えを返す。**下はすべて真値 NOGATE**（番兵なしの実 `bash -e` で実測）。
 # **`||` を含む 2 形が要点**で、算術の中の `||` は演算子なので並びの区切りとして切らない
 # ——切ると断片が `(( bash <スイート>` に割れ、`))` を持たないので伏せ字に当たらない。
-# **ただし切らないのは「ワークフローが `shell:` を 1 つも書いていないとき」に限る**
-# （レビュー 5 巡目）。`(( … ))` が算術コマンドなのは bash 固有で、`sh` では入れ子の
-# 部分シェルになり中のコマンドが実際に走るのに、区切りを切る時点ではステップの
-# シェルが確定していない（`flush_step()` が同じ理由で `errexit` を -1 で持ち越す）。
-# `shell:` が 1 つでもあれば潰さず `main` と同じ側（fail-open）へ倒す——下に
+# **ただし切らないのは「ファイル全体に bash 以外のシェルの宣言が 1 つも無いとき」に限る**
+# （レビュー 5 巡目。**材料は「`shell:` の宣言があるか」ではない**——それだと極性が逆で、
+# `shell: bash` の明示でちょうど潰さなくなり #206 の fail-open がそこだけ生き残る＝
+# レビュー 7 巡目が実測。下の `shell: bash` の 2 形がその向きを固定している）。
+# `(( … ))` が算術コマンドなのは bash 固有で、`sh` では入れ子の部分シェルになり中の
+# コマンドが実際に走るのに、区切りを切る時点ではステップのシェルが確定していない
+# （`flush_step()` が同じ理由で `errexit` を -1 で持ち越す）。bash 以外（または読めない
+# 宣言）が 1 つでもあれば潰さず `main` と同じ側（fail-open）へ倒す——下に
 # `shell: sh` / `shell: bash` / ジョブの既定の対照がある
 for arith_body_case in \
     "算術の中のスイート:(( bash ${SUITE_PATH} ))" \
@@ -4977,8 +4980,9 @@ jobs:
 # **区切りを切る側も `shell:` を見る**（レビュー 5 巡目 / 6 巡目）。`flush_job()` は
 # ステップのシェルを確定済みだが、**区切りを切る時点では未確定**（ジョブ既定の `shell:` は
 # `steps:` の後ろにも書ける。`flush_step()` が同じ理由で `errexit` / `pipefail` を -1 で
-# 持ち越す）。そこで区切りの走査は**ファイル全体に `shell:` の宣言が 1 つも無いか**で切り、
-# 1 つでもあれば算術を潰さない。**下の 2 形がその門番を両方向で観測する**（どちらも
+# 持ち越す）。そこで区切りの走査は**ファイル全体に bash 以外のシェルの宣言（または
+# 読めない宣言）が 1 つも無いか**で切り、1 つでもあれば算術を潰さない
+# （「`shell:` の宣言があるか」で切ると極性が逆になる。上の `shell: bash` の項を参照）。**下の 2 形がその門番を両方向で観測する**（どちらも
 # `shell: sh` ＝実 `sh -e` の真値で測った）——潰すと `;` が区切りから消えて
 # **実際に走るスイートが見えなくなり**（fail-closed）、パイプも消えて
 # **握り潰されたスイートを配線と答える**（fail-open）
@@ -5294,6 +5298,32 @@ jobs:
       - name: subject
         run: |
           (( echo a ; bash ${SUITE_PATH} ))"
+
+# **フロー形式の目印は「シェルを運べる鍵の値」に絞る。** `{` を含むことだけを目印に
+# した版は、ステップ名や `env:` / `with:` のようなシェルと無関係な鍵まで拾って
+# 伏せ字をファイル全体で止め、**走らない算術の中身を配線と答えた**（真値 NOGATE を
+# wired ＝ #206 がまさに塞いでいる fail-open。レビュー 10 巡目の 2 巡目が実測。
+# `main` も同じ誤りなので退行ではないが、ステップ名を 1 つ変えるだけで手当てが
+# 消える形が戻る）。下の 3 形はいずれも `main` が wired と答える
+for unrelated_brace_case in \
+    "ステップ名の中のフロー写し:      - name: \"render {shell: x} tpl\"
+        run: echo p" \
+    "env の値:      - name: other
+        env: {shell: bash}
+        run: echo p" \
+    "with の入力:      - name: other
+        with: {shell: pwsh}
+        run: echo p"; do
+    assert_not_wired "シェルと無関係な {shell:} で伏せ字を止めない（${unrelated_brace_case%%:*}）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+${unrelated_brace_case#*:}
+      - name: subject
+        run: |
+          (( bash ${SUITE_PATH} ))"
+done
 
 # **釣り合う閉じが無い断片は触らない**——この門番には**ピンが 1 件も無く**、外しても
 # 1293 件すべて緑のまま 1440 形のうち 100 形の答えが反転していた（レビュー 10 巡目が実測）。
@@ -8621,6 +8651,42 @@ jobs:
     steps:
       - name: subject
         run: bash vendor/${SUITE_PATH}"
+
+# --- 記録の列の指定（綴り誤りを静かに通さないこと） ----------------------------------
+
+# **`ci_workflow_gating_commands` の第 3 引数の綴り誤りを fail-closed に落とす。**
+# 下の照合は「`match` でなければ走るか用の列」なので、検証が無いと `MATCH` ・ `match ` ・
+# `match_text` のような綴りが**静かに逆の列を選ぶ**（綴りを引く照会が算術展開を潰した
+# 本文を読み、`nproc` / `capbnd` を「無い」と答える）。awk 側の `purpose` を同じ理由で
+# 検証しているので、こちらも揃えてある——**その検証を観測するのがこの検査**で、
+# 無いと検証を外しても全ピン緑のまま通る（実測）
+assert_column_selector() {
+    # 合成ワークフローを書き出して読み込む
+    local workflow="${TMP_DIR}/selector.yml"
+    printf '%s\n' "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: a
+        run: bash ${SUITE_PATH}" > "${workflow}"
+    ci_workflow_load "${workflow}" "${TMP_DIR}/selector-commands" \
+        || { report_fail "$1" "ワークフローを読み込めませんでした"; return; }
+    # 期待する成否（`ok` なら成功、`ng` なら非ゼロ）と実際を比べる
+    local actual="ok"
+    ci_workflow_gating_commands "" "" "$3" >/dev/null 2>&1 || actual="ng"
+    if [ "${actual}" = "$2" ]; then
+        report 0 "$1"
+    else
+        report_fail "$1" "期待 [$2] に対して実際は [${actual}]"
+    fi
+}
+
+assert_column_selector "列の指定が空なら通る" ok ""
+assert_column_selector "列の指定が match なら通る" ok "match"
+assert_column_selector "列の指定の大文字違いは落とす" ng "MATCH"
+assert_column_selector "列の指定の後ろの空白は落とす" ng "match "
+assert_column_selector "知らない列の指定は落とす" ng "match_text"
 
 # --- ジョブ名の読み出し（渡すジョブ名の綴りを確かめるため） --------------------------
 

@@ -1106,10 +1106,16 @@ ci_workflow_extract() {
                 # 「全ステップ bash」と判断して `sh` で実際に走るスイートを消していた
                 # （真値 GATES・`main` wired → not-wired ＝ fail-closed の退行。
                 # レビュー 10 巡目が実測）。中身は読めないので下の「読めない」側へ倒す。
-                # **目印は `{` を含むこと**——鍵の位置の当て方（`- name: "… shell: …"` を
-                # 拾わない）を保ったまま、フロー形式だけを足せる綴りがこれしか無い
-                # （`{` を含むステップ名はごく稀で、当たっても fail-closed 側＝
-                # `main` と同じ側へ倒れるだけ）
+                # **目印は「シェルを運べる鍵のフロー値」**——`defaults:` か `run:` の値が
+                # `{` で始まる形、またはフロー形式のステップ（`- {`）に限る。
+                # **`{` を含むだけでは広すぎる**（レビュー 10 巡目の 2 巡目が実測）:
+                # `- name: "render {shell: x} tpl"` のようなステップ名や
+                # `env: {shell: bash}` ・ `with: {shell: pwsh}` のような**シェルとは
+                # 無関係な鍵**が当たって伏せ字がファイル全体で止まり、**走らない算術の
+                # 中身が配線と読まれる＝ fail-open**（真値 NOGATE を wired）。
+                # **これは「`main` と同じ側だから軽い」話ではない**——#206 がまさに
+                # 塞いでいる向きで、ステップ名を 1 つ変えるだけで手当てが消える形が
+                # 戻る（鍵の位置で当てるようにした理由そのもの）
                 # フロー形式の鍵は引用できる（`{"shell": sh}` / 単引用符も同じ）ので、
                 # 目印を探す前に引用符だけ落とした写しで見る。**この awk プログラム全体が
                 # bash の単引用符の中にある**ため単引用符をそのまま書けず、文字コードから
@@ -1119,7 +1125,9 @@ ci_workflow_extract() {
                 gsub(sprintf("%c", 39), "", preflow)
                 if (preno in structural \
                     && (preline ~ /^[[:space:]]*-?[[:space:]]*shell[[:space:]]*:/ \
-                        || (index(preflow, "{") > 0 && preflow ~ /shell[[:space:]]*:/))) {
+                        || (preflow ~ /shell[[:space:]]*:/ \
+                            && (preflow ~ /(^|[[:space:]])(defaults|run)[[:space:]]*:[[:space:]]*[{]/ \
+                                || preflow ~ /^[[:space:]]*-[[:space:]]*[{]/)))) {
                     # 鍵として読める形なら値を見る。それ以外（コロンの手前に空白がある
                     # 形・値が次の行にある形）は読めないので**bash 以外が居るもの**として
                     # 扱う（潰さない側＝`main` と同じ側）
@@ -6773,6 +6781,18 @@ ci_workflow_gating_commands() {
     # 同じ記録に対して照会が 2 種類あり、要るものが逆を向くため列を選ばせる
     # （理由は `mask_arith_spans` の呼び出し側のコメントが正本）
     local want_text="${3-}"
+    # **知らない綴りでは落とす（fail-closed）。** 下の照合は「`match` でなければ
+    # 走るか用の列」なので、`MATCH` ・ `match ` ・ `match_text` のような綴り誤りが
+    # **静かに逆の列を選ぶ**（綴りを引く照会が算術展開を潰した本文を読み、
+    # `nproc` / `capbnd` を「無い」と答える）。awk 側の `purpose` を同じ理由で
+    # 検証しているので、こちらも揃える（レビュー 10 巡目の指摘）
+    case "${want_text}" in
+        "" | match) ;;
+        *)
+            printf 'ci_workflow: ci_workflow_gating_commands: 不明な列の指定: %s\n' "${want_text}" >&2
+            return 1
+            ;;
+    esac
     # 走査中の 1 行・`ジョブ名#ステップ番号`・ゲートに効くかの印・制御構造の深さ・
     # 2 通りの本文（走るか用 / 綴り用）・呼び出し側へ返す本文
     local record key gate depth run_text match_text text
