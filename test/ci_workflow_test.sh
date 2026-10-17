@@ -5263,6 +5263,34 @@ jobs:
         run: |
           (( bash ${SUITE_PATH} ))"
 
+# **算術展開（`$(( … ))`）は POSIX なので、シェルに関わらず「走るか」の列で伏せる。**
+# 伏せるかをステップのシェルで決めていた版は、下の 2 形で**走らないスイートを配線と
+# 答えた**（どちらも真値 NOGATE・`main` は not-wired ＝退行。レビュー 10 巡目が実測）。
+# 1 形目は `shell: sh` のステップ（dash でも `$(( … ))` は算術で中のコマンドは走らない）、
+# 2 形目は**ファイルのどこかに読めない `shell :` があるだけ**で全ステップに効く形。
+# 算術**コマンド**のほうは引き続きシェルで分ける（すぐ下の `shell: sh` の pin が逆向きを固定）
+assert_not_wired "算術展開は sh でも実行されない（shell: sh のステップ）" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: subject
+        shell: sh
+        run: |
+          x=${DOLLAR}(( bash ${SUITE_PATH} || true ))"
+
+assert_not_wired "読めないシェル宣言があっても算術展開は伏せる" "name: ci
+jobs:
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: other
+        shell : sh
+        run: echo other
+      - name: subject
+        run: |
+          x=${DOLLAR}(( bash ${SUITE_PATH} || true ))"
+
 # **`shell:` の点検は鍵の位置で当てる。** 構造行では引用符が落ちるので、行のどこかに
 # `shell:` という綴りがあれば拾う形にしていると**ステップ名の中の文字列**が当たり、
 # 「bash 以外のシェルが居る」と誤読してファイル全体の算術の伏せ字が止まる
